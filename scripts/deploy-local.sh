@@ -104,32 +104,70 @@ sync_runtime_tree() {
 sync_runtime_tree "$PULSE_DST"
 sync_runtime_tree "$LEGACY_DST"
 
-# Smoothly upgrade settings.json to single-process Node agy-pulse.js while preserving flags
+# Hot-session zero-restart deduplication shim: replace legacy statusline-combined.sh
+# (if present) with a single-process exec forwarder to agy-pulse.js so running agy
+# sessions stop invoking agy-statusline/statusline.sh on the very next refresh.
+if [ -e "$AGY_DIR/statusline-combined.sh" ] || [ -L "$AGY_DIR/statusline-combined.sh" ]; then
+  rm -f "$AGY_DIR/statusline-combined.sh"
+  cat > "$AGY_DIR/statusline-combined.sh" <<'EOF'
+#!/usr/bin/env bash
+exec "${AGY_STATUSLINE_NODE:-/usr/bin/node}" "${AGY_PULSE_DATA_DIR:-${AGY_HUD_DATA_DIR:-$HOME/.gemini/antigravity-cli}}/agy-pulse-runtime/runtime/bin/agy-pulse.js" "$@"
+EOF
+  chmod +x "$AGY_DIR/statusline-combined.sh"
+fi
+
+# Smoothly upgrade settings.json (and any secondary Gemini settings.json with an
+# existing statusLine) to single-process Node agy-pulse.js while preserving flags.
 node -e '
   const fs = require("fs");
   const path = require("path");
-  const settingsPath = path.join(process.argv[1], "settings.json");
-  const entryPath = path.join(process.argv[2], "runtime", "bin", "agy-pulse.js");
+  const agyDir = process.argv[1];
+  const pulseDst = process.argv[2];
+  const homeDir = process.env.HOME || "";
+  const primarySettingsPath = path.join(agyDir, "settings.json");
+  const entryPath = path.join(pulseDst, "runtime", "bin", "agy-pulse.js");
   const targetCommand = `"${process.execPath}" "${entryPath}"`;
 
-  let settings = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    } catch {
-      settings = {};
+  function upgradeSettings(settingsPath, createIfMissing) {
+    if (!createIfMissing && !fs.existsSync(settingsPath)) return;
+    let settings = {};
+    if (fs.existsSync(settingsPath)) {
+      try {
+        settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+      } catch {
+        if (!createIfMissing) return;
+        settings = {};
+      }
+    }
+    if (!createIfMissing && (!settings || typeof settings !== "object" || !settings.statusLine)) {
+      return;
+    }
+    const existing = (settings.statusLine && typeof settings.statusLine === "object")
+      ? settings.statusLine
+      : {};
+    settings.statusLine = {
+      ...existing,
+      type: "command",
+      command: targetCommand,
+    };
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
+  }
+
+  upgradeSettings(primarySettingsPath, true);
+
+  const secondaryCandidates = homeDir
+    ? [
+        path.join(homeDir, ".gemini", "config", "settings.json"),
+        path.join(homeDir, ".gemini", "settings.json"),
+      ]
+    : [];
+  const primaryResolved = path.resolve(primarySettingsPath);
+  for (const candidate of secondaryCandidates) {
+    if (path.resolve(candidate) !== primaryResolved) {
+      upgradeSettings(candidate, false);
     }
   }
-  const existing = (settings.statusLine && typeof settings.statusLine === "object")
-    ? settings.statusLine
-    : {};
-  settings.statusLine = {
-    ...existing,
-    type: "command",
-    command: targetCommand,
-  };
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
 ' "$AGY_DIR" "$PULSE_DST"
 
 # Sync plugin skill under ~/.gemini/config/plugins/

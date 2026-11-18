@@ -124,12 +124,55 @@ function resolveHudScriptPath(baseDir) {
   return pulseEntry;
 }
 
+function buildCombinedShimContents(hudScriptPath, nodePath = process.execPath || '/usr/bin/node') {
+  return [
+    '#!/usr/bin/env bash',
+    `exec "\${AGY_STATUSLINE_NODE:-${nodePath}}" "${hudScriptPath}" "$@"`,
+    '',
+  ].join('\n');
+}
+
+function updateLegacyCombinedShim(
+  rootDir,
+  hudScriptPath,
+  nodePath = process.execPath || '/usr/bin/node',
+  platform = process.platform
+) {
+  if (!rootDir) return null;
+  const shimPath = path.join(rootDir, 'statusline-combined.sh');
+  let stat;
+  try {
+    stat = fs.lstatSync(shimPath);
+  } catch {
+    return null;
+  }
+
+  const contents = buildCombinedShimContents(hudScriptPath, nodePath);
+  let existing = null;
+  try {
+    if (stat.isSymbolicLink()) {
+      fs.unlinkSync(shimPath);
+    } else {
+      existing = fs.readFileSync(shimPath, 'utf8');
+    }
+  } catch {}
+
+  if (existing !== contents) {
+    fs.writeFileSync(shimPath, contents, 'utf8');
+  }
+  if (platform !== 'win32') {
+    try { fs.chmodSync(shimPath, 0o755); } catch {}
+  }
+  return shimPath;
+}
+
 function configureStatusLine(baseDir = __dirname, options = {}) {
   const settingsPath = options.settingsPath || getSettingsPath();
   const hudScriptPath = resolveHudScriptPath(baseDir);
 
   writeCmdShim(hudScriptPath);
   ensureWindowsShShim();
+  updateLegacyCombinedShim(path.dirname(settingsPath), hudScriptPath);
 
   const targetCommand = createStatusLineCommand(hudScriptPath);
 
@@ -162,8 +205,10 @@ function configureStatusLine(baseDir = __dirname, options = {}) {
 module.exports = {
   buildCmdShimContents,
   buildShShimContents,
+  buildCombinedShimContents,
   writeCmdShim,
   ensureWindowsShShim,
+  updateLegacyCombinedShim,
   getWindowsAgyBinDirs,
   createStatusLineCommand,
   resolveHudScriptPath,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import statuslineModule from '../../runtime/statusline-installer.js';
 
@@ -243,5 +244,132 @@ test('configureStatusLine preserves enabled and stack_with_default and prefers a
     assert.equal(updated.statusLine.command, res.command);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('configureStatusLine overwrites legacy statusline-combined.sh with single-process exec shim', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-combined-shim-'));
+  try {
+    const baseDir = path.join(tmp, 'agy-pulse-runtime', 'runtime');
+    fs.mkdirSync(path.join(baseDir, 'bin'), { recursive: true });
+    const entryPath = path.join(baseDir, 'bin', 'agy-pulse.js');
+    fs.writeFileSync(entryPath, '// entry');
+    const settingsPath = path.join(tmp, 'settings.json');
+    const combinedPath = path.join(tmp, 'statusline-combined.sh');
+    fs.writeFileSync(
+      combinedPath,
+      '#!/usr/bin/env bash\n"$PY_BIN" "$AGY_DIR/agy-statusline/statusline.sh"\n',
+      { mode: 0o644 }
+    );
+
+    statuslineModule.configureStatusLine(baseDir, { settingsPath });
+
+    const shim = fs.readFileSync(combinedPath, 'utf8');
+    assert.match(shim, /^#!\/usr\/bin\/env bash\nexec /);
+    assert.ok(shim.includes(entryPath));
+    assert.doesNotMatch(shim, /agy-statusline\/statusline\.sh/);
+    if (process.platform !== 'win32') {
+      const mode = fs.statSync(combinedPath).mode & 0o777;
+      assert.equal(mode & 0o111, 0o111);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('deploy-local.sh replaces legacy statusline-combined.sh, upgrades secondary settings, and emits single context line', { skip: process.platform === 'win32' }, () => {
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-deploy-home-'));
+  try {
+    const agyDir = path.join(tmpHome, '.gemini', 'antigravity-cli');
+    const configDir = path.join(tmpHome, '.gemini', 'config');
+    fs.mkdirSync(agyDir, { recursive: true });
+    fs.mkdirSync(configDir, { recursive: true });
+
+    const combinedPath = path.join(agyDir, 'statusline-combined.sh');
+    fs.writeFileSync(
+      combinedPath,
+      '#!/usr/bin/env bash\n"$NODE_BIN" "$AGY_DIR/agy-hud-runtime/runtime/bin/agy-hud.js"\n"$PY_BIN" "$AGY_DIR/agy-statusline/statusline.sh"\n',
+      { mode: 0o755 }
+    );
+
+    const secondaryWithStatusLine = path.join(configDir, 'settings.json');
+    fs.writeFileSync(secondaryWithStatusLine, JSON.stringify({
+      theme: 'dark',
+      statusLine: {
+        type: 'command',
+        command: `"/bin/bash" "${combinedPath}"`,
+        enabled: true,
+      },
+    }));
+
+    const secondaryWithoutStatusLine = path.join(tmpHome, '.gemini', 'settings.json');
+    fs.writeFileSync(secondaryWithoutStatusLine, JSON.stringify({ other: 123 }));
+
+    const cleanEnv = {
+      ...process.env,
+      HOME: tmpHome,
+      USERPROFILE: tmpHome,
+      XDG_CONFIG_HOME: '',
+      AGY_PULSE_DATA_DIR: '',
+      AGY_HUD_DATA_DIR: '',
+    };
+
+    const deployRes = spawnSync('/bin/bash', [path.join(projectRoot, 'scripts', 'deploy-local.sh')], {
+      cwd: projectRoot,
+      env: cleanEnv,
+      encoding: 'utf8',
+    });
+    assert.equal(deployRes.status, 0, deployRes.stderr || deployRes.stdout);
+
+    const shim = fs.readFileSync(combinedPath, 'utf8');
+    assert.match(shim, /^#!\/usr\/bin\/env bash\nexec /);
+    assert.match(shim, /agy-pulse-runtime\/runtime\/bin\/agy-pulse\.js/);
+    assert.doesNotMatch(shim, /agy-statusline\/statusline\.sh/);
+    assert.equal(fs.statSync(combinedPath).mode & 0o111, 0o111);
+
+    const updatedSecondary = JSON.parse(fs.readFileSync(secondaryWithStatusLine, 'utf8'));
+    assert.equal(updatedSecondary.theme, 'dark');
+    assert.equal(updatedSecondary.statusLine.enabled, true);
+    assert.match(updatedSecondary.statusLine.command, /agy-pulse-runtime\/runtime\/bin\/agy-pulse\.js/);
+
+    const untouchedSecondary = JSON.parse(fs.readFileSync(secondaryWithoutStatusLine, 'utf8'));
+    assert.equal(untouchedSecondary.statusLine, undefined);
+
+    const payload = JSON.stringify({
+      cwd: projectRoot,
+      model: { display_name: 'Gemini 4 Carbon', effort: 'High' },
+      context_window: {
+        context_window_size: 512000,
+        total_output_tokens: 1200,
+        current_usage: {
+          input_tokens: 10000,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 9000,
+          output_tokens: 1200,
+        },
+      },
+      cost: { total_cost_usd: 0.12 },
+    });
+
+    const runRes = spawnSync('/bin/bash', [combinedPath], {
+      cwd: projectRoot,
+      env: {
+        ...cleanEnv,
+        AGY_STATUSLINE_NODE: process.execPath,
+      },
+      input: payload,
+      encoding: 'utf8',
+    });
+    assert.equal(runRes.status, 0, runRes.stderr || runRes.stdout);
+
+    const plain = runRes.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+    const monitorLines = plain
+      .split(/\r?\n/)
+      .filter(line => /^\s*[◈*] .*?(?:上下文|Ctx)(?=\s|$)/.test(line));
+    assert.equal(monitorLines.length, 1, `Expected 1 context monitor line, got:\n${plain}`);
+    const contextMatches = plain.match(/(?:上下文|Ctx)(?=\s|$)/g) || [];
+    assert.equal(contextMatches.length, 1, `Expected 1 context label occurrence, got:\n${plain}`);
+  } finally {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
   }
 });
