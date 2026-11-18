@@ -8,7 +8,9 @@ const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
-const zipPath = path.join(projectRoot, 'agy-hud.zip');
+const zipPath = fs.existsSync(path.join(projectRoot, 'agy-pulse.zip'))
+  ? path.join(projectRoot, 'agy-pulse.zip')
+  : path.join(projectRoot, 'agy-hud.zip');
 const agyBin = process.env.AGY_BIN || 'agy';
 const currentHome = process.argv.includes('--current-home');
 const timeoutArg = process.argv.find(arg => arg.startsWith('--observe-timeout-ms='));
@@ -28,8 +30,11 @@ function detectHudRender(...values) {
       const hasBranch = /(?:⎇||\[B\])\s*\S+/.test(plain);
       const hasContext = /(?:⛁|󱔐|\[C\])\s*\d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]?/i.test(plain);
       const hasTokenBreakdown = /(?:⚿|󰚩|\[Tk\]|Tokens)\s*(?:Tokens\s+)?\d+(?:\.\d+)?[kM]?\s*(?:↑|\^|\(in:)/i.test(plain);
+      const hasLegacyHud = hasBranch && hasContext && hasTokenBreakdown;
 
-      return hasBranch && hasContext && hasTokenBreakdown;
+      const hasContextMonitor = /(?:◈|\*)\s+.+?\s+·\s+(?:Ctx|上下文)\s+\S+\s+\d+(?:\.\d+)?%/.test(plain);
+      const hasStatusOrQuota = /(?:Quota\s+(?:unavailable|loading)|配额|Free|Pro|Ultra|Enterprise|Google|Claude|│|\|)/i.test(plain);
+      return hasLegacyHud || (hasContextMonitor && hasStatusOrQuota);
     });
 }
 
@@ -159,7 +164,7 @@ function run(command, args, options = {}) {
 
 function startZipServer() {
   const server = http.createServer((req, res) => {
-    if (req.url !== '/agy-hud.zip') {
+    if (req.url !== '/agy-pulse.zip' && req.url !== '/agy-hud.zip') {
       res.writeHead(404);
       res.end();
       return;
@@ -176,7 +181,7 @@ function startZipServer() {
     server.listen(0, () => {
       resolve({
         server,
-        url: `http://localhost:${server.address().port}/agy-hud.zip`,
+        url: `http://localhost:${server.address().port}/${path.basename(zipPath)}`,
       });
     });
   });
@@ -213,7 +218,9 @@ function readInstallState(env) {
   const base = path.join(home, '.gemini', 'antigravity-cli');
   const settingsPath = path.join(base, 'settings.json');
   const pluginDirs = getPluginDirs(env);
-  const runtimeDir = path.join(base, 'agy-hud-runtime');
+  const pulseRuntimeDir = path.join(base, 'agy-pulse-runtime');
+  const legacyRuntimeDir = path.join(base, 'agy-hud-runtime');
+  const runtimeDir = fs.existsSync(pulseRuntimeDir) ? pulseRuntimeDir : legacyRuntimeDir;
   let settings = null;
   try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch { /* missing */ }
   return {
@@ -223,22 +230,27 @@ function readInstallState(env) {
     pluginExists: pluginDirs.some(pluginDir => fs.existsSync(pluginDir)),
     pluginDirs: pluginDirs.filter(pluginDir => fs.existsSync(pluginDir)),
     runtimeExists: fs.existsSync(runtimeDir),
-    runtimeHudExists: fs.existsSync(path.join(runtimeDir, 'runtime', 'bin', 'agy-hud.js')),
+    runtimeHudExists:
+      fs.existsSync(path.join(runtimeDir, 'runtime', 'bin', 'agy-pulse.js')) ||
+      fs.existsSync(path.join(runtimeDir, 'runtime', 'bin', 'agy-hud.js')),
   };
 }
 
 function getPluginDirs(env) {
   const home = env.HOME || env.USERPROFILE || os.homedir();
   const base = path.join(home, '.gemini', 'antigravity-cli');
-  const dirs = [
-    path.join(home, '.gemini', 'config', 'plugins', 'agy-hud'),
-    path.join(base, 'plugins', 'agy-hud'),
-  ];
-  if (env.XDG_CONFIG_HOME) {
-    dirs.push(path.join(env.XDG_CONFIG_HOME, 'gemini', 'plugins', 'agy-hud'));
-  }
-  if (env.APPDATA) {
-    dirs.push(path.join(env.APPDATA, 'gemini', 'plugins', 'agy-hud'));
+  const dirs = [];
+  for (const name of ['agy-pulse', 'agy-hud']) {
+    dirs.push(
+      path.join(home, '.gemini', 'config', 'plugins', name),
+      path.join(base, 'plugins', name),
+    );
+    if (env.XDG_CONFIG_HOME) {
+      dirs.push(path.join(env.XDG_CONFIG_HOME, 'gemini', 'plugins', name));
+    }
+    if (env.APPDATA) {
+      dirs.push(path.join(env.APPDATA, 'gemini', 'plugins', name));
+    }
   }
   return [...new Set(dirs.map(dir => path.resolve(dir)))];
 }
@@ -394,7 +406,7 @@ async function main() {
     const afterObserve = readInstallState(env);
     const hudVisible = detectHudRender(observedRaw, observedScreen, observedPlain);
     const streamHudPresent = detectHudRender(observedRaw, observedPlain);
-    const statusLineReady = Boolean(afterObserve.statusLine && /agy-hud/i.test(String(afterObserve.statusLine.command || '')));
+    const statusLineReady = Boolean(afterObserve.statusLine && /agy-(?:pulse|hud)/i.test(String(afterObserve.statusLine.command || '')));
     const runtimeReady = Boolean(afterObserve.runtimeHudExists);
     const staleCleaned = stalePresentBeforeBootstrap ? !fs.existsSync(planted) : true;
     const displayReady = hudVisible && statusLineReady && runtimeReady && staleCleaned;

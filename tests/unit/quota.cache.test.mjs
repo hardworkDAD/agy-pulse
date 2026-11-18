@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   quotaModule,
@@ -439,6 +440,63 @@ describe('quota / cache', () => {
         const result = readCacheFallback();
         assert.ok(result);
         assert.deepEqual(result.data.providerQuota, payload.providerQuota);
+      } finally {
+        if (previousCache === null) fs.rmSync(CACHE_PATH, { force: true });
+        else fs.writeFileSync(CACHE_PATH, previousCache);
+      }
+    });
+  });
+
+  describe('dynamic cache path and refresh-failure preservation', () => {
+    test('dynamically resolves cache path via AGY_PULSE_DATA_DIR and options.roots', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-cache-dynamic-'));
+      const prevPulse = process.env.AGY_PULSE_DATA_DIR;
+      try {
+        process.env.AGY_PULSE_DATA_DIR = tmp;
+        const sample = [{ id: 'gemini-4-carbon-high', remainingFraction: 0.7, resetTime: null }];
+        writeCache(sample, 'dynamic-tok');
+
+        const dynamicFile = path.join(tmp, 'agy-hud-quota-cache.json');
+        assert.equal(fs.existsSync(dynamicFile), true);
+        assert.equal(readCache('dynamic-tok')?.[0]?.id, 'gemini-4-carbon-high');
+
+        const rootOverrideDir = path.join(tmp, 'override-root');
+        fs.mkdirSync(rootOverrideDir, { recursive: true });
+        writeCache([{ id: 'm-root', remainingFraction: 0.9, resetTime: null }], 'root-tok', null, null, null, {
+          roots: [rootOverrideDir],
+        });
+        assert.equal(readCache('root-tok', { roots: [rootOverrideDir] })?.[0]?.id, 'm-root');
+      } finally {
+        if (prevPulse === undefined) delete process.env.AGY_PULSE_DATA_DIR;
+        else process.env.AGY_PULSE_DATA_DIR = prevPulse;
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('recordRefreshAttempt preserves existing valid cache data and records failure timestamp', () => {
+      const { recordRefreshAttempt, readCachePayload, readCacheLastRefreshAttempt } = quotaModule;
+      const previousCache = fs.existsSync(CACHE_PATH) ? fs.readFileSync(CACHE_PATH, 'utf8') : null;
+      try {
+        fs.rmSync(CACHE_PATH, { force: true });
+        const validData = [{ id: 'gemini-4-carbon-high', remainingFraction: 0.85, resetTime: null }];
+        writeCache(validData, 'tok-valid', 'Google AI Pro', 'u@example.com');
+
+        const updated = recordRefreshAttempt('tok-valid', 'quota_fetch_failed');
+        assert.equal(updated.data.length, 1);
+        assert.equal(updated.data[0].id, 'gemini-4-carbon-high');
+        assert.ok(updated.lastRefreshAttempt > 0);
+        assert.ok(readCacheLastRefreshAttempt() >= updated.lastRefreshAttempt);
+
+        // writeCache([], ...) must also not wipe valid cached data for the same identity
+        writeCache([], 'tok-valid');
+        assert.equal(readCachePayload('tok-valid')?.data?.length, 1);
+
+        // When no valid cache exists, recordRefreshAttempt records unavailableReason marker
+        fs.rmSync(CACHE_PATH, { force: true });
+        const marker = recordRefreshAttempt('tok-empty', 'quota_fetch_failed');
+        assert.equal(marker.data.length, 0);
+        assert.equal(marker.unavailableReason, 'quota_fetch_failed');
+        assert.ok(readCacheLastRefreshAttempt() >= marker.lastRefreshAttempt);
       } finally {
         if (previousCache === null) fs.rmSync(CACHE_PATH, { force: true });
         else fs.writeFileSync(CACHE_PATH, previousCache);

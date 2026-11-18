@@ -100,7 +100,7 @@ describe('quota / getQuota orchestrator', () => {
 
         const quota = await getQuota({
           fast: true,
-          platform: 'linux',
+          platform: 'darwin',
           tokenReader: () => ({
             accessToken: 'expired-token',
             expiry: '2000-01-01T00:00:00.000Z',
@@ -354,6 +354,125 @@ describe('quota / getQuota orchestrator', () => {
 
         assert.equal(refreshes, 1, 'should trigger background refresh due to token rotation');
         assert.deepEqual(result, payload.data, 'should fall back and return the cached data to avoid Quota loading flicker');
+      } finally {
+        if (previousCache === null) fs.rmSync(CACHE_PATH, { force: true });
+        else fs.writeFileSync(CACHE_PATH, previousCache);
+      }
+    });
+  });
+
+  describe('Linux fast path and failed-refresh storm prevention', () => {
+    test('fast path passes skipLinuxKeyring: true on linux', async () => {
+      const previousCache = fs.existsSync(CACHE_PATH) ? fs.readFileSync(CACHE_PATH, 'utf8') : null;
+      try {
+        fs.rmSync(CACHE_PATH, { force: true });
+        let receivedOpts = null;
+        await getQuota({
+          fast: true,
+          platform: 'linux',
+          tokenReader: (opts) => {
+            receivedOpts = opts;
+            return null;
+          },
+          backgroundRefresh: () => {},
+        });
+        assert.equal(receivedOpts?.skipLinuxKeyring, true);
+        assert.equal(receivedOpts?.skipWindowsCredential, false);
+      } finally {
+        if (previousCache === null) fs.rmSync(CACHE_PATH, { force: true });
+        else fs.writeFileSync(CACHE_PATH, previousCache);
+      }
+    });
+
+    test('fast path wakes credential refresh on linux when no token is visible', async () => {
+      const previousCache = fs.existsSync(CACHE_PATH) ? fs.readFileSync(CACHE_PATH, 'utf8') : null;
+      try {
+        fs.rmSync(CACHE_PATH, { force: true });
+        let refreshes = 0;
+
+        const quota = await getQuota({
+          fast: true,
+          platform: 'linux',
+          tokenReader: () => null,
+          backgroundRefresh: () => { refreshes += 1; },
+          windowsCredentialRefreshDebounceMs: 0,
+        });
+
+        assert.equal(quota.length, 0);
+        assert.equal(quota.unavailableReason, 'not_logged_in');
+        assert.equal(refreshes, 1);
+      } finally {
+        if (previousCache !== null) fs.writeFileSync(CACHE_PATH, previousCache);
+        else fs.rmSync(CACHE_PATH, { force: true });
+      }
+    });
+
+    test('fast path wakes credential refresh on linux when file token is expired', async () => {
+      const previousCache = fs.existsSync(CACHE_PATH) ? fs.readFileSync(CACHE_PATH, 'utf8') : null;
+      try {
+        fs.rmSync(CACHE_PATH, { force: true });
+        let refreshes = 0;
+
+        const quota = await getQuota({
+          fast: true,
+          platform: 'linux',
+          tokenReader: () => ({
+            accessToken: 'expired-file-token',
+            expiry: '2000-01-01T00:00:00.000Z',
+            sourcePath: path.join('expired', 'oauth_creds.json'),
+          }),
+          backgroundRefresh: () => { refreshes += 1; },
+          windowsCredentialRefreshDebounceMs: 0,
+        });
+
+        assert.equal(quota.length, 0);
+        assert.equal(quota.unavailableReason, 'expired_token');
+        assert.equal(refreshes, 1);
+      } finally {
+        if (previousCache !== null) fs.writeFileSync(CACHE_PATH, previousCache);
+        else fs.rmSync(CACHE_PATH, { force: true });
+      }
+    });
+
+    test('applyRefreshResult never wipes valid cache with empty array and prevents 30s spawn storm', async () => {
+      const { applyRefreshResult, createUnavailableQuotaResult, writeCache } = quotaModule;
+      const previousCache = fs.existsSync(CACHE_PATH) ? fs.readFileSync(CACHE_PATH, 'utf8') : null;
+      try {
+        fs.rmSync(CACHE_PATH, { force: true });
+        const tokA = { accessToken: 'tok-A', sourcePath: '/p/oauth' };
+        const tokB = { accessToken: 'tok-B', sourcePath: '/p/oauth' };
+
+        writeCache([{ id: 'gemini-4-carbon-high', remainingFraction: 0.9, resetTime: null }], tokA, 'Pro', 'a@example.com');
+        // Simulate stale cache
+        const raw = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
+        raw.expiresAt = Date.now() - 10_000;
+        raw.lastRefreshed = Date.now() - 60_000;
+        fs.writeFileSync(CACHE_PATH, JSON.stringify(raw));
+
+        // Background refresh fails even though accountEmail succeeded
+        applyRefreshResult(createUnavailableQuotaResult('quota_fetch_failed'), tokB, null, 'a@example.com');
+
+        let refreshes = 0;
+        const result = await getQuota({
+          fast: true,
+          tokenReader: () => tokB,
+          backgroundRefresh: () => { refreshes += 1; },
+        });
+        assert.equal(result.length, 1);
+        assert.equal(result[0].id, 'gemini-4-carbon-high');
+        assert.equal(refreshes, 0, 'recent failed refresh attempt must debounce spawn storm within 30s');
+
+        // When no prior cache exists, failure marker surfaces unavailableReason instead of fake loading []
+        fs.rmSync(CACHE_PATH, { force: true });
+        applyRefreshResult(createUnavailableQuotaResult('quota_fetch_failed'), tokB, null, 'a@example.com');
+        const emptyFailure = await getQuota({
+          fast: true,
+          tokenReader: () => tokB,
+          backgroundRefresh: () => { refreshes += 1; },
+        });
+        assert.equal(emptyFailure.length, 0);
+        assert.equal(emptyFailure.unavailableReason, 'quota_fetch_failed');
+        assert.equal(refreshes, 0);
       } finally {
         if (previousCache === null) fs.rmSync(CACHE_PATH, { force: true });
         else fs.writeFileSync(CACHE_PATH, previousCache);

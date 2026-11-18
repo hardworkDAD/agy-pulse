@@ -46,20 +46,24 @@ test('bootstrap installs runtime files and writes statusLine from a source direc
     assert.equal(result.status, 0, result.stderr || result.stdout);
 
     const base = path.join(home, '.gemini', 'antigravity-cli');
-    const runtime = path.join(base, 'agy-hud-runtime');
+    const runtime = path.join(base, 'agy-pulse-runtime');
     const settingsPath = path.join(base, 'settings.json');
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
 
     assert.ok(fs.existsSync(path.join(runtime, 'package.json')));
+    assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'brand.js')));
+    assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'compaction.js')));
+    assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'bin', 'agy-pulse.js')));
     assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'bin', 'agy-hud.js')));
     assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'cost.js')));
     assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'daily-cost.js')));
     assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'speed.js')));
+    assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'renderer', 'context-monitor.js')));
     assert.ok(fs.existsSync(path.join(runtime, 'runtime', 'statusline-installer.js')));
     assert.equal(settings.statusLine.type, 'command');
-    assert.match(settings.statusLine.command, /agy-hud-runtime/);
-    assert.match(settings.statusLine.command, /runtime[/\\]bin[/\\]agy-hud\.(?:js|cmd)/);
-    assert.match(result.stdout, /AGY-HUD bootstrap complete/);
+    assert.match(settings.statusLine.command, /agy-pulse-runtime/);
+    assert.match(settings.statusLine.command, /runtime[/\\]bin[/\\]agy-pulse\.(?:js|cmd)/);
+    assert.match(result.stdout, /agy-pulse bootstrap complete/);
     // Regression: command must point inside the isolated tmp HOME, not the real
     // user's antigravity-cli (configureStatusLine used to ignore homeDir).
     assert.ok(
@@ -241,8 +245,8 @@ test('bootstrap preserves existing runtime when replacement download fails', asy
   const source = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-incomplete-source-'));
   try {
     const antigravityRoot = path.join(home, '.gemini', 'antigravity-cli');
-    const runtimeDir = path.join(antigravityRoot, 'agy-hud-runtime');
-    const sentinel = path.join(runtimeDir, 'runtime', 'bin', 'agy-hud.js');
+    const runtimeDir = path.join(antigravityRoot, 'agy-pulse-runtime');
+    const sentinel = path.join(runtimeDir, 'runtime', 'bin', 'agy-pulse.js');
     fs.mkdirSync(path.dirname(sentinel), { recursive: true });
     fs.writeFileSync(sentinel, 'old working runtime');
 

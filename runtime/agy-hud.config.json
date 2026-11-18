@@ -6,18 +6,21 @@
     "critical": "red"
   },
   "display": {
-    "showTokenBar": true,
-    "showBreadcrumbs": true,
-    "showGitBranch": true,
+    "showContextMonitor": true,
     "showCurrentDir": true,
-    "breadcrumbCount": 3,
-    "unicode": true,
-    "useNerdFonts": false,
-    "showUsername": true,
-    "showSpeed": false,
+    "showSpeed": true,
+    "showModel": false,
+    "showTokenBar": false,
+    "showContextBar": false,
+    "showTurnCacheHitRate": false,
+    "showBreadcrumbs": false,
+    "showGitBranch": false,
+    "showUsername": false,
     "showCost": false,
     "showDailyCost": false,
-    "showWeeklyCost": false
+    "showWeeklyCost": false,
+    "breadcrumbCount": 3,
+    "useNerdFonts": false
   },
   "thresholds": {
     "warning": 0.7,

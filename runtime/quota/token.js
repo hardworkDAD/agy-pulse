@@ -14,6 +14,7 @@ const {
 // We search in priority order; first readable file wins.
 const ANTIGRAVITY_TOKEN_FILENAME = 'antigravity-oauth-token';
 const OAUTH_CREDS_FILENAME = 'oauth_creds.json';
+const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
 
 const WINDOWS_TOKEN_TEMP_TTL_MS = 5 * 60 * 1000;
 const WINDOWS_TOKEN_EXPIRY_SKEW_MS = 60 * 1000;
@@ -53,12 +54,44 @@ function extractEmailFromIdToken(idToken) {
   const parts = idToken.split('.');
   if (parts.length !== 3) return undefined;
   try {
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
     if (payload && typeof payload.email === 'string' && payload.email.includes('@')) {
       return payload.email;
     }
   } catch {}
   return undefined;
+}
+
+function getGoogleAccountsCandidates(roots = getAntigravityRoots()) {
+  const candidates = [];
+  for (const root of roots) {
+    if (!root) continue;
+    if (path.basename(root) === 'antigravity-cli') {
+      candidates.push(path.join(path.dirname(root), GOOGLE_ACCOUNTS_FILENAME));
+    }
+    candidates.push(path.join(root, GOOGLE_ACCOUNTS_FILENAME));
+  }
+  return [...new Set(candidates)];
+}
+
+function readGoogleAccountsState(roots = getAntigravityRoots()) {
+  for (const candidate of getGoogleAccountsCandidates(roots)) {
+    try {
+      const stat = fs.statSync(candidate);
+      const raw = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      const activeEmail = typeof raw?.active === 'string' && raw.active.includes('@')
+        ? raw.active
+        : (typeof raw?.activeAccount === 'string' && raw.activeAccount.includes('@')
+          ? raw.activeAccount
+          : (typeof raw?.email === 'string' && raw.email.includes('@') ? raw.email : null));
+      return {
+        activeEmail,
+        mtimeMs: stat.mtimeMs,
+        path: candidate,
+      };
+    } catch { /* try next */ }
+  }
+  return null;
 }
 
 function getTokenCandidates(roots = getAntigravityRoots()) {
@@ -183,13 +216,17 @@ function parseTokenPayload(raw) {
 
 function writeWindowsTokenTemp(tokens, roots = getAntigravityRoots()) {
   if (!Array.isArray(tokens) || tokens.length === 0) return;
+  const tmp = resolveTokenTempPath(roots);
+  const staging = `${tmp}.tmp.${process.pid}`;
   try {
-    const tmp = resolveTokenTempPath(roots);
     fs.mkdirSync(path.dirname(tmp), { recursive: true });
     // mode 0o600 — the file holds OAuth access tokens, so keep permissions
     // narrow even though this is only a short-lived mirror.
-    fs.writeFileSync(tmp, JSON.stringify({ tokens, writtenAt: Date.now() }), { mode: 0o600 });
-  } catch { /* best-effort cache */ }
+    fs.writeFileSync(staging, JSON.stringify({ tokens, writtenAt: Date.now() }), { mode: 0o600 });
+    fs.renameSync(staging, tmp);
+  } catch {
+    try { fs.unlinkSync(staging); } catch {}
+  }
 }
 
 function readWindowsTokenTemp(roots = getAntigravityRoots()) {
@@ -200,6 +237,96 @@ function readWindowsTokenTemp(roots = getAntigravityRoots()) {
   } catch {
     return null;
   }
+}
+
+function readDiskCandidateTokens(roots = getAntigravityRoots(), prioritizeAfterMs = null) {
+  const candidates = getTokenCandidates(roots);
+  const entries = [];
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      entries.push({ candidate, mtimeMs: stat.mtimeMs });
+    } catch { /* missing */ }
+  }
+  if (prioritizeAfterMs !== null) {
+    entries.sort((a, b) => {
+      const aNew = a.mtimeMs > prioritizeAfterMs ? 1 : 0;
+      const bNew = b.mtimeMs > prioritizeAfterMs ? 1 : 0;
+      if (aNew !== bNew) return bNew - aNew;
+      if (aNew && bNew) return b.mtimeMs - a.mtimeMs;
+      return 0;
+    });
+  }
+  const results = [];
+  for (const entry of entries) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(entry.candidate, 'utf8'));
+      const token = parseTokenPayload(raw);
+      if (token) results.push({ ...token, sourcePath: entry.candidate, mtimeMs: entry.mtimeMs });
+    } catch { /* try next */ }
+  }
+  return results;
+}
+
+/**
+ * Checks the short-lived JSON token mirror against on-disk credential files and
+ * google_accounts.json so account switches on disk are never masked by a stale mirror.
+ */
+function readFreshMirrorOrDiskToken(roots, defaultSourceFormat) {
+  const tmp = resolveTokenTempPath(roots);
+  let raw;
+  let mirrorStat;
+  try {
+    mirrorStat = fs.statSync(tmp);
+    raw = JSON.parse(fs.readFileSync(tmp, 'utf8'));
+  } catch {
+    return { hit: false, token: null };
+  }
+
+  const tempToken = tokenResultFromTokens(selectUsableTokens(raw.tokens, raw.writtenAt));
+  if (!tempToken) {
+    return { hit: false, token: null };
+  }
+
+  const mirrorTime = Number.isFinite(raw.writtenAt) ? raw.writtenAt : mirrorStat.mtimeMs;
+  const accountsState = readGoogleAccountsState(roots);
+  const accountMismatch = Boolean(
+    accountsState?.activeEmail &&
+    tempToken.email &&
+    accountsState.activeEmail.toLowerCase() !== tempToken.email.toLowerCase()
+  );
+  const accountsNewer = Boolean(accountsState && accountsState.mtimeMs > mirrorTime);
+
+  const diskTokens = readDiskCandidateTokens(roots, mirrorTime);
+  const diskNewer = diskTokens.some(t => t.mtimeMs > mirrorTime);
+
+  if (!accountMismatch && !accountsNewer && !diskNewer) {
+    return {
+      hit: true,
+      token: { ...tempToken, sourceFormat: tempToken.sourceFormat || defaultSourceFormat },
+    };
+  }
+
+  // Mirror is stale or shadowed by an account switch / newer disk credential.
+  const matchingDisk = diskTokens.find(t => {
+    if (!accountsState?.activeEmail || !t.email) return true;
+    return t.email.toLowerCase() === accountsState.activeEmail.toLowerCase();
+  });
+
+  if (matchingDisk) {
+    const { mtimeMs: _mtimeMs, ...cleanToken } = matchingDisk;
+    const mirrorEntry = {
+      accessToken: cleanToken.accessToken,
+      expiry: cleanToken.expiry,
+      sourceFormat: cleanToken.sourceFormat,
+      ...(cleanToken.email ? { email: cleanToken.email } : {}),
+    };
+    writeWindowsTokenTemp([mirrorEntry], roots);
+    return { hit: true, token: cleanToken };
+  }
+
+  clearTokenTemp(roots);
+  return { hit: false, token: null };
 }
 
 function buildWindowsCredentialScript() {
@@ -329,14 +456,16 @@ function readLinuxKeyringTokens(platform = process.platform, roots = getAntigrav
     if (!token) return null;
 
     // Mirror into the shared temp cache so subsequent statusline renders
-    // do not need to re-spawn python3.
+    // do not need to re-spawn python3 (skip mirroring already-expired tokens).
     const tokens = [{
       accessToken: token.accessToken,
       expiry: token.expiry,
       sourceFormat: 'linux-keyring',
       ...(token.email ? { email: token.email } : {}),
     }];
-    writeWindowsTokenTemp(tokens, roots);
+    if (!isTokenExpired(token)) {
+      writeWindowsTokenTemp(tokens, roots);
+    }
 
     return { ...token, sourceFormat: 'linux-keyring', all: tokens };
   } catch {
@@ -451,50 +580,74 @@ function readToken(options = {}) {
     platform = process.platform,
     roots = getAntigravityRoots(),
     skipWindowsCredential = false,
+    skipLinuxKeyring = false,
     skipKeychain = false,
     credentialReader = readWindowsCredentialTokens,
     keyringReader = readLinuxKeyringTokens,
     keychainReader = readMacosKeychainTokens,
   } = options;
 
+  let expiredFallback = null;
+
   // macOS: agy stores its OAuth token in macOS Keychain (login keychain).
   // Keychain lookups via /usr/bin/security take ~13ms, so query live credentials
   // directly without a disk cache mirror that would mask account switches.
   if (platform === 'darwin' && !skipKeychain) {
     const keychainToken = keychainReader(platform, roots);
-    if (keychainToken) return keychainToken;
+    if (keychainToken) {
+      if (!isTokenExpired(keychainToken)) return keychainToken;
+      expiredFallback = keychainToken;
+    }
   }
 
   // Windows: agy stores its OAuth token in Credential Manager. Keep a short
   // JSON mirror so normal statusline renders do not spawn PowerShell every time.
   if (platform === 'win32') {
-    const tempToken = readWindowsTokenTemp(roots);
-    if (tempToken) return { ...tempToken, sourceFormat: tempToken.sourceFormat || 'windows-credential' };
+    const mirrorResult = readFreshMirrorOrDiskToken(roots, 'windows-credential');
+    if (mirrorResult.hit) {
+      if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
+      expiredFallback = expiredFallback || mirrorResult.token;
+    }
 
     if (!skipWindowsCredential) {
       const credentialToken = credentialReader(platform, roots);
-      if (credentialToken) return credentialToken;
+      if (credentialToken) {
+        if (!isTokenExpired(credentialToken)) return credentialToken;
+        expiredFallback = expiredFallback || credentialToken;
+      }
     }
   }
 
   // Linux: agy stores its OAuth token in the system keyring (D-Bus Secret
   // Service). Check the short-lived JSON cache first; fall back to python3.
   if (platform === 'linux') {
-    const tempToken = readWindowsTokenTemp(roots);
-    if (tempToken) return { ...tempToken, sourceFormat: tempToken.sourceFormat || 'linux-keyring' };
+    const mirrorResult = readFreshMirrorOrDiskToken(roots, 'linux-keyring');
+    if (mirrorResult.hit) {
+      if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
+      expiredFallback = expiredFallback || mirrorResult.token;
+    }
 
-    const keyringToken = normalizeKeyringTokenResult(keyringReader(platform, roots));
-    if (keyringToken) return keyringToken;
+    if (!skipLinuxKeyring) {
+      const keyringToken = normalizeKeyringTokenResult(keyringReader(platform, roots));
+      if (keyringToken) {
+        if (!isTokenExpired(keyringToken)) return keyringToken;
+        expiredFallback = expiredFallback || keyringToken;
+      }
+    }
   }
 
   for (const candidate of getTokenCandidates(roots)) {
     try {
       const raw = JSON.parse(fs.readFileSync(candidate, 'utf8'));
       const token = parseTokenPayload(raw);
-      if (token) return { ...token, sourcePath: candidate };
+      if (token) {
+        const result = { ...token, sourcePath: candidate };
+        if (!isTokenExpired(result)) return result;
+        expiredFallback = expiredFallback || result;
+      }
     } catch { /* try next */ }
   }
-  return null;
+  return expiredFallback;
 }
 
 function anyTokenFileExists(roots = getAntigravityRoots()) {
@@ -516,6 +669,7 @@ function clearTokenTemp(roots = getAntigravityRoots()) {
 module.exports = {
   ANTIGRAVITY_TOKEN_FILENAME,
   OAUTH_CREDS_FILENAME,
+  GOOGLE_ACCOUNTS_FILENAME,
   WINDOWS_TOKEN_TEMP_TTL_MS,
   WINDOWS_TOKEN_EXPIRY_SKEW_MS,
   WINDOWS_CREDENTIAL_TARGETS,
@@ -524,6 +678,8 @@ module.exports = {
   LINUX_KEYRING_SERVICE,
   LINUX_KEYRING_USERNAME,
   getTokenCandidates,
+  getGoogleAccountsCandidates,
+  readGoogleAccountsState,
   isUsableAccessToken,
   selectUsableTokens,
   isTokenExpired,

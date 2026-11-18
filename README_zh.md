@@ -1,12 +1,10 @@
-# agy-hud
+# agy-pulse
 
-[![E2E](https://github.com/icebear0828/agy-hud/actions/workflows/e2e.yml/badge.svg?branch=main)](https://github.com/icebear0828/agy-hud/actions/workflows/e2e.yml)
-[![Release](https://img.shields.io/github/v/release/icebear0828/agy-hud)](https://github.com/icebear0828/agy-hud/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 
-> **Antigravity CLI (`agy`)** 的实时 statusline HUD 插件。每个 step 结束自动刷新，展示会话信息、Token 用量和**真实账号 Quota**（与 `/usage` 命令数据一致）。
+> **Antigravity CLI (`agy`) 全能单进程状态栏 HUD、实时上下文与压缩上限监控、云端配额追踪插件。**
 >
-> 每次 push 都会在 **macOS · Linux · Windows** 三平台 CI 矩阵跑 install + HUD 渲染验证——上面绿徽章 = 当前可用。
+> 零外部 npm 依赖 · 纯 Node.js 单进程引擎 · 原生 SQLite Protobuf 压缩上限解码 · 字节偏移增量日志扫描 · 中英双语 (`zh` / `en`)
 
 [English](./README.md)
 
@@ -14,181 +12,101 @@
 
 ## 显示效果
 
-agy-hud 支持两种额度（Quota）显示模式：**Table 模式**（默认）与 **Compact（紧凑）模式**（按 Provider 分组的迷你进度条）。
-
-### Table 模式（默认）
-按 Provider 汇聚 2 行 2 列展示配额周期（Google 5h/week 与 Claude 5h/week），清晰紧凑且与会员额度完全对应。
+`agy-pulse` 将经典 `agy-hud` 精简信息栏与云端配额表，以及 `agy-statusline` 的实时上下文与压缩监控行原生融合进同一个高速 Node.js 进程：
 
 ```
-diangelosabri@gmail.com │ agy-hud │ ⎇ main │ Gemini 3.7 Flash(M) │ Google AI Pro
-⚿ Tokens 172.3k (in: 2.8k, out: 35.3k, cache: 134.3k) │ ⛁ 129.2k/1M [█░░░░░░░░░] 12%
-1 MEMORY.md │ 1 hooks
+my-project │ Google AI Pro │ 输出: 42.6 tok/s
+1 MEMORY.md │ 4 rules │ 2 MCPs │ 3 hooks
   ─────────────────────────────────────────────────────────────────────────────────
   Google 5h   [█████░]  87% ~22m   │ Claude 5h   [██████] 100% ~4h59m
   Google week [████░░]  74% ~4d3h  │ Claude week [██████] 100% ~6d23h
+◈ Gemini 4 Carbon (High) · 上下文 ████▓······· 38.4% (196.6K/512K) · 压缩×1(峰480K) · 缓存 82% (160K) · 输出 12.4K · 费用 $0.12
 ```
 
-### Compact（紧凑）模式
-极度节省空间，将当前正在使用的模型额度百分比及重置倒计时直接嵌入到第 2 行末尾，同时在下方展示按 Provider 分组的极简迷你条。
+当上下文占用达到 **85%+** 时，底栏进度条自动变为红色并在末尾追加 **`即将触发压缩`**；在非 UTF-8 终端（如 Windows `cp936`）下自动降级为纯 ASCII 字符（`*`、`#`/`=`/`-`/`.`、`x`、`|`）。
 
-```
-⎇ main │ Claude Sonnet 4.6 │ Pro
-⚿ 138.4M ↑6k ↓202k ⟳138.2M │ ⛁ 138.2M/1M [████░░░░░░] 40% │ ⚡42 ✓3 │ Quota: 100% ~5h
-1 GEMINI.md │ 4 rules │ 1 MCPs │ 5 hooks
-Anthropic: Son███ Opus█░░ │ Google: Flash███ Pro███ │ OpenAI: GPT█░░
-```
-
-### 布局结构说明
-- **第一行**（身份层）：已解析的用户名/登录邮箱（若启用）、Git 分支、当前模型、套餐 Tier。
-- **第二行**（资源层）：Token 用量（↑输入 ↓输出 ⟳缓存——缓存为零时自动隐藏）、上下文窗口进度条及百分比、步骤/任务计数。Compact 模式下额外显示当前模型额度。
-- **第三行**（元数据层）：项目 Memory 文件、Rules、MCP、Hooks——**只显示非零项**；全部为零时整行省略。
-- **额度行**：账号内各模型的剩余额度比例（与 `/usage` 保持完全一致）及重置倒计时。≥24h 自动使用天单位（如 `~6d4h`），≥10h 省略分钟（如 `~12h`）。
+### 配额显示模式（`display.quotaStyle`）
+- **`table`**（默认）：双列按厂商聚合配额窗（`Google 5h/week`、`Claude 5h/week` 及可选 `Argon`），配合底部实时上下文监控行。缺失单侧配额窗口时显示 `--` 而非虚假 `100%`。
+- **`models`**：双列逐模型配额详情（支持自定义 `columnWidth`）。
+- **`compact`**：按 Provider 分组的迷你进度条（`Google:`、`Anthropic:`、`OpenAI:`），全面覆盖 2026 模型且家族缩写零碰撞（`Carbon`、`Hydro`、`Argon`、`Orch-C`、`Orch-A`、`G3.8F` 等）。
 
 ---
 
-## 安装
+## 安装与部署
 
-一条命令搞定（在普通 shell 里跑，**不要**在已打开的 `agy` 会话里跑）：
+在普通终端（**不要**在已打开的 `agy` 会话内）执行：
+
+### 从本地克隆仓库安装 / 平滑迁移
+
+**macOS / Linux 一键本地部署（自动从旧版 `statusline-combined.sh` 平滑切换至单进程 `agy-pulse.js`）**：
+```bash
+bash scripts/deploy-local.sh
+```
+
+**或完整执行插件注册 + 运行时安装**：
+```bash
+bash scripts/install.sh
+```
+
+### 从自建 GitHub 仓库 / Fork 安装
+
+通过 `AGY_PULSE_REPO` 指定你自己的 `owner/repo`：
 
 **macOS / Linux**：
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/install.sh)
+AGY_PULSE_REPO="yourname/agy-pulse" \
+  bash <(curl -fsSL "https://raw.githubusercontent.com/$AGY_PULSE_REPO/main/scripts/install.sh")
 ```
 
 **Windows PowerShell**：
 ```powershell
-irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/install.ps1 | iex
+$env:AGY_PULSE_REPO = 'yourname/agy-pulse'
+irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.ps1" | iex
 ```
 
-**Windows CMD**：
-```cmd
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/install.ps1 | iex"
-```
-
-该安装脚本会：
-1. 干净地重新安装插件（`agy plugin uninstall` + `agy plugin install`）。
-2. 下载 HUD 运行所需的 runtime 到 `~/.gemini/antigravity-cli/agy-hud-runtime/`。
-3. 将 `statusLine.command` 写入到 `~/.gemini/antigravity-cli/settings.json`。
-
-重新打开一个 `agy` 会话，终端底部便会显示 HUD 状态栏。
-
-**幂等性**——任何时候重跑同一命令都能修复配置偏移、更新版本或清空旧版残留。
-
-### 为什么不只跑 `agy plugin install`？
-
-`agy plugin install` 只下载并注册**声明式**插件标记文件（`plugin.json`），它不会执行任何 JS 代码，也不会修改您的 `settings.json`。而 HUD 的 statusLine 命令和渲染运行时需要进行额外配置，`install.sh` 将这两部分原子化地同步完成。
-
-### Fork 镜像/自建仓库安装
-
-**macOS / Linux**：
-```bash
-AGY_HUD_REPO_RAW=https://raw.githubusercontent.com/your-fork/agy-hud/main \
-AGY_HUD_REPO_URL=https://github.com/your-fork/agy-hud.git \
-  bash <(curl -fsSL "$AGY_HUD_REPO_RAW/scripts/install.sh")
-```
-
-**Windows PowerShell**：
-```powershell
-$env:AGY_HUD_REPO_RAW = 'https://raw.githubusercontent.com/your-fork/agy-hud/main'
-$env:AGY_HUD_REPO_URL = 'https://github.com/your-fork/agy-hud.git'
-irm "$env:AGY_HUD_REPO_RAW/scripts/install.ps1" | iex
-```
-
-### 手动安装（高级用户）
-
-如果您希望分步手动运行：
-
-**macOS / Linux**：
-```bash
-agy plugin install https://github.com/icebear0828/agy-hud.git
-bash <(curl -fsSL https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/bootstrap.sh)
-```
-
-**Windows PowerShell**：
-```powershell
-agy plugin install https://github.com/icebear0828/agy-hud.git
-$t = Join-Path $env:TEMP "agy-hud-bootstrap.js"
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/bootstrap.js -OutFile $t -UseBasicParsing
-node $t; Remove-Item $t
-```
-
-**Windows CMD**：
-```cmd
-agy plugin install https://github.com/icebear0828/agy-hud.git
-powershell -Command "Invoke-WebRequest -Uri https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/bootstrap.js -OutFile %TEMP%\agy-hud-bootstrap.js -UseBasicParsing"
-node %TEMP%\agy-hud-bootstrap.js
-del %TEMP%\agy-hud-bootstrap.js
-```
+安装脚本会自动完成：
+1. 注册声明式插件（`agy plugin install`）。
+2. 将纯 Node.js 运行时原子部署至 `~/.gemini/antigravity-cli/agy-pulse-runtime/`。
+3. 将 `~/.gemini/antigravity-cli/settings.json` 的 `statusLine.command` 指向 `runtime/bin/agy-pulse.js`（Windows 下指向 `.cmd` shim），同时保留用户原有的 `enabled` / `stack_with_default` 等字段。
 
 ---
 
-## 验证
-
-跑完安装或 bootstrap 后：
+## 验证与交互配置
 
 ```bash
-# settings.statusLine 应当正确指向 runtime 路径
-cat ~/.gemini/antigravity-cli/settings.json | grep statusLine -A2
+# 检查 settings.json 中的 statusLine 配置
+cat ~/.gemini/antigravity-cli/settings.json | grep statusLine -A3
 
-# 直接手动运行 HUD 入口文件，应当能看到输出的状态行
-node ~/.gemini/antigravity-cli/agy-hud-runtime/runtime/bin/agy-hud.js
-```
+# 直接手动调用验证输出
+node ~/.gemini/antigravity-cli/agy-pulse-runtime/runtime/bin/agy-pulse.js
 
-若额度行显示 `Antigravity token expired`，只需刷新你的 `agy` 登录状态（`agy login`）即可，这**不是**安装程序失败。
+# 打开交互式配置向导（支持 ↑/↓、j/k、空格/回车切换、s 保存、q 退出）
+node ~/.gemini/antigravity-cli/agy-pulse-runtime/runtime/bin/agy-pulse.js --config
 
-Windows PowerShell 验证命令：
-
-```powershell
-Get-Content "$env:USERPROFILE\.gemini\antigravity-cli\settings.json"
-& "$env:USERPROFILE\.gemini\antigravity-cli\agy-hud-runtime\runtime\bin\agy-hud.cmd"
-```
-
----
-
-## 诊断
-
-```bash
-# 检查 token 及 quota cache（额度缓存）的本地状态
+# Token 与配额缓存诊断
 node scripts/diagnose-auth.js
-
-# 追踪 agy 自身 statusLine 执行器的错误日志
-ls -t ~/.gemini/antigravity-cli/log/cli-*.log | head -1 | xargs tail -50 | grep statusline
 ```
-
-最常见的故障是 `statusline_runner.go: failure N/30` —— 这表示 `settings.json` 中配置的 `statusLine.command` 指向了一个不存在的路径。重新跑一次 bootstrap 安装流程即可。
 
 ---
 
 ## 卸载
 
-**macOS / Linux**：
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/icebear0828/agy-hud/main/uninstall.sh)
+bash uninstall.sh
 ```
 
-**Windows PowerShell**：
+Windows PowerShell：
 ```powershell
-irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/uninstall.ps1 | iex
+.\uninstall.ps1
 ```
 
-**Windows CMD**：
-```cmd
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/uninstall.ps1 | iex"
-```
-
-如果您已克隆了本仓库，也可以在根目录下直接执行：`bash uninstall.sh` 或 `.\uninstall.ps1`。
-
-卸载命令会：
-1. 清除 `settings.json` 中的 `statusLine` 配置（同时保留一份名为 `.bak` 的备份文件）。
-2. 删除 `~/.gemini/antigravity-cli/agy-hud-runtime/`。
-3. 卸载已注册的插件（`agy plugin uninstall agy-hud`）。
-4. 清理所有数据根目录及临时目录下的 payload、错误日志、临时 Token 镜像和 quota cache 缓存文件。
+卸载脚本会同时清理 `agy-pulse` 与旧版 `agy-hud` 的运行时目录、插件目录、缓存、错误日志、Windows shim，并清除 `settings.json` 中的 `statusLine`（保留 `.bak` 备份）。
 
 ---
 
 ## 配置（可选）
 
-您可以选择在工作区根目录下创建 `agy-hud.config.json` 来覆盖默认设置。如果不创建，HUD 默认将读取已下载运行时中的 `runtime/agy-hud.config.json` 默认配置：
+您可以在工作区根目录创建 `agy-pulse.config.json`（向下兼容 `agy-hud.config.json`）覆盖默认配置；若未创建，则使用内置 `runtime/agy-hud.config.json` 并与 `FULL_DEFAULT_CONFIG` 深度合并：
 
 ```json
 {
@@ -200,12 +118,19 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
   },
   "display": {
     "quotaStyle": "table",
-    "showTokenBar": true,
-    "showBreadcrumbs": true,
-    "showGitBranch": true,
+    "showContextMonitor": true,
     "showCurrentDir": true,
+    "showSpeed": true,
+    "showModel": false,
+    "showTokenBar": false,
+    "showContextBar": false,
+    "showTurnCacheHitRate": false,
+    "showBreadcrumbs": false,
+    "showGitBranch": false,
     "showUsername": false,
-    "username": "",
+    "showCost": false,
+    "showDailyCost": false,
+    "showWeeklyCost": false,
     "breadcrumbCount": 3,
     "useNerdFonts": false,
     "columnWidth": 40
@@ -219,116 +144,79 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 ```
 
 ### 配置项说明
-- **`theme`**：定制 HUD 各组件的前景颜色（`primary`、`secondary`、`warning`、`critical`）。支持终端 ANSI 标准色（`green`、`gray`、`yellow`、`red`、`blue`、`magenta`、`cyan`）。
+- **`theme`**：HUD 前景配色（`primary`、`secondary`、`warning`、`critical`），支持标准 ANSI 颜色（`green`、`gray`、`yellow`、`red`、`blue`、`magenta`、`cyan`）。
 - **`display`**：
-  - `quotaStyle`：额度显示样式，可选值为 `"table"`（默认，多列对齐表格模式）或 `"compact"`（紧凑模式，嵌入单模型额度并按 Provider 分组展示迷你进度条）。
-  - `showTokenBar`：是否展示 Token 用量行。
-  - `showBreadcrumbs`：是否展示工作区文件导航（Breadcrumbs）。
-  - `showGitBranch`：是否在 HUD 中显示当前 Git 分支。
-  - `showCurrentDir`：是否在 HUD 中显示当前工作目录的文件夹名称。
-  - `showUsername`：是否在 HUD 第一行显示用户名/登录邮箱。
-  - `username`：自定义显示用户名以覆盖系统用户名或登录邮箱。
-  - `showSpeed`：是否显示 Token 输出生成速率（`输出: X tok/s`）。
-  - `showCost`：是否显示当前会话费用（`费用 $X`）。
-  - `showDailyCost`：是否显示今日累计费用（`今日 $X`）。
-  - `showWeeklyCost`：是否显示本周累计费用（`本周 $X`）。
-  - `breadcrumbCount`：导航栏中最多展示的文件项数。
-  - `useNerdFonts`：开启后（设为 `true`），将使用 [Nerd Fonts](https://www.nerdfonts.com/) 的高保真开发者图标，体验更佳。
-  - `columnWidth`：Table 模式下每一列的最大宽度（默认为 `40`）。
-- **`thresholds`**：资源使用占比警戒线阈值（`0.0` 到 `1.0`），分别对应黄色的警告和红色的紧急状态。
-- **`language`**：语言偏好选项（`"auto"`，`"en"`，`"zh"`）。
+  - `showContextMonitor`：是否显示底部实时上下文与压缩监控行（默认 `true`）。
+  - `quotaStyle`：配额样式，可选 `"table"`（默认）、`"models"` 或 `"compact"`。
+  - `showCurrentDir`：是否显示当前工作区目录名（默认 `true`）。
+  - `showSpeed`：是否在顶栏显示输出速率（`输出: X.X tok/s`，默认 `true`）。
+  - `showModel`：是否在第一行显示模型名（默认 `false`，避免与底栏 `◈ <Model (Effort)>` 重复）。
+  - `showTokenBar` / `showContextBar`：可选开启第二行经典 Token 明细与上下文条。
+  - `showTurnCacheHitRate`：是否在第二行显示单轮缓存命中率徽章。
+  - `showImageQuota`：是否在第二行显示生图配额进度条。
+  - `showBreadcrumbs` / `breadcrumbCount`：是否在第三行显示最近修改的文件路径。
+  - `showGitBranch`：是否在第一行显示 Git 分支（非 Git 目录自动隐藏，不再伪造 `main`）。
+  - `showUsername` / `username`：是否显示登录邮箱或自定义用户名。
+  - `showCost` / `showDailyCost` / `showWeeklyCost`：是否在第一行显示当前会话、今日及本周费用。
+  - `useNerdFonts`：是否启用 Nerd Fonts 图标。
+  - `columnWidth`：配额表格每列最大宽度（默认 `40`）。
+- **`thresholds`**：配额警戒阈值（`0.7` 黄色预警、`0.9` 红色告警）。
+- **`language`**：语言设置，可选 `"auto"`（根据 `LC_ALL`/`LC_CTYPE`/`LANG` 自动判定）、`"en"` 或 `"zh"`。
+
+---
+
+## 环境变量（兼容旧 `AGY_HUD_*` 前缀）
+
+| 主环境变量 | 兼容别名 | 用途 |
+|---|---|---|
+| `AGY_PULSE_DATA_DIR` | `AGY_HUD_DATA_DIR` | 自定义 Antigravity CLI 数据目录 |
+| `AGY_PULSE_REPO` | `AGY_HUD_REPO` | 自定义 `owner/repo` 仓库（用于自更新与远程安装） |
+| `AGY_PULSE_REPO_RAW` | `AGY_HUD_REPO_RAW` | 自定义 GitHub Raw 镜像地址 |
+| `AGY_PULSE_REPO_URL` | `AGY_HUD_REPO_URL` | 自定义 Git 克隆地址 |
+| `AGY_PULSE_UPDATE_URL` | `AGY_HUD_UPDATE_URL` | 自定义版本检查 `package.json` 地址 |
+| `AGY_HUD_FORCE_ASCII` | — | 设为 `1` 强制使用 ASCII 字符 |
+| `AGY_HUD_FORCE_UNICODE` | — | 设为 `1` 强制使用 Unicode 字符 |
 
 ---
 
 ## 目录结构
 
 ```
-agy-hud/
-├── plugin.json                # {"name":"agy-hud"} — agy 插件标记文件
-├── gemini-extension.json      # agy 远程安装验证器强制要求
-├── runtime/                   # bootstrap 下载到 ~/.gemini/.../agy-hud-runtime/runtime/
-│   ├── bin/agy-hud.js         # statusLine 入口（stdin JSON → ANSI HUD）
-│   ├── config-wizard.js       # HUD 命令行配置向导（--config）
-│   ├── config.js              # 全局/局部配置文件加载器
-│   ├── cost.js                # 会话费用计算与模型费率表
-│   ├── daily-cost.js          # 今日与本周费用账本持久化与汇总
-│   ├── encoding.js            # 控制台编码与 Unicode 检测器
-│   ├── parser.js              # 工作区元数据扫描与 transcript 日志解析
-│   ├── paths.js               # 跨平台路径解析工具集
-│   ├── quota.js               # SWR 额度获取主协调器
-│   ├── quota/                 # 额度与身份认证子模块 (PR #62)
-│   │   ├── cache.js           # 原子化 JSON 缓存读写（v3 schema）
-│   │   ├── cloud.js           # 额度与 OIDC 权威用户邮箱 HTTP 客户端
-│   │   ├── models.js          # API 配额标准化与多窗口观察合并
-│   │   └── token.js           # 跨平台 OAuth 访问令牌发现与 C# 读取
-│   ├── renderer.js            # HUD 界面排版主协调器
-│   ├── renderer/              # ANSI 终端渲染子模块 (PR #58)
-│   │   ├── format.js          # ANSI 配色、大数进位及重置时长格式化
-│   │   ├── lang.js            # 多语言（中文/英文）及本地化诊断支持
-│   │   └── quota-render.js    # 配额进度条与单行双列对齐排版 (PR #61)
-│   ├── speed.js               # Token 输出生成速率计算
-│   ├── statusline-installer.js# 向 settings.json 写入 statusLine 命令
-│   ├── uninstall.js           # 清理与卸载 HUD 运行时文件
-│   └── update-checker.js      # 检查新版本 Github Release 的微服务
+agy-pulse/
+├── plugin.json                        # {"name":"agy-pulse"}
+├── gemini-extension.json              # agy 插件清单元数据 (v1.0.0)
+├── runtime/
+│   ├── brand.js                       # 品牌常量与远端仓库解析
+│   ├── compaction.js                  # 纯 JS Protobuf 解码器与 SQLite 压缩上限缓存
+│   ├── bin/
+│   │   ├── agy-pulse.js / .cmd        # 主 statusLine 入口
+│   │   └── agy-hud.js / .cmd          # 向下兼容入口别名
+│   ├── config-wizard.js               # 交互式配置向导 (--config)
+│   ├── config.js                      # 深度合并配置加载器与原子写入
+│   ├── cost.js                        # 2026 模型费率表与会话费用计算
+│   ├── daily-cost.js                  # 并发安全的今日/七日滚动费用账本
+│   ├── encoding.js                    # 终端 UTF-8 / 代码页自动检测
+│   ├── parser.js                      # 字节偏移增量 transcript 扫描与工作区元数据
+│   ├── paths.js                       # 跨平台数据根目录与安全可执行文件定位
+│   ├── quota.js                       # SWR 配额主协调器
+│   ├── quota/                         # token · cache · cloud · models
+│   ├── renderer.js                    # 多行 HUD 渲染主协调器
+│   ├── renderer/                      # context-monitor · format · lang · quota-render
+│   ├── speed.js                       # 输出 tok/s 速率计算（支持首轮/尾轮锁存）
+│   ├── statusline-installer.js        # settings.json 写入与 Windows .cmd/.bat shim
+│   ├── uninstall.js                   # agy-pulse 与旧版 agy-hud 统一清理器
+│   └── update-checker.js              # Semver 安全的后台版本更新检查
 ├── scripts/
-│   ├── install.sh             # 一行安装入口 — macOS/Linux
-│   ├── install.ps1            # 一行安装入口 — Windows PowerShell
-│   ├── bootstrap.sh           # 修复用入口（被 install.sh 调用）
-│   ├── bootstrap.js           # 实际下载 + 配置逻辑
-│   ├── configure-utf8.ps1     # 可选：Windows UTF-8 终端配置与 Git 编码助手
-│   ├── verify-display.js      # E2E：安装 + 引导 + 模拟起 PTY agy 并断言 HUD 存在
-│   └── diagnose-auth.js
-├── tests/unit/                # 模块化单元测试目录 (node --test)
-├── .github/workflows/e2e.yml  # 跨平台 CI 自动化矩阵
-└── release.sh                 # npm test → E2E 检查 → 打包 zip → Github Release
+│   ├── install.sh / install.ps1       # 一键安装脚本
+│   ├── bootstrap.sh / bootstrap.js    # 原子化运行时部署工具
+│   ├── deploy-local.sh                # 本地部署与旧版双进程配置平滑迁移脚本
+│   ├── configure-utf8.ps1             # Windows UTF-8 环境助手
+│   ├── verify-display.js              # E2E 渲染验证器
+│   └── diagnose-auth.js               # 认证与缓存诊断工具
+├── skills/hud-config/SKILL.md         # Agent 交互式配置技能
+├── docs/                              # 中英架构与模块参考文档
+└── tests/unit/                        # 基于 node:test 的单元测试套件
 ```
-
----
-
-## 跨平台说明
-
-**Windows UTF-8 终端助手**：如果您的 Windows 控制台不在 UTF-8 代码页下且您希望获得漂亮的 Unicode 框线/进度条显示，请运行：
-
-```powershell
-irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/configure-utf8.ps1 | iex
-```
-
-该脚本会在您的 PowerShell 配置文件中追加 UTF-8 代码页的初始化脚本，并设定 Git 全局文件名的 UTF-8 编码支持。该命令是幂等的，运行完毕后需要重启 PowerShell。
-
-**Windows Token 刷新机制**：Antigravity CLI 将 OAuth 的凭据（`refresh_token` / `access_token`）存放于系统的凭据管理器（Credential Manager）中（`gemini:antigravity` / `LegacyGeneric:target=gemini:antigravity`）。本 HUD 会优先使用系统临时目录中的 `agy-hud-token.json` 短效缓存。当 fast path 发现文件凭据过期或缺失，将触发分离的后台读取进程去拉取并刷新凭据，下一次渲染时会自动加载。注意，agy-hud 自身**不参与**凭据更换换取 Access Token，若凭据管理器中的 Token 彻底过期，需要您在宿主终端中先行运行 `agy login`。
-
-**Token 文件回退路径**（按如下顺序搜索候选）：
-- `~/.gemini/antigravity-cli/antigravity-oauth-token`
-- `$XDG_DATA_HOME/antigravity-cli/antigravity-oauth-token`
-- `$APPDATA/antigravity-cli/antigravity-oauth-token`
-- `$LOCALAPPDATA/antigravity-cli/antigravity-oauth-token`
-
----
-
-## CI 验证保障
-
-每次 push 到 `main` 分支都会触发 [.github/workflows/e2e.yml](./.github/workflows/e2e.yml) 执行三平台（Linux / macOS / Windows）CI 流程：
-
-| 操作系统 | install.sh 成功运行 | bootstrap 写入 settings.json | HUD 独立命令正确生成状态行 |
-|----|------|------|------|
-| ubuntu-latest | ✅ | ✅ | ✅ |
-| macos-latest  | ✅ | ✅ | ✅ |
-| windows-latest | ✅ | ✅ | ✅ |
-
-每次 CI 运行都会上传如下产物（保留 14 天）：
-
-| 产物名称 | 分配平台 | 内容说明 |
-|---|---|---|
-| `e2e-<os>` | 包含全部三个系统 | 诊断日志 `e2e-report.json` + `agy-hud-pty-*.log`（富 ANSI 颜色转义代码的文件，`cat` 它即可在本地模拟看到带颜色 HUD） |
-| `hud-screenshot-<os>` | ubuntu 与 macos | `hud-ascii-<os>.png` 和 `hud-unicode-<os>.png`，由 [charm.sh `freeze`](https://github.com/charmbracelet/freeze) 生成，您可以下载后直接用图片查看器预览渲染效果。 |
-
-CI 在**无授权模式（no-auth）**下运行，只断言独立命令能正确输出状态行。带真实 Token 与账户数据的全套 E2E 集成验证通过 `release.sh` 在开发者本机进行。
-
----
-
-## 已知问题
-
-- **Windows 平台 PNG 截图限制**：CI 会使用 [charm.sh `freeze`](https://github.com/charmbracelet/freeze) 对 macOS 与 Linux 的渲染结果截图并上传，但 Windows 的 `freeze v0.2.2` 在各种传参方式下都会抛出 `No input` 错误，属于上游 Windows 兼容性 bug，因此对 Windows 仅收集 ANSI 字符日志以供 E2E 审查（下载 `e2e-windows-latest` 后 `cat` 查看）。
 
 ---
 

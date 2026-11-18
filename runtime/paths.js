@@ -16,21 +16,24 @@ const path = require('path');
  *
  * @returns {string[]}
  */
-function getAntigravityRoots() {
-  if (process.env.AGY_HUD_DATA_DIR) {
-    return [process.env.AGY_HUD_DATA_DIR];
+function getAntigravityRoots(env = process.env, homeDir = os.homedir()) {
+  const safeEnv = env || process.env;
+  const dataDir = safeEnv.AGY_PULSE_DATA_DIR || safeEnv.AGY_HUD_DATA_DIR;
+  if (dataDir) {
+    return [dataDir];
   }
 
+  const resolvedHome = homeDir || os.homedir();
   const candidates = [
-    path.join(os.homedir(), '.gemini', 'antigravity-cli'),
-    process.env.XDG_DATA_HOME
-      ? path.join(process.env.XDG_DATA_HOME, 'antigravity-cli')
+    path.join(resolvedHome, '.gemini', 'antigravity-cli'),
+    safeEnv.XDG_DATA_HOME
+      ? path.join(safeEnv.XDG_DATA_HOME, 'antigravity-cli')
       : null,
-    process.env.APPDATA
-      ? path.join(process.env.APPDATA, 'antigravity-cli')
+    safeEnv.APPDATA
+      ? path.join(safeEnv.APPDATA, 'antigravity-cli')
       : null,
-    process.env.LOCALAPPDATA
-      ? path.join(process.env.LOCALAPPDATA, 'antigravity-cli')
+    safeEnv.LOCALAPPDATA
+      ? path.join(safeEnv.LOCALAPPDATA, 'antigravity-cli')
       : null,
   ].filter(Boolean);
 
@@ -44,10 +47,12 @@ function getAntigravityRoots() {
  * callers can still use it as a write target.
  *
  * @param {string} relativePath
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [homeDir]
  * @returns {string}
  */
-function resolveAntigravityPath(relativePath) {
-  const roots = getAntigravityRoots();
+function resolveAntigravityPath(relativePath, env = process.env, homeDir = os.homedir()) {
+  const roots = getAntigravityRoots(env, homeDir);
   for (const root of roots) {
     const candidate = path.join(root, relativePath);
     if (fs.existsSync(candidate)) return candidate;
@@ -61,12 +66,14 @@ function resolveAntigravityPath(relativePath) {
  * and searches PATH while explicitly ignoring relative path directories.
  *
  * @param {string} name
+ * @param {NodeJS.ProcessEnv} [env]
  * @returns {string|null}
  */
-function resolveSafeExecutable(name) {
+function resolveSafeExecutable(name, env = process.env) {
+  const safeEnv = env || process.env;
   const platform = process.platform;
   if (platform === 'win32') {
-    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    const systemRoot = safeEnv.SystemRoot || 'C:\\Windows';
     if (name === 'chcp') {
       return path.join(systemRoot, 'System32', 'chcp.com');
     }
@@ -75,7 +82,7 @@ function resolveSafeExecutable(name) {
     }
   }
 
-  const pathEnv = process.env.PATH || '';
+  const pathEnv = safeEnv.PATH || '';
   const dirs = pathEnv.split(path.delimiter).filter(Boolean);
   const extensions = platform === 'win32' ? ['.exe', '.cmd', '.bat'] : [''];
 

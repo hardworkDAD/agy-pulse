@@ -1,18 +1,24 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert';
 import { abbreviateDisplayName, compactModelName, formatQuotaPercent } from '../../runtime/renderer.js';
+import { modelIncludesCacheInInput } from '../../runtime/renderer/format.js';
 
 describe('renderer / format helpers', () => {
   describe('abbreviateDisplayName', () => {
-    test('handles all known agent model patterns', () => {
+    test('handles all known agent model patterns including 2026 models', () => {
       assert.equal(abbreviateDisplayName('Gemini 3.5 Flash (High)'), 'Gemini 3.5 Flash(H)');
       assert.equal(abbreviateDisplayName('Gemini 3.5 Flash (Medium)'), 'Gemini 3.5 Flash(M)');
       assert.equal(abbreviateDisplayName('Gemini 3.5 Flash (Low)'), 'Gemini 3.5 Flash(L)');
+      assert.equal(abbreviateDisplayName('Gemini 3.8 Flash (High)'), 'Gemini 3.8 Flash(H)');
       assert.equal(abbreviateDisplayName('Gemini 3.1 Pro (High)'), 'Gemini 3.1 Pro(H)');
       assert.equal(abbreviateDisplayName('Gemini 3.1 Pro (Low)'), 'Gemini 3.1 Pro(L)');
       assert.equal(abbreviateDisplayName('Gemini 4 Argon (Medium)'), 'Gemini 4 Argon(M)');
       assert.equal(abbreviateDisplayName('Gemini 4 Argon (High)'), 'Gemini 4 Argon(H)');
       assert.equal(abbreviateDisplayName('Gemini 4 Argon (Low)'), 'Gemini 4 Argon(L)');
+      assert.equal(abbreviateDisplayName('Gemini 4 Carbon (High)'), 'Gemini 4 Carbon(H)');
+      assert.equal(abbreviateDisplayName('Gemini 4 Hydrogen (XHigh)'), 'Gemini 4 Hydrogen(XH)');
+      assert.equal(abbreviateDisplayName('Orchestrator (Carbon)'), 'Orch (Carbon)');
+      assert.equal(abbreviateDisplayName('Orchestrator (Argon)'), 'Orch (Argon)');
       assert.equal(abbreviateDisplayName('Claude Sonnet 4.6 (Thinking)'), 'Sonnet 4.6(Th)');
       assert.equal(abbreviateDisplayName('Claude Opus 4.6 (Thinking)'), 'Opus 4.6(Th)');
       assert.equal(abbreviateDisplayName('GPT-OSS 120B (Medium)'), 'GPT-OSS 120B');
@@ -31,11 +37,15 @@ describe('renderer / format helpers', () => {
   });
 
   describe('compactModelName', () => {
-    test('produces ultra-short names for provider summary', () => {
+    test('produces ultra-short collision-free names for provider summary', () => {
       assert.equal(compactModelName('Gemini 3.5 Flash (High)'), 'Flash');
       assert.equal(compactModelName('Gemini 3.5 Flash (Medium)'), 'Flash');
       assert.equal(compactModelName('Gemini 3.1 Pro (Low)'), 'Pro');
       assert.equal(compactModelName('Gemini 4 Argon (Medium)'), 'Argon');
+      assert.equal(compactModelName('Gemini 4 Carbon (High)'), 'Carbon');
+      assert.equal(compactModelName('Gemini 4 Hydrogen (XHigh)'), 'Hydro');
+      assert.equal(compactModelName('Orchestrator (Carbon)'), 'Orch-C');
+      assert.equal(compactModelName('Orchestrator (Argon)'), 'Orch-A');
       assert.equal(compactModelName('Claude Sonnet 4.6 (Thinking)'), 'Sonnet');
       assert.equal(compactModelName('Claude Opus 4.6 (Thinking)'), 'Opus');
       assert.equal(compactModelName('GPT-OSS 120B (Medium)'), 'GPT');
@@ -43,6 +53,10 @@ describe('renderer / format helpers', () => {
       assert.equal(compactModelName('gemini-3.1-pro-low'), 'Pro');
       assert.equal(compactModelName('gemini-4-argon'), 'Argon');
       assert.equal(compactModelName('gemini-4-argon-high'), 'Argon');
+      assert.equal(compactModelName('gemini-4-carbon-high'), 'Carbon');
+      assert.equal(compactModelName('gemini-4-hydrogen-xhigh'), 'Hydro');
+      assert.equal(compactModelName('gemini-pro-orchestrator'), 'Orch-C');
+      assert.equal(compactModelName('gemini-pro-orchestrator-argon'), 'Orch-A');
       assert.equal(compactModelName('claude-sonnet-4-6'), 'Sonnet');
       assert.equal(compactModelName('claude-opus-4-6-thinking'), 'Opus');
     });
@@ -52,6 +66,17 @@ describe('renderer / format helpers', () => {
       assert.equal(compactModelName(undefined), '');
       assert.equal(compactModelName(''), '');
       assert.equal(compactModelName(123), '');
+    });
+  });
+
+  describe('modelIncludesCacheInInput', () => {
+    test('identifies 2026 cache-inclusive models including Orchestrator, Carbon, and Hydrogen', () => {
+      assert.equal(modelIncludesCacheInInput('Orchestrator (Carbon)'), true);
+      assert.equal(modelIncludesCacheInInput('Orchestrator (Argon)'), true);
+      assert.equal(modelIncludesCacheInInput('Gemini 4 Carbon (High)'), true);
+      assert.equal(modelIncludesCacheInInput('Gemini 4 Hydrogen (XHigh)'), true);
+      assert.equal(modelIncludesCacheInInput('Claude Sonnet 4.6 (Thinking)'), true);
+      assert.equal(modelIncludesCacheInInput('CustomExclusiveModel'), false);
     });
   });
 

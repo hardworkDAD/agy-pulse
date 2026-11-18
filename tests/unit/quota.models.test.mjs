@@ -239,6 +239,43 @@ describe('quota / models', () => {
       assert.equal(quotas[2].window, null);
       assert.deepEqual(quotas[2].windows, {});
     });
+
+    test('resolves 2026 model display names when displayName is omitted from API response', () => {
+      const { FALLBACK_AGENT_MODEL_IDS, MODEL_DISPLAY_NAMES } = quotaModule;
+      const expectedPairs = [
+        ['gemini-4-carbon-high', 'Gemini 4 Carbon (High)'],
+        ['gemini-4-carbon-medium', 'Gemini 4 Carbon (Medium)'],
+        ['gemini-4-carbon-low', 'Gemini 4 Carbon (Low)'],
+        ['gemini-4-hydrogen-xhigh', 'Gemini 4 Hydrogen (XHigh)'],
+        ['gemini-4-hydrogen-high', 'Gemini 4 Hydrogen (High)'],
+        ['gemini-4-hydrogen-medium', 'Gemini 4 Hydrogen (Medium)'],
+        ['gemini-4-hydrogen-low', 'Gemini 4 Hydrogen (Low)'],
+        ['gemini-4-argon-high', 'Gemini 4 Argon (High)'],
+        ['gemini-4-argon-medium', 'Gemini 4 Argon (Medium)'],
+        ['gemini-4-argon-low', 'Gemini 4 Argon (Low)'],
+        ['gemini-3.8-flash-high', 'Gemini 3.8 Flash (High)'],
+        ['gemini-3.8-flash-medium', 'Gemini 3.8 Flash (Medium)'],
+        ['gemini-3.8-flash-low', 'Gemini 3.8 Flash (Low)'],
+        ['gemini-pro-orchestrator', 'Orchestrator (Carbon)'],
+        ['gemini-pro-orchestrator-argon', 'Orchestrator (Argon)'],
+        ['claude-opus-4-6-thinking', 'Claude Opus 4.6 (Thinking)'],
+        ['claude-sonnet-4-6', 'Claude Sonnet 4.6 (Thinking)'],
+        ['gpt-oss-120b-medium', 'GPT-OSS 120B (Medium)'],
+      ];
+
+      const models = {};
+      for (const [id, name] of expectedPairs) {
+        assert.ok(FALLBACK_AGENT_MODEL_IDS.includes(id), `${id} should be in FALLBACK_AGENT_MODEL_IDS`);
+        assert.equal(MODEL_DISPLAY_NAMES[id], name);
+        models[id] = { quotaInfo: { remainingFraction: 0.75 } };
+      }
+
+      const normalized = normalizeQuotaModels(models, expectedPairs.map(([id]) => id));
+      assert.deepEqual(
+        normalized.map(m => [m.id, m.displayName]),
+        expectedPairs
+      );
+    });
   });
 
   describe('mergeQuotaWindows', () => {

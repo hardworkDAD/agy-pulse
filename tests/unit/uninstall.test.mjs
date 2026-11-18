@@ -138,3 +138,33 @@ test('removeWindowsShShims cleans up only our shims on Windows', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('uninstall cleans both agy-pulse-runtime and legacy agy-hud-runtime using injected env/homeDir', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'uninstall-both-runtimes-'));
+  try {
+    const home = path.join(tmp, 'home');
+    const root = path.join(home, '.gemini', 'antigravity-cli');
+    const pulseRuntime = path.join(root, 'agy-pulse-runtime');
+    const legacyRuntime = path.join(root, 'agy-hud-runtime');
+    const settingsPath = path.join(root, 'settings.json');
+    fs.mkdirSync(pulseRuntime, { recursive: true });
+    fs.mkdirSync(legacyRuntime, { recursive: true });
+    fs.writeFileSync(path.join(root, 'agy-pulse-compaction-cache.json'), '{}');
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      statusLine: { type: 'command', command: `node "${pulseRuntime}/runtime/bin/agy-pulse.js"` },
+    }));
+
+    const res = uninstall({
+      homeDir: home,
+      env: { HOME: home, USERPROFILE: home },
+      settingsPath,
+    });
+
+    assert.equal(res.statusLine.changed, true);
+    assert.equal(fs.existsSync(pulseRuntime), false);
+    assert.equal(fs.existsSync(legacyRuntime), false);
+    assert.equal(fs.existsSync(path.join(root, 'agy-pulse-compaction-cache.json')), false);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

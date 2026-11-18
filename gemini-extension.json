@@ -1,5 +1,5 @@
 {
-  "name": "agy-hud",
-  "version": "0.3.3",
-  "description": "Premium HUD for Antigravity CLI"
+  "name": "agy-pulse",
+  "version": "1.0.0",
+  "description": "All-in-one single-process statusline HUD, real-time context & compaction monitor, and quota tracker for Antigravity CLI"
 }

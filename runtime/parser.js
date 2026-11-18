@@ -1,12 +1,37 @@
+'use strict';
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { createHash } = require('crypto');
 const { execFileSync } = require('child_process');
-const { resolveSafeExecutable, resolveAntigravityPath } = require('./paths.js');
+const { getAntigravityRoots, resolveSafeExecutable, resolveAntigravityPath } = require('./paths.js');
+const { resolveServerCompactionLimit } = require('./compaction.js');
 
 function getGeminiHome() {
   const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
   return path.join(home, '.gemini');
+}
+
+/**
+ * Decodes the email claim from an unverified JWT string using base64url.
+ * Display-only: the JWT signature is NOT verified.
+ * @param {string} idToken
+ * @returns {string|null}
+ */
+function decodeEmailFromJwt(idToken) {
+  if (!idToken || typeof idToken !== 'string') return null;
+  const parts = idToken.split('.');
+  if (parts.length !== 3 || !parts[1]) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (payload && typeof payload.email === 'string' && payload.email.length > 0) {
+      return payload.email;
+    }
+  } catch {
+    // Ignore malformed JWT payloads
+  }
+  return null;
 }
 
 /**
@@ -24,16 +49,7 @@ function getOauthCredsEmail() {
     if (!fs.existsSync(credsPath)) return null;
 
     const raw = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
-    if (!raw.id_token) return null;
-
-    const parts = raw.id_token.split('.');
-    if (parts.length !== 3) return null;
-
-    // Base64url decode the payload section (index 1). Signature is NOT verified.
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
-    if (payload && payload.email) {
-      return payload.email;
-    }
+    return decodeEmailFromJwt(raw.id_token);
   } catch {}
   return null;
 }
@@ -72,10 +88,18 @@ function getActiveAccountEmail() {
     const { readToken } = require('./quota/token.js');
     const { getCachedAccountEmail } = require('./quota/cache.js');
     const geminiHome = getGeminiHome();
+    const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
     const isCustomHome = geminiHome !== path.join(os.homedir(), '.gemini');
+    const configuredRoots = getAntigravityRoots(process.env, homeDir);
+    const homeCliRoot = path.join(geminiHome, 'antigravity-cli');
+    const roots = configuredRoots.includes(homeCliRoot)
+      ? configuredRoots
+      : [...configuredRoots, homeCliRoot];
     const tok = readToken({
-      roots: [path.join(geminiHome, 'antigravity-cli')],
+      roots,
       skipKeychain: isCustomHome,
+      skipWindowsCredential: true,
+      skipLinuxKeyring: true,
     });
     if (tok) {
       if (tok.email && tok.sourceFormat !== 'oauth-creds') return tok.email;
@@ -169,109 +193,438 @@ function deepFind(obj, key, maxDepth = 6) {
   return undefined;
 }
 
-async function getSessionState(transcriptPath, customCwd = null) {
-  let steps = 0;
-  let branch = 'main';
-  let gitPath = null;
-  let usage;
-  let maxHistoricalCache = 0;
-  let imageExhausted = null;
-  let totalApiDurationMs = 0;
-  let pendingPlannerStartMs = null;
-  let lastPlannerResponse = null;
+function isNonNegFinite(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
 
+function toNonNegInt(value) {
+  return isNonNegFinite(value) ? Math.trunc(value) : 0;
+}
+
+const TRANSCRIPT_CACHE_VERSION = 1;
+
+function createEmptyTranscriptState() {
+  return {
+    steps: 0,
+    usage: null,
+    maxHistoricalCache: 0,
+    imageExhausted: null,
+    totalApiDurationMs: 0,
+    pendingPlannerStartMs: null,
+    lastPlannerResponse: null,
+    compactionCount: 0,
+    totalOutputTokens: 0,
+    peakRawTurnTokens: 0,
+    lastTurnUsage: null,
+    turnHistoryMaxByMode: {
+      inclusivePeak: 0,
+      exclusivePeak: 0,
+    },
+  };
+}
+
+function getTranscriptCachePath(transcriptPath) {
+  const resolved = path.resolve(transcriptPath);
+  const hash = createHash('sha256').update(resolved).digest('hex');
+  return resolveAntigravityPath(path.join('transcript-cache', `${hash}.json`));
+}
+
+function readTranscriptCache(cachePath, expectedIno, fileSize) {
   try {
-    const fileContent = fs.readFileSync(transcriptPath, 'utf8');
-    for (const line of fileContent.split('\n')) {
+    if (!cachePath || !fs.existsSync(cachePath)) return null;
+    const raw = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    if (!raw || typeof raw !== 'object') return null;
+    if (raw.version !== TRANSCRIPT_CACHE_VERSION) return null;
+    if (raw.ino !== expectedIno) return null;
+    if (!Number.isInteger(raw.offset) || raw.offset < 0 || raw.offset > fileSize) return null;
+
+    const base = createEmptyTranscriptState();
+    const state = {
+      steps: toNonNegInt(raw.steps),
+      usage: isObject(raw.usage) ? raw.usage : null,
+      maxHistoricalCache: toNonNegInt(raw.maxHistoricalCache),
+      imageExhausted: isObject(raw.imageExhausted) && typeof raw.imageExhausted.resetTime === 'string'
+        ? raw.imageExhausted
+        : null,
+      totalApiDurationMs: toNonNegInt(raw.totalApiDurationMs),
+      pendingPlannerStartMs: isNonNegFinite(raw.pendingPlannerStartMs) ? raw.pendingPlannerStartMs : null,
+      lastPlannerResponse: isObject(raw.lastPlannerResponse) && isNonNegFinite(raw.lastPlannerResponse.startMs)
+        ? {
+            startMs: raw.lastPlannerResponse.startMs,
+            endMs: isNonNegFinite(raw.lastPlannerResponse.endMs) ? raw.lastPlannerResponse.endMs : null,
+            outputTokens: isNonNegFinite(raw.lastPlannerResponse.outputTokens)
+              ? Math.trunc(raw.lastPlannerResponse.outputTokens)
+              : null,
+          }
+        : null,
+      compactionCount: toNonNegInt(raw.compactionCount),
+      totalOutputTokens: toNonNegInt(raw.totalOutputTokens),
+      peakRawTurnTokens: toNonNegInt(raw.peakRawTurnTokens),
+      lastTurnUsage: isObject(raw.lastTurnUsage) ? raw.lastTurnUsage : null,
+      turnHistoryMaxByMode: isObject(raw.turnHistoryMaxByMode)
+        ? {
+            inclusivePeak: toNonNegInt(raw.turnHistoryMaxByMode.inclusivePeak),
+            exclusivePeak: toNonNegInt(raw.turnHistoryMaxByMode.exclusivePeak),
+          }
+        : base.turnHistoryMaxByMode,
+    };
+
+    return { offset: raw.offset, state };
+  } catch {
+    return null;
+  }
+}
+
+function writeTranscriptCache(cachePath, ino, offset, accState) {
+  if (!cachePath) return;
+  let tmpPath = null;
+  try {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true, mode: 0o700 });
+    tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+    const payload = {
+      version: TRANSCRIPT_CACHE_VERSION,
+      ino,
+      offset,
+      ...accState,
+    };
+    fs.writeFileSync(tmpPath, JSON.stringify(payload), { mode: 0o600 });
+    fs.renameSync(tmpPath, cachePath);
+    tmpPath = null;
+  } catch {
+    // Best-effort cache write
+  } finally {
+    if (tmpPath) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {}
+    }
+  }
+}
+
+function loadFullEntriesMap(transcriptPath) {
+  const map = new Map();
+  try {
+    const fullPath = path.join(path.dirname(transcriptPath), 'transcript_full.jsonl');
+    if (!fs.existsSync(fullPath)) return map;
+    const raw = fs.readFileSync(fullPath, 'utf8');
+    for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
       try {
-        const entry = JSON.parse(line);
-        if (entry.step_index > steps) {
-          steps = entry.step_index;
-        }
-        const entryTimeMs = entry.created_at ? Date.parse(entry.created_at) : null;
-        const validTimeMs = entryTimeMs !== null && Number.isFinite(entryTimeMs) ? entryTimeMs : null;
-        if (pendingPlannerStartMs !== null && validTimeMs !== null && validTimeMs >= pendingPlannerStartMs) {
-          // `created_at` records when a step started; the next non-user step marks
-          // when the preceding PLANNER_RESPONSE ended (USER_INPUT includes user idle time).
-          if (entry.type !== 'USER_INPUT') {
-            totalApiDurationMs += (validTimeMs - pendingPlannerStartMs);
-            if (lastPlannerResponse && lastPlannerResponse.endMs === null) {
-              lastPlannerResponse.endMs = validTimeMs;
-            }
-          }
-          pendingPlannerStartMs = null;
-        }
-        if (entry.type === 'PLANNER_RESPONSE' && validTimeMs !== null) {
-          pendingPlannerStartMs = validTimeMs;
-          lastPlannerResponse = {
-            startMs: validTimeMs,
-            endMs: null,
-            outputTokens: Number.isFinite(entry.output_tokens) && entry.output_tokens >= 0 ? entry.output_tokens : null,
-          };
-        }
-        const contextWindow = findContextWindow(entry);
-        if (contextWindow) {
-          usage = contextWindow;
-          const cacheReadVal = contextWindow.cache_read_input_tokens || 
-                               (contextWindow.current_usage && contextWindow.current_usage.cache_read_input_tokens) || 0;
-          if (cacheReadVal > maxHistoricalCache) {
-            maxHistoricalCache = cacheReadVal;
-          }
-        }
-
-        // Parse image model 429 rate limits.
-        // Use deepFind on the already-parsed object instead of stringify+regex
-        // to avoid false positives (e.g. step_index or token counts containing "429").
-        const entryContent = typeof entry.content === 'string' ? entry.content : '';
-        const isRateLimit = (
-          deepFind(entry, 'RESOURCE_EXHAUSTED') !== undefined ||
-          deepFind(entry, 'quotaResetDelay') !== undefined ||
-          deepFind(entry, 'quotaResetTimeStamp') !== undefined ||
-          entryContent.includes('HTTP 429') ||
-          entryContent.includes('RESOURCE_EXHAUSTED')
-        );
-        if (isRateLimit) {
-          let delayMs = 0;
-          let timestampMs = 0;
-
-          const delayVal = deepFind(entry, 'quotaResetDelay') ?? deepFind(entry, 'retryDelay');
-          if (typeof delayVal === 'string' && delayVal) {
-            delayMs = parseDurationToMs(delayVal);
-          }
-
-          const tsVal = deepFind(entry, 'quotaResetTimeStamp');
-          if (typeof tsVal === 'string' && tsVal) {
-            const parsedTs = Date.parse(tsVal);
-            if (Number.isFinite(parsedTs)) {
-              timestampMs = parsedTs;
-            }
-          }
-
-          let resetTimeMs = 0;
-          if (timestampMs > 0) {
-            resetTimeMs = timestampMs;
-          } else if (delayMs > 0) {
-            const entryTime = entry.created_at ? new Date(entry.created_at).getTime() : Date.now();
-            resetTimeMs = entryTime + delayMs;
-          }
-
-          if (resetTimeMs > Date.now()) {
-            if (!imageExhausted || resetTimeMs > new Date(imageExhausted.resetTime).getTime()) {
-              imageExhausted = {
-                exhausted: true,
-                resetTime: new Date(resetTimeMs).toISOString()
-              };
-            }
-          }
+        const obj = JSON.parse(line);
+        if (typeof obj.step_index === 'number') {
+          map.set(obj.step_index, obj);
         }
       } catch {
-        // Skip invalid JSON lines
+        // Skip invalid line in transcript_full.jsonl
       }
     }
   } catch {
-    // File might not exist yet
+    // Ignore missing or unreadable transcript_full.jsonl
   }
+  return map;
+}
+
+function processTranscriptLine(line, acc, context) {
+  if (!line.trim()) return;
+  let entry;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (!isObject(entry)) return;
+
+  if (typeof entry.step_index === 'number' && entry.step_index > acc.steps) {
+    acc.steps = entry.step_index;
+  }
+
+  if (entry.type === 'CHECKPOINT') {
+    acc.compactionCount += 1;
+  }
+
+  const entryTimeMs = entry.created_at ? Date.parse(entry.created_at) : null;
+  const validTimeMs = entryTimeMs !== null && Number.isFinite(entryTimeMs) ? entryTimeMs : null;
+
+  if (acc.pendingPlannerStartMs !== null) {
+    // `created_at` records when a step started; the next non-user, non-system step
+    // marks when the preceding PLANNER_RESPONSE ended. USER_INPUT, SYSTEM_MESSAGE,
+    // source==='SYSTEM', or missing timestamps invalidate the pending span.
+    const isInterruptingStep = (
+      entry.type === 'USER_INPUT' ||
+      entry.type === 'SYSTEM_MESSAGE' ||
+      entry.source === 'SYSTEM'
+    );
+    if (validTimeMs === null || isInterruptingStep) {
+      acc.pendingPlannerStartMs = null;
+    } else if (validTimeMs >= acc.pendingPlannerStartMs) {
+      acc.totalApiDurationMs += (validTimeMs - acc.pendingPlannerStartMs);
+      if (acc.lastPlannerResponse && acc.lastPlannerResponse.endMs === null) {
+        acc.lastPlannerResponse.endMs = validTimeMs;
+      }
+      acc.pendingPlannerStartMs = null;
+    } else {
+      acc.pendingPlannerStartMs = null;
+    }
+  }
+
+  if (entry.type === 'PLANNER_RESPONSE' && validTimeMs !== null) {
+    acc.pendingPlannerStartMs = validTimeMs;
+    const rawPlannerOut = entry.output_tokens ?? entry.context_window?.current_usage?.output_tokens;
+    acc.lastPlannerResponse = {
+      startMs: validTimeMs,
+      endMs: null,
+      outputTokens: isNonNegFinite(rawPlannerOut) ? Math.trunc(rawPlannerOut) : null,
+    };
+  }
+
+  const contextWindow = findContextWindow(entry);
+  if (contextWindow) {
+    acc.usage = contextWindow;
+    const cur = isObject(contextWindow.current_usage) ? contextWindow.current_usage : contextWindow;
+    const cacheReadVal = toNonNegInt(
+      cur.cache_read_input_tokens ??
+      cur.cache_read_tokens ??
+      contextWindow.cache_read_input_tokens ??
+      contextWindow.cache_read_tokens
+    );
+    if (cacheReadVal > acc.maxHistoricalCache) {
+      acc.maxHistoricalCache = cacheReadVal;
+    }
+  }
+
+  const hasTopLevelTokens = (
+    isNonNegFinite(entry.input_tokens) ||
+    isNonNegFinite(entry.output_tokens) ||
+    isNonNegFinite(entry.cache_read_tokens) ||
+    isNonNegFinite(entry.cache_read_input_tokens) ||
+    isNonNegFinite(entry.cache_creation_tokens) ||
+    isNonNegFinite(entry.cache_creation_input_tokens)
+  );
+
+  if (entry.type === 'PLANNER_RESPONSE' && (hasTopLevelTokens || isObject(contextWindow?.current_usage))) {
+    const cur = isObject(contextWindow?.current_usage) ? contextWindow.current_usage : null;
+    const inp = toNonNegInt(entry.input_tokens ?? cur?.input_tokens);
+    const out = toNonNegInt(entry.output_tokens ?? cur?.output_tokens);
+    const cRead = toNonNegInt(
+      entry.cache_read_tokens ??
+      entry.cache_read_input_tokens ??
+      cur?.cache_read_input_tokens ??
+      cur?.cache_read_tokens
+    );
+    const cCreate = toNonNegInt(
+      entry.cache_creation_tokens ??
+      entry.cache_creation_input_tokens ??
+      cur?.cache_creation_input_tokens ??
+      cur?.cache_creation_tokens
+    );
+
+    acc.totalOutputTokens += out;
+    if (cRead > acc.maxHistoricalCache) {
+      acc.maxHistoricalCache = cRead;
+    }
+
+    const inclusiveTurn = Math.max(inp, cCreate + cRead) + out;
+    const exclusiveTurn = inp + cCreate + cRead + out;
+    if (inclusiveTurn > acc.turnHistoryMaxByMode.inclusivePeak) {
+      acc.turnHistoryMaxByMode.inclusivePeak = inclusiveTurn;
+    }
+    if (exclusiveTurn > acc.turnHistoryMaxByMode.exclusivePeak) {
+      acc.turnHistoryMaxByMode.exclusivePeak = exclusiveTurn;
+    }
+    if (exclusiveTurn > acc.peakRawTurnTokens) {
+      acc.peakRawTurnTokens = exclusiveTurn;
+    }
+
+    const rawModel = typeof entry.model === 'string' && entry.model.trim()
+      ? entry.model.trim()
+      : (typeof entry.model_name === 'string' && entry.model_name.trim() ? entry.model_name.trim() : undefined);
+    acc.lastTurnUsage = {
+      input_tokens: inp,
+      output_tokens: out,
+      cache_read_input_tokens: cRead,
+      cache_creation_input_tokens: cCreate,
+      ...(rawModel ? { model: rawModel } : {}),
+    };
+
+    if (!contextWindow) {
+      acc.usage = {
+        total_input_tokens: inp,
+        total_output_tokens: acc.totalOutputTokens,
+        current_usage: {
+          input_tokens: inp,
+          output_tokens: out,
+          cache_read_input_tokens: cRead,
+          cache_creation_input_tokens: cCreate,
+        },
+      };
+    }
+  }
+
+  // Parse image model 429 rate limits strictly from structured error entries
+  // to avoid false positives from plain-text code/log discussions.
+  const isStructuredError = (
+    entry.status === 'ERROR' ||
+    isObject(entry.error) ||
+    entry.type === 'ERROR'
+  );
+  if (isStructuredError) {
+    let targetEntry = entry;
+    if (
+      Array.isArray(entry.truncated_fields) &&
+      entry.truncated_fields.includes('content') &&
+      typeof entry.step_index === 'number'
+    ) {
+      if (!context.fullEntriesMap) {
+        context.fullEntriesMap = loadFullEntriesMap(context.transcriptPath);
+      }
+      const fullEntry = context.fullEntriesMap.get(entry.step_index);
+      if (isObject(fullEntry)) {
+        targetEntry = { ...entry, ...fullEntry };
+      }
+    }
+
+    const targetContent = typeof targetEntry.content === 'string' ? targetEntry.content : '';
+    const isRateLimit = (
+      deepFind(targetEntry, 'RESOURCE_EXHAUSTED') !== undefined ||
+      deepFind(targetEntry, 'quotaResetDelay') !== undefined ||
+      deepFind(targetEntry, 'quotaResetTimeStamp') !== undefined ||
+      (isObject(targetEntry.error) && (targetEntry.error.code === 429 || targetEntry.error.status === 'RESOURCE_EXHAUSTED')) ||
+      targetContent.includes('HTTP 429') ||
+      targetContent.includes('RESOURCE_EXHAUSTED')
+    );
+
+    if (isRateLimit) {
+      let delayMs = 0;
+      let timestampMs = 0;
+
+      let delayVal = deepFind(targetEntry, 'quotaResetDelay') ?? deepFind(targetEntry, 'retryDelay');
+      if (typeof delayVal !== 'string' && targetContent) {
+        const m = targetContent.match(/quotaResetDelay["']?\s*[:=]\s*["']?([0-9hms]+)/i);
+        if (m) delayVal = m[1];
+      }
+      if (typeof delayVal === 'string' && delayVal) {
+        delayMs = parseDurationToMs(delayVal);
+      }
+
+      let tsVal = deepFind(targetEntry, 'quotaResetTimeStamp');
+      if (typeof tsVal !== 'string' && targetContent) {
+        const m = targetContent.match(/quotaResetTimeStamp["']?\s*[:=]\s*["']?([0-9T:\-.+Z]+)/i);
+        if (m) tsVal = m[1];
+      }
+      if (typeof tsVal === 'string' && tsVal) {
+        const parsedTs = Date.parse(tsVal);
+        if (Number.isFinite(parsedTs)) {
+          timestampMs = parsedTs;
+        }
+      }
+
+      let resetTimeMs = 0;
+      if (timestampMs > 0) {
+        resetTimeMs = timestampMs;
+      } else if (delayMs > 0) {
+        const entryTime = targetEntry.created_at ? new Date(targetEntry.created_at).getTime() : Date.now();
+        resetTimeMs = entryTime + delayMs;
+      }
+
+      if (resetTimeMs > Date.now()) {
+        if (!acc.imageExhausted || resetTimeMs > new Date(acc.imageExhausted.resetTime).getTime()) {
+          acc.imageExhausted = {
+            exhausted: true,
+            resetTime: new Date(resetTimeMs).toISOString(),
+          };
+        }
+      }
+    }
+  }
+}
+
+function scanTranscriptIncremental(transcriptPath) {
+  const acc = createEmptyTranscriptState();
+  if (!transcriptPath || typeof transcriptPath !== 'string') return acc;
+
+  let stat;
+  try {
+    stat = fs.statSync(transcriptPath);
+    if (!stat.isFile()) return acc;
+  } catch {
+    return acc;
+  }
+
+  const fIno = Number(stat.ino || 0);
+  const fSize = Number(stat.size || 0);
+  const cachePath = getTranscriptCachePath(transcriptPath);
+  const cached = readTranscriptCache(cachePath, fIno, fSize);
+
+  let offset = 0;
+  let state = acc;
+  if (cached) {
+    offset = cached.offset;
+    state = cached.state;
+  }
+
+  if (offset < fSize) {
+    let fd = null;
+    try {
+      const toRead = fSize - offset;
+      const buf = Buffer.allocUnsafe(toRead);
+      fd = fs.openSync(transcriptPath, 'r');
+      let totalRead = 0;
+      while (totalRead < toRead) {
+        const n = fs.readSync(fd, buf, totalRead, toRead - totalRead, offset + totalRead);
+        if (n <= 0) break;
+        totalRead += n;
+      }
+      const view = totalRead < toRead ? buf.subarray(0, totalRead) : buf;
+      const lastNl = view.lastIndexOf(0x0a);
+      if (lastNl >= 0) {
+        const chunk = view.subarray(0, lastNl + 1).toString('utf8');
+        offset += lastNl + 1;
+        const ctx = { transcriptPath, fullEntriesMap: null };
+        for (const line of chunk.split('\n')) {
+          processTranscriptLine(line, state, ctx);
+        }
+        writeTranscriptCache(cachePath, fIno, offset, state);
+      }
+    } catch {
+      // Ignore transient read errors
+    } finally {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {}
+      }
+    }
+  } else if (!cached && fSize === 0 && fs.existsSync(cachePath)) {
+    writeTranscriptCache(cachePath, fIno, 0, state);
+  }
+
+  return state;
+}
+
+async function getSessionState(transcriptPath, customCwd = null) {
+  let branch = null;
+  let gitPath = null;
+
+  const scanned = scanTranscriptIncremental(transcriptPath);
+  const {
+    steps,
+    usage,
+    maxHistoricalCache,
+    totalApiDurationMs,
+    lastPlannerResponse,
+    compactionCount,
+    totalOutputTokens,
+    peakRawTurnTokens,
+    lastTurnUsage,
+    turnHistoryMaxByMode,
+  } = scanned;
+
+  const activeImageExhausted = (
+    scanned.imageExhausted &&
+    Date.parse(scanned.imageExhausted.resetTime) > Date.now()
+  )
+    ? scanned.imageExhausted
+    : null;
 
   const cwd = customCwd || process.cwd();
 
@@ -283,10 +636,12 @@ async function getSessionState(transcriptPath, customCwd = null) {
         stdio: ['ignore', 'pipe', 'ignore'],
         cwd,
       }).trim();
-      branch = gitBranch;
+      if (gitBranch) {
+        branch = gitBranch;
+      }
     }
   } catch {
-    // Not a git repo or git not found
+    branch = null;
   }
 
   const normalizedCwd = cwd.replace(/\\/g, '/');
@@ -394,11 +749,38 @@ async function getSessionState(transcriptPath, customCwd = null) {
     }
   } catch {}
 
+  let serverCompactionLimit = 512000;
+  try {
+    const resolvedCompaction = resolveServerCompactionLimit({ transcriptPath });
+    if (resolvedCompaction && typeof resolvedCompaction.serverLimit === 'number') {
+      serverCompactionLimit = resolvedCompaction.serverLimit;
+    }
+  } catch {
+    // Fallback to default limit
+  }
+
   const username = getActiveAccountEmail() || getFallbackUsername();
   const currentDir = path.basename(cwd);
-  const state = { steps, branch, memoryFile, rulesCount, mcpCount, hooksCount, currentDir, username, maxHistoricalCache, transcriptPath };
+  const state = {
+    steps,
+    branch,
+    memoryFile,
+    rulesCount,
+    mcpCount,
+    hooksCount,
+    currentDir,
+    username,
+    maxHistoricalCache,
+    transcriptPath,
+    compactionCount,
+    totalOutputTokens,
+    peakRawTurnTokens,
+    lastTurnUsage,
+    turnHistoryMaxByMode,
+    serverCompactionLimit,
+  };
   if (usage) state.usage = usage;
-  if (imageExhausted) state.imageExhausted = imageExhausted;
+  if (activeImageExhausted) state.imageExhausted = activeImageExhausted;
   if (totalApiDurationMs > 0) state.totalApiDurationMs = totalApiDurationMs;
   if (lastPlannerResponse) state.lastPlannerResponse = lastPlannerResponse;
   return state;

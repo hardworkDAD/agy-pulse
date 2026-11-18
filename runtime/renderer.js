@@ -14,6 +14,7 @@ const {
   calculateTurnCacheMetrics,
   formatTurnCacheBadge,
   sanitizeTerminalText,
+  truncateToDisplayWidth,
   formatTokens,
   formatDuration,
   formatQuotaPercent,
@@ -23,6 +24,7 @@ const {
   resolveLanguage,
 } = require('./renderer/lang.js');
 const { createQuotaRenderers } = require('./renderer/quota-render.js');
+const { renderContextMonitorLine } = require('./renderer/context-monitor.js');
 const { pickCriticalWindow } = require('./quota/models.js');
 const { getSessionCostUsd, formatUsd } = require('./cost.js');
 const { getCostTotals } = require('./daily-cost.js');
@@ -145,7 +147,8 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
     if (config.icons.model !== undefined) modelIcon = sanitizeIcon(config.icons.model);
   }
 
-  const branchName = `${blue}${branchIcon}${sanitizeTerminalText(state.branch || 'unknown', 80)}${reset}`;
+  const rawBranch = sanitizeTerminalText(state?.branch || '', 80);
+  const branchName = rawBranch ? `${blue}${branchIcon}${rawBranch}${reset}` : '';
 
   // Compact arrow glyphs for token breakdown
   const inArrow = unicode ? '↑' : '^';
@@ -182,12 +185,7 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
     return `${finalColor}[${glyph.bar.repeat(completed)}${glyph.empty.repeat(remaining)}]${reset}`;
   };
 
-  const truncateAndPad = (str, width) => {
-    if (str.length > width) {
-      return str.substring(0, width - 1) + glyph.ellipsis;
-    }
-    return str.padEnd(width, ' ');
-  };
+  const truncateAndPad = (str, width) => truncateToDisplayWidth(str, width, glyph.ellipsis);
 
   const divider = ` ${gray}${glyph.vbar}${reset} `;
 
@@ -195,7 +193,7 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
   const line1Parts = [];
   if (showModel) line1Parts.push(`${green}${modelName}${reset}`);
   line1Parts.push(`${magenta}${plan}${reset}`);
-  if (showGitBranch) line1Parts.unshift(branchName);
+  if (showGitBranch && branchName) line1Parts.unshift(branchName);
   const currentDir = sanitizeTerminalText(state.currentDir || '', 80);
   if (showCurrentDir && currentDir) {
     line1Parts.unshift(`${blue}${currentDir}${reset}`);
@@ -213,7 +211,10 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
     if (weeklyQ) sevenDayResetAt = weeklyQ.windows.weekly.resetTime;
   }
 
-  const sessionCost = showCost ? getSessionCostUsd(agyData, state, { allowRoutedCost: display.showRoutedCost }) : null;
+  const computedSessionCost = (showCost || display.showContextMonitor === true)
+    ? getSessionCostUsd(agyData, state, { allowRoutedCost: display.showRoutedCost })
+    : null;
+  const sessionCost = showCost ? computedSessionCost : null;
   const costTotals = state?.costTotals ?? ((showDailyCost || showWeeklyCost)
     ? getCostTotals(agyData, { allowRoutedCost: display.showRoutedCost, sevenDayResetAt }, undefined, state)
     : null);
@@ -339,7 +340,10 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
       const extractFamilyAndTier = (name) => {
         const s = String(name).toLowerCase();
         let family = '';
-        if (s.includes('argon')) family = 'argon';
+        if (s.includes('orchestrator')) family = 'orchestrator';
+        else if (s.includes('argon')) family = 'argon';
+        else if (s.includes('carbon')) family = 'carbon';
+        else if (s.includes('hydrogen')) family = 'hydrogen';
         else if (s.includes('flash')) family = 'flash';
         else if (s.includes('pro')) family = 'pro';
         else if (s.includes('sonnet')) family = 'sonnet';
@@ -348,7 +352,8 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
         else if (s.includes('gpt')) family = 'gpt';
 
         let tier = '';
-        if (s.includes('high') || s.includes('(h)') || s.includes('thinking') || s.includes('(th)')) tier = 'high';
+        if (s.includes('xhigh') || s.includes('(xh)')) tier = 'xhigh';
+        else if (s.includes('high') || s.includes('(h)') || s.includes('thinking') || s.includes('(th)')) tier = 'high';
         else if (s.includes('medium') || s.includes('(m)') || s.includes('tiered')) tier = 'medium';
         else if (s.includes('low') || s.includes('(l)') || s.includes('extra-low') || s.includes('lite')) tier = 'low';
 
@@ -389,8 +394,11 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
     let timeStr = '';
     const resetTime = critical.resetTime || currentModelQuota.resetTime;
     if (resetTime) {
-      const secsLeft = Math.max(0, Math.round((new Date(resetTime).getTime() - Date.now()) / 1000));
-      timeStr = ` ${gray}~${formatDuration(secsLeft)}${reset}`;
+      const resetMs = new Date(resetTime).getTime();
+      if (Number.isFinite(resetMs) && resetMs > Date.now()) {
+        const secsLeft = Math.max(0, Math.round((resetMs - Date.now()) / 1000));
+        timeStr = ` ${gray}~${formatDuration(secsLeft)}${reset}`;
+      }
     }
     line2Parts.push(`${pctColor}Quota: ${pct}%${reset}${timeStr}`);
   }
@@ -456,6 +464,7 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
     glyph,
     thresholds: { warnThresh, critThresh },
     nameWidth,
+    columnWidth,
     divider,
     createProgressBar,
     truncateAndPad,
@@ -499,7 +508,24 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
 
   const lines = [line1, line2].filter(Boolean);
   if (line3) lines.push(line3);
-  return lines.join('\n') + quotaLines;
+  const baseHud = lines.join('\n') + quotaLines;
+
+  if (display.showContextMonitor === true) {
+    const monitorLine = renderContextMonitorLine({
+      state,
+      agyData,
+      config,
+      colors: { reset, bold, dim, red, green, yellow, cyan, magenta },
+      unicode,
+      lang: resolveLanguage(config),
+      sessionCostUsd: computedSessionCost,
+    });
+    if (monitorLine) {
+      return baseHud ? `${baseHud}\n${monitorLine}` : monitorLine;
+    }
+  }
+
+  return baseHud;
 }
 
 module.exports = {

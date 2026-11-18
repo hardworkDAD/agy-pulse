@@ -39,7 +39,8 @@ function readLedger(ledgerPath) {
     for (const [id, s] of Object.entries(raw.sessions)) {
       if (!isObject(s) || !isAmount(s.baseline) || !isAmount(s.total) || !isAmount(s.ts) || s.ts === 0) continue;
       const weekBaseline = isAmount(s.weekBaseline) ? s.weekBaseline : s.baseline;
-      sessions[id] = { baseline: s.baseline, weekBaseline, total: s.total, ts: s.ts };
+      const lastObservedCost = isAmount(s.lastObservedCost) ? s.lastObservedCost : s.total;
+      sessions[id] = { baseline: s.baseline, weekBaseline, total: s.total, lastObservedCost, ts: s.ts };
     }
     const week = isObject(raw.week) ? raw.week : {};
     return {
@@ -79,6 +80,30 @@ function writeLedger(ledgerPath, ledger, now) {
   }
 }
 
+function mergeDiskLedgerBeforeWrite(ledgerPath, ledger, activeSessionId, now) {
+  const latest = readLedger(ledgerPath);
+  if (!latest || latest.date !== ledger.date || latest.week.start !== ledger.week.start) {
+    return;
+  }
+  ledger.week.carry = Math.max(ledger.week.carry, latest.week.carry);
+  for (const [id, diskSess] of Object.entries(latest.sessions)) {
+    if (id === activeSessionId) continue;
+    if (now - diskSess.ts > SESSION_MAX_AGE_MS) continue;
+    const cur = ledger.sessions[id];
+    if (!cur) {
+      ledger.sessions[id] = diskSess;
+    } else {
+      ledger.sessions[id] = {
+        baseline: Math.min(cur.baseline, diskSess.baseline),
+        weekBaseline: Math.min(cur.weekBaseline, diskSess.weekBaseline),
+        total: Math.max(cur.total, diskSess.total),
+        lastObservedCost: diskSess.ts > cur.ts ? diskSess.lastObservedCost : cur.lastObservedCost,
+        ts: Math.max(cur.ts, diskSess.ts),
+      };
+    }
+  }
+}
+
 const defaultDeps = {
   rootDir: () => resolveAntigravityPath(''),
   now: () => Date.now(),
@@ -92,7 +117,7 @@ const defaultDeps = {
  * @param {Object} [options]
  * @param {Object} [deps]
  * @param {Object} [state]
- * @returns {{ todayUsd: number, weekUsd: number|null }|null}
+ * @returns {{ todayUsd: number, weekUsd: number }|null}
  */
 function getCostTotals(agyData, options = {}, deps = defaultDeps, state = null) {
   const now = deps.now();
@@ -101,6 +126,10 @@ function getCostTotals(agyData, options = {}, deps = defaultDeps, state = null) 
   const stored = readLedger(ledgerPath);
   const ledger = stored ?? { date: today, sessions: {}, week: { start: now, carry: 0 } };
   let changed = stored === null;
+
+  if (!ledger.week.start || ledger.week.start <= 0) {
+    ledger.week.start = now;
+  }
 
   // Sessions unseen for a day leave the ledger, but their spend stays inside the week.
   for (const [id, session] of Object.entries(ledger.sessions)) {
@@ -120,7 +149,8 @@ function getCostTotals(agyData, options = {}, deps = defaultDeps, state = null) 
     changed = true;
   }
 
-  // Restart the week when the quota window behind the weekly bar opened after accumulation began.
+  // Restart the week when the quota window behind the weekly bar opened after accumulation began,
+  // or fall back to a local 7-day rolling window when sevenDayResetAt is unavailable (offline).
   const resetAt = options?.sevenDayResetAt instanceof Date
     ? options.sevenDayResetAt.getTime()
     : typeof options?.sevenDayResetAt === 'number'
@@ -139,6 +169,12 @@ function getCostTotals(agyData, options = {}, deps = defaultDeps, state = null) 
     }
     ledger.week = { start: now, carry: 0 };
     changed = true;
+  } else if (windowStart === null && now - ledger.week.start >= SEVEN_DAY_WINDOW_MS) {
+    for (const session of Object.values(ledger.sessions)) {
+      session.weekBaseline = session.total;
+    }
+    ledger.week = { start: now, carry: 0 };
+    changed = true;
   }
 
   const rawSessionId = agyData?.session_id || agyData?.conversation_id || state?.transcriptPath || '';
@@ -146,34 +182,55 @@ function getCostTotals(agyData, options = {}, deps = defaultDeps, state = null) 
 
   const cost = getNativeCostUsd(agyData, options) ?? (state ? getSessionCostUsd(agyData, state, options) : null);
 
+  let tsRenewed = false;
   if (sessionId && cost !== null && Number.isFinite(cost)) {
     const session = ledger.sessions[sessionId];
     if (!session) {
-      ledger.sessions[sessionId] = { baseline: cost, weekBaseline: cost, total: cost, ts: now };
+      ledger.sessions[sessionId] = {
+        baseline: cost,
+        weekBaseline: cost,
+        total: cost,
+        lastObservedCost: cost,
+        ts: now,
+      };
       changed = true;
     } else {
-      if (cost > session.total) {
-        session.total = cost;
+      const lastObserved = isAmount(session.lastObservedCost) ? session.lastObservedCost : session.total;
+      if (cost > lastObserved) {
+        session.total += (cost - lastObserved);
+        session.lastObservedCost = cost;
+        changed = true;
+      } else if (cost < lastObserved) {
+        // Compaction or counter reset: advance the observation cursor without
+        // subtracting previously accrued spend so subsequent growth continues counting.
+        session.lastObservedCost = cost;
         changed = true;
       }
-      session.ts = now;
+      if (session.ts !== now) {
+        session.ts = now;
+        tsRenewed = true;
+      }
     }
   }
 
-  const sessions = Object.values(ledger.sessions);
-  if (sessions.length === 0 && ledger.week.carry === 0) {
+  if (Object.keys(ledger.sessions).length === 0 && ledger.week.carry === 0) {
     return null;
   }
 
+  if (tsRenewed && !isThrottled(ledgerPath, now)) {
+    changed = true;
+  }
   if (changed || !isThrottled(ledgerPath, now)) {
+    mergeDiskLedgerBeforeWrite(ledgerPath, ledger, sessionId, now);
     writeLedger(ledgerPath, ledger, now);
   }
 
+  const sessions = Object.values(ledger.sessions);
   const sum = (pick) => sessions.reduce((total, s) => total + Math.max(0, s.total - pick(s)), 0);
 
   return {
     todayUsd: sum((s) => s.baseline),
-    weekUsd: windowStart !== null ? ledger.week.carry + sum((s) => s.weekBaseline) : null,
+    weekUsd: ledger.week.carry + sum((s) => s.weekBaseline),
   };
 }
 

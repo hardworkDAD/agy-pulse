@@ -116,3 +116,46 @@ test('resolveSafeExecutable resolves absolute path and skips relative directorie
     assert.equal(resolved, nodePath);
   });
 });
+
+test('getAntigravityRoots supports AGY_PULSE_DATA_DIR over AGY_HUD_DATA_DIR and injected env/homeDir', () => {
+  const rootsPulse = getAntigravityRoots({
+    AGY_PULSE_DATA_DIR: '/pulse/data',
+    AGY_HUD_DATA_DIR: '/hud/data',
+  }, '/custom/home');
+  assert.deepEqual(rootsPulse, ['/pulse/data']);
+
+  const rootsHud = getAntigravityRoots({
+    AGY_HUD_DATA_DIR: '/hud/data',
+  }, '/custom/home');
+  assert.deepEqual(rootsHud, ['/hud/data']);
+
+  const injectedRoots = getAntigravityRoots({
+    XDG_DATA_HOME: '/custom/xdg',
+  }, '/injected/home');
+  assert.deepEqual(injectedRoots, [
+    path.join('/injected/home', '.gemini', 'antigravity-cli'),
+    path.join('/custom/xdg', 'antigravity-cli'),
+  ]);
+});
+
+test('resolveAntigravityPath and resolveSafeExecutable respect injected env/homeDir', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'paths-inject-test-'));
+  try {
+    const customHome = path.join(tmp, 'home');
+    const customRoot = path.join(customHome, '.gemini', 'antigravity-cli');
+    fs.mkdirSync(customRoot, { recursive: true });
+    fs.writeFileSync(path.join(customRoot, 'settings.json'), '{}');
+
+    const resolved = resolveAntigravityPath('settings.json', {}, customHome);
+    assert.equal(resolved, path.join(customRoot, 'settings.json'));
+
+    const binDir = path.join(tmp, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const exeName = process.platform === 'win32' ? 'custom-tool.exe' : 'custom-tool';
+    const exePath = path.join(binDir, exeName);
+    fs.writeFileSync(exePath, '');
+    assert.equal(resolveSafeExecutable('custom-tool', { PATH: binDir }), exePath);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

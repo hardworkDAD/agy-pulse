@@ -7,6 +7,8 @@ const { resolveAntigravityPath } = require('./paths.js');
 
 // Below 500ms API time a rate is mostly noise
 const MIN_API_DELTA_MS = 500;
+// Active first-turn plain-text reply window (2 minutes)
+const MAX_FIRST_TURN_TRAILING_MS = 120000;
 
 function isCount(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -53,12 +55,15 @@ function writeState(file, state) {
   }
 }
 
-function resolveTurnTokens(hasPerTurnOutput, turnOutput, totalOutput, previous) {
+function resolveTurnTokens(hasPerTurnOutput, turnOutput, totalOutput, previous, allowInitialTotal = false) {
   if (hasPerTurnOutput) {
     return turnOutput;
   }
   if (totalOutput !== null && previous && isCount(previous.totalOutput) && totalOutput >= previous.totalOutput) {
     return totalOutput - previous.totalOutput;
+  }
+  if (allowInitialTotal && totalOutput !== null && (!previous || previous.totalOutput === null)) {
+    return totalOutput;
   }
   return 0;
 }
@@ -79,7 +84,9 @@ function getOutputSpeed(agyData, rootDir = null, state = null, now = Date.now())
   const turnOutput = isCount(usage?.output_tokens) ? usage.output_tokens : null;
   const totalOutput = isCount(agyData?.context_window?.total_output_tokens)
     ? agyData.context_window.total_output_tokens
-    : (isCount(state?.usage?.total_output_tokens) ? state.usage.total_output_tokens : null);
+    : (isCount(state?.usage?.total_output_tokens)
+      ? state.usage.total_output_tokens
+      : (isCount(state?.totalOutputTokens) ? state.totalOutputTokens : null));
   const hasPerTurnOutput = turnOutput !== null;
   const output = turnOutput ?? totalOutput;
 
@@ -110,10 +117,17 @@ function getOutputSpeed(agyData, rootDir = null, state = null, now = Date.now())
   // Path A: Transcript-derived per-response timing from agy PLANNER_RESPONSE steps
   if (planner && isCount(planner.startMs)) {
     const isFreshOrLegacy = !previous || previous.plannerStartMs === null;
-    const hasClosedTurn = isCount(planner.endMs) && planner.endMs >= planner.startMs && hasPerTurnOutput;
+    const hasClosedTurn = isCount(planner.endMs) && planner.endMs >= planner.startMs;
+    const trailingMs = !hasClosedTurn && now >= planner.startMs ? now - planner.startMs : 0;
+    const hasActiveFirstTurn = (
+      !previous &&
+      !hasClosedTurn &&
+      trailingMs >= MIN_API_DELTA_MS &&
+      trailingMs <= MAX_FIRST_TURN_TRAILING_MS
+    );
     const resetRequired = (
-      (isFreshOrLegacy && !hasClosedTurn) ||
-      (!hasPerTurnOutput && totalOutput !== null && previous?.totalOutput !== null && totalOutput < previous.totalOutput)
+      (isFreshOrLegacy && !hasClosedTurn && !hasActiveFirstTurn) ||
+      (!hasPerTurnOutput && totalOutput !== null && isCount(previous?.totalOutput) && totalOutput < previous.totalOutput)
     );
     const baseState = {
       apiDurationMs: isCount(apiDurationMs) ? apiDurationMs : 0,
@@ -130,11 +144,20 @@ function getOutputSpeed(agyData, rootDir = null, state = null, now = Date.now())
       return previous.speed;
     }
 
-    const turnTokens = resolveTurnTokens(hasPerTurnOutput, turnOutput, totalOutput, previous);
-    const durationMs = isCount(planner.endMs) && planner.endMs >= planner.startMs
+    const turnTokens = resolveTurnTokens(
+      hasPerTurnOutput,
+      turnOutput,
+      totalOutput,
+      previous,
+      isFreshOrLegacy
+    );
+    const durationMs = hasClosedTurn
       ? planner.endMs - planner.startMs
       : (now >= planner.startMs ? now - planner.startMs : 0);
-    const tokensAligned = !hasPerTurnOutput || planner.outputTokens === null || turnTokens === planner.outputTokens;
+    const tokensAligned = (
+      planner.outputTokens === null ||
+      Math.abs(turnTokens - planner.outputTokens) <= Math.max(5, Math.round(turnTokens * 0.05))
+    );
     const fallbackSpeed = isFreshOrLegacy ? null : previous.speed;
     const speed = tokensAligned && turnTokens > 0 && durationMs >= MIN_API_DELTA_MS
       ? turnTokens / (durationMs / 1000)

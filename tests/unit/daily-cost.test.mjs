@@ -149,3 +149,36 @@ test('weekly total spans days and follows the quota window', () => {
   totals = getCostTotals({ session_id: 'b', cost: { total_cost_usd: 2.5 } }, next, deps(NOON + DAY_MS + 2000));
   assert.equal(totals.weekUsd, 2.0);
 });
+
+test('computes weekly total using local 7-day rolling window when sevenDayResetAt is null/offline', () => {
+  getCostTotals({ session_id: 'a', cost: { total_cost_usd: 1.0 } }, { sevenDayResetAt: null }, deps(NOON));
+  let totals = getCostTotals({ session_id: 'a', cost: { total_cost_usd: 3.5 } }, { sevenDayResetAt: null }, deps(NOON + 1000));
+  assert.equal(totals.todayUsd, 2.5);
+  assert.equal(totals.weekUsd, 2.5);
+
+  // Keep session 'a' active within 24h across days 1..6 so SESSION_MAX_AGE_MS does not evict it
+  for (let d = 1; d <= 6; d += 1) {
+    getCostTotals({ session_id: 'a', cost: { total_cost_usd: 3.5 } }, { sevenDayResetAt: null }, deps(NOON + d * DAY_MS + 1000));
+  }
+
+  // Rolling 7-day window resets after 7 days
+  totals = getCostTotals({ session_id: 'a', cost: { total_cost_usd: 4.5 } }, { sevenDayResetAt: null }, deps(NOON + 7 * DAY_MS + 1000));
+  assert.equal(totals.weekUsd, 1.0);
+});
+
+test('continues accumulating spend after context compaction causes estimated cost to drop', () => {
+  const s = { session_id: 'compact-1', cost: { total_cost_usd: 3.0 } };
+  getCostTotals(s, undefined, deps(NOON));
+  s.cost.total_cost_usd = 5.0; // +2.0
+  assert.equal(todayUsd(s, undefined, deps(NOON + 1000)), 2.0);
+
+  // Compaction resets estimated cost down to 1.0
+  s.cost.total_cost_usd = 1.0;
+  assert.equal(todayUsd(s, undefined, deps(NOON + 2000)), 2.0);
+
+  // Subsequent growth from 1.0 to 2.5 (+1.5) must be added on top of prior 2.0 -> 3.5
+  s.cost.total_cost_usd = 2.5;
+  const totals = getCostTotals(s, undefined, deps(NOON + 3000));
+  assert.equal(totals.todayUsd, 3.5);
+  assert.equal(totals.weekUsd, 3.5);
+});

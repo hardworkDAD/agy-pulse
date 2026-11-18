@@ -7,12 +7,18 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 
-const DEFAULT_SOURCE_BASE = 'https://raw.githubusercontent.com/icebear0828/agy-hud/main';
+const DEFAULT_SOURCE_BASE = '';
 
 const RUNTIME_FILES = [
   'package.json',
   'runtime/agy-hud.config.json',
+  'runtime/brand.js',
+  'runtime/bin/agy-pulse.js',
+  'runtime/bin/agy-pulse.cmd',
   'runtime/bin/agy-hud.js',
+  'runtime/bin/agy-hud.cmd',
+  'runtime/compaction.js',
+  'runtime/config-wizard.js',
   'runtime/config.js',
   'runtime/cost.js',
   'runtime/daily-cost.js',
@@ -25,6 +31,7 @@ const RUNTIME_FILES = [
   'runtime/quota/models.js',
   'runtime/quota/token.js',
   'runtime/renderer.js',
+  'runtime/renderer/context-monitor.js',
   'runtime/renderer/format.js',
   'runtime/renderer/lang.js',
   'runtime/renderer/quota-render.js',
@@ -60,6 +67,22 @@ function pickAntigravityRoot(env = process.env, homeDir = os.homedir()) {
 
 function sourceUrl(sourceBase, relativePath) {
   return `${sourceBase.replace(/\/+$/, '')}/${relativePath}`;
+}
+
+function resolveSourceBase(options = {}, env = process.env) {
+  if (options.sourceBase) return options.sourceBase;
+  const explicit =
+    env.AGY_PULSE_REPO_RAW ||
+    env.AGY_HUD_REPO_RAW ||
+    env.AGY_PULSE_SETUP_SOURCE_BASE ||
+    env.AGY_HUD_SETUP_SOURCE_BASE;
+  if (explicit) return explicit;
+
+  const repoSlug = env.AGY_PULSE_REPO || env.AGY_HUD_REPO;
+  if (repoSlug && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repoSlug.trim())) {
+    return `https://raw.githubusercontent.com/${repoSlug.trim()}/main`;
+  }
+  return DEFAULT_SOURCE_BASE;
 }
 
 function requestBuffer(url, redirectsLeft = 5) {
@@ -103,8 +126,8 @@ async function requestBufferWithRetry(url, maxAttempts = 3) {
     } catch (err) {
       lastErr = err;
       if (attempt < maxAttempts) {
-        const delaySec = Math.pow(2, attempt - 1); // 1s, 2s, 4s
-        process.stderr.write(`[agy-hud] download attempt ${attempt} failed (${err.message}), retrying in ${delaySec}s...\n`);
+        const delaySec = Math.pow(2, attempt - 1);
+        process.stderr.write(`[agy-pulse] download attempt ${attempt} failed (${err.message}), retrying in ${delaySec}s...\n`);
         await new Promise(r => setTimeout(r, delaySec * 1000));
       }
     }
@@ -112,20 +135,16 @@ async function requestBufferWithRetry(url, maxAttempts = 3) {
   throw lastErr;
 }
 
-
 async function readRuntimeFile(relativePath, options) {
   if (options.sourceDir) {
     return fs.readFileSync(path.join(options.sourceDir, ...relativePath.split('/')));
   }
+  if (!options.sourceBase) {
+    throw new Error('No local sourceDir or remote repository configured. Set AGY_PULSE_REPO=owner/repo or AGY_PULSE_REPO_RAW=<url>.');
+  }
   return requestBufferWithRetry(sourceUrl(options.sourceBase, relativePath));
-
 }
 
-// Files staged by older agy-hud versions that the current spec-compliant
-// layout no longer ships. `agy plugin install` only OVERWRITES same-named
-// files — it never deletes ones that disappeared between releases. So an
-// upgrade from v0.1.x leaves an active hooks.json behind that fires its old
-// base64-blob bootstrap on every model step and clobbers settings.json.
 const STALE_PLUGIN_FILES = ['hooks.json', 'mcp_config.json'];
 const STALE_PLUGIN_DIRS = ['agents', 'commands', 'rules', 'extensions'];
 
@@ -136,18 +155,18 @@ function unique(values) {
 function getPluginDirs(antigravityRoot, options = {}) {
   const env = options.env || process.env;
   const homeDir = options.homeDir || os.homedir();
-  const dirs = [
-    // agy 1.0.x stages imported plugins under ~/.gemini/config/plugins.
-    path.join(homeDir, '.gemini', 'config', 'plugins', 'agy-hud'),
-    // Older agy-hud releases and early agy builds used antigravity-cli/plugins.
-    path.join(antigravityRoot, 'plugins', 'agy-hud'),
-  ];
+  const pluginNames = ['agy-pulse', 'agy-hud'];
+  const dirs = [];
 
-  if (env.XDG_CONFIG_HOME) {
-    dirs.push(path.join(env.XDG_CONFIG_HOME, 'gemini', 'plugins', 'agy-hud'));
-  }
-  if (env.APPDATA) {
-    dirs.push(path.join(env.APPDATA, 'gemini', 'plugins', 'agy-hud'));
+  for (const name of pluginNames) {
+    dirs.push(path.join(homeDir, '.gemini', 'config', 'plugins', name));
+    dirs.push(path.join(antigravityRoot, 'plugins', name));
+    if (env.XDG_CONFIG_HOME) {
+      dirs.push(path.join(env.XDG_CONFIG_HOME, 'gemini', 'plugins', name));
+    }
+    if (env.APPDATA) {
+      dirs.push(path.join(env.APPDATA, 'gemini', 'plugins', name));
+    }
   }
 
   return unique(dirs.map(dir => path.resolve(dir)));
@@ -201,21 +220,28 @@ async function installRuntime(options = {}) {
   const env = options.env || process.env;
   const homeDir = options.homeDir || os.homedir();
   const repoCandidate = path.resolve(__dirname, '..');
-  const hasLocalRuntime = fs.existsSync(path.join(repoCandidate, 'runtime', 'bin', 'agy-hud.js'));
-  const sourceDir = options.sourceDir || env.AGY_HUD_SETUP_SOURCE_DIR || (hasLocalRuntime ? repoCandidate : '');
-  const sourceBase = options.sourceBase || env.AGY_HUD_REPO_RAW || env.AGY_HUD_SETUP_SOURCE_BASE || DEFAULT_SOURCE_BASE;
+  const hasLocalRuntime =
+    fs.existsSync(path.join(repoCandidate, 'runtime', 'bin', 'agy-pulse.js')) ||
+    fs.existsSync(path.join(repoCandidate, 'runtime', 'bin', 'agy-hud.js'));
+  const sourceDir =
+    options.sourceDir ||
+    env.AGY_PULSE_SETUP_SOURCE_DIR ||
+    env.AGY_HUD_SETUP_SOURCE_DIR ||
+    (hasLocalRuntime ? repoCandidate : '');
+  const sourceBase = resolveSourceBase(options, env);
   const antigravityRoot = options.antigravityRoot || pickAntigravityRoot(env, homeDir);
-  const runtimeDir = path.join(antigravityRoot, 'agy-hud-runtime');
+  const runtimeDir = path.join(antigravityRoot, 'agy-pulse-runtime');
   const tempRuntimeDir = `${runtimeDir}.tmp-${process.pid}-${Date.now()}`;
 
   const stalePluginFiles = cleanStalePluginFiles(antigravityRoot, { env, homeDir });
   fs.rmSync(tempRuntimeDir, { recursive: true, force: true });
 
-  // Clean stale temp token cache on macOS since darwin queries Keychain directly
   if ((options.platform || process.platform) === 'darwin') {
-    const legacyTempToken = path.join(antigravityRoot, 'agy-hud-token.json');
-    if (fs.existsSync(legacyTempToken)) {
-      try { fs.rmSync(legacyTempToken, { force: true }); } catch {}
+    for (const legacyFile of ['agy-pulse-token.json', 'agy-hud-token.json']) {
+      const legacyTempToken = path.join(antigravityRoot, legacyFile);
+      if (fs.existsSync(legacyTempToken)) {
+        try { fs.rmSync(legacyTempToken, { force: true }); } catch {}
+      }
     }
   }
 
@@ -238,7 +264,12 @@ async function installRuntime(options = {}) {
   const result = configureStatusLine(path.join(runtimeDir, 'runtime'), {
     settingsPath: path.join(antigravityRoot, 'settings.json'),
   });
-  const quotaRefresh = await refreshQuotaCache(runtimeDir, { env, homeDir, platform: options.platform, keyringReader: options.keyringReader });
+  const quotaRefresh = await refreshQuotaCache(runtimeDir, {
+    env,
+    homeDir,
+    platform: options.platform,
+    keyringReader: options.keyringReader,
+  });
 
   return {
     antigravityRoot,
@@ -291,7 +322,7 @@ if (require.main === module) {
 
   run()
     .then(result => {
-      process.stdout.write(`AGY-HUD bootstrap complete\n`);
+      process.stdout.write(`agy-pulse bootstrap complete\n`);
       process.stdout.write(`runtime: ${result.runtimeDir}\n`);
       process.stdout.write(`settings: ${result.settingsPath}\n`);
       process.stdout.write(`statusLine: ${result.command}\n`);

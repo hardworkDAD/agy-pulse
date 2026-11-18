@@ -146,3 +146,15 @@ test('package does not keep obsolete local HTTP server helpers', () => {
   assert.equal(fs.existsSync(path.join(projectRoot, 'scripts', 'serve-release.js')), false);
   assert.equal(fs.existsSync(path.join(projectRoot, 'scripts', 'serve-source.js')), false);
 });
+
+test('agy-pulse brand manifests and default runtime config stay aligned', () => {
+  const packageJson = readJson('package.json');
+  const pluginJson = readJson('plugin.json');
+  const defaultConfig = readJson('runtime/agy-hud.config.json');
+
+  assert.equal(packageJson.name, 'agy-pulse');
+  assert.equal(packageJson.version, '1.0.0');
+  assert.equal(pluginJson.name, 'agy-pulse');
+  assert.equal(defaultConfig.display.showContextMonitor, true);
+  assert.equal(defaultConfig.display.unicode, undefined);
+});

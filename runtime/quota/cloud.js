@@ -2,13 +2,18 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFile } = require('child_process');
+const { resolveSafeExecutable } = require('../paths.js');
 const {
   FALLBACK_AGENT_MODEL_IDS,
   discoverAgentModelIds,
   resolveDeprecatedIds,
   normalizeQuotaModels,
+  classifyQuotaWindow,
   createUnavailableQuotaResult,
 } = require('./models.js');
+
+const NATIVE_FETCH = globalThis.fetch;
 
 // Authoritative quota endpoint (daily-cloudcode-pa confirmed source)
 const DEFAULT_ENDPOINTS = [
@@ -52,10 +57,132 @@ function buildHeaders(accessToken) {
 }
 
 function resolveEndpoints(config = {}) {
-  if (process.env.AGY_HUD_ENDPOINTS) {
-    return process.env.AGY_HUD_ENDPOINTS.split(',').map(s => s.trim()).filter(Boolean);
+  const envEndpoints = process.env.AGY_PULSE_ENDPOINTS || process.env.AGY_HUD_ENDPOINTS;
+  if (envEndpoints) {
+    return envEndpoints.split(',').map(s => s.trim()).filter(Boolean);
   }
   return (config && config.endpoints) || DEFAULT_ENDPOINTS;
+}
+
+function escapeCurlConfigValue(value) {
+  return String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t');
+}
+
+function buildCurlConfig(url, { method = 'GET', headers = {}, body, timeoutMs = 5000 } = {}) {
+  const maxTimeSec = Math.max(1, Math.ceil((Number(timeoutMs) || 5000) / 1000));
+  const lines = [
+    `url = "${escapeCurlConfigValue(url)}"`,
+    `request = "${escapeCurlConfigValue(String(method || 'GET').toUpperCase())}"`,
+    `max-time = "${maxTimeSec}"`,
+    'write-out = "\\n%{http_code}"',
+  ];
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (v === undefined || v === null) continue;
+    lines.push(`header = "${escapeCurlConfigValue(`${k}: ${v}`)}"`);
+  }
+  if (body !== undefined && body !== null) {
+    lines.push(`data = "${escapeCurlConfigValue(body)}"`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function curlFetchJson(url, options = {}) {
+  const curlPath = options._curlPath !== undefined ? options._curlPath : resolveSafeExecutable('curl');
+  if (!curlPath) {
+    return Promise.reject(new Error('curl executable not found'));
+  }
+  const execImpl = options._execFile || execFile;
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 5000;
+  const configText = buildCurlConfig(url, options);
+
+  return new Promise((resolve, reject) => {
+    const child = execImpl(
+      curlPath,
+      ['-sS', '-K', '-'],
+      {
+        encoding: 'utf8',
+        timeout: timeoutMs + 1000,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+      (err, stdout) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        const raw = String(stdout || '').replace(/\r?\n$/, '');
+        const lastNl = raw.lastIndexOf('\n');
+        const statusStr = lastNl >= 0 ? raw.slice(lastNl + 1).trim() : raw.trim();
+        const bodyStr = lastNl >= 0 ? raw.slice(0, lastNl) : '';
+        const status = Number.parseInt(statusStr, 10);
+        if (!Number.isFinite(status) || status <= 0) {
+          reject(new Error(`curl returned invalid status: ${statusStr}`));
+          return;
+        }
+        const ok = status >= 200 && status < 300;
+        let data = null;
+        if (bodyStr) {
+          try {
+            data = JSON.parse(bodyStr);
+          } catch (parseErr) {
+            if (ok) {
+              reject(parseErr);
+              return;
+            }
+          }
+        } else if (ok) {
+          data = {};
+        }
+        resolve({ ok, status, data });
+      }
+    );
+    if (child && child.stdin) {
+      child.stdin.end(configText);
+    }
+  });
+}
+
+async function cloudFetchJson(url, options = {}) {
+  const {
+    method = 'GET',
+    headers = {},
+    body,
+    timeoutMs = 5000,
+    _forceNativeFallback = false,
+  } = options;
+
+  const isNativeFetch = _forceNativeFallback || globalThis.fetch === NATIVE_FETCH;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const fetchOpts = {
+      method,
+      headers,
+      signal: controller.signal,
+    };
+    if (body !== undefined) {
+      fetchOpts.body = body;
+    }
+    const r = await globalThis.fetch(url, fetchOpts);
+    if (!r.ok) {
+      return { ok: false, status: r.status || 0, data: null };
+    }
+    const data = await r.json();
+    return { ok: true, status: r.status || 200, data };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (!isNativeFetch) {
+      throw err;
+    }
+    return curlFetchJson(url, { ...options, method, headers, body, timeoutMs });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /**
@@ -89,20 +216,16 @@ const USERINFO_ENDPOINTS = [
  */
 async function fetchAccountEmail(accessToken) {
   for (const endpoint of USERINFO_ENDPOINTS) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
     try {
-      const r = await fetch(endpoint, {
+      const r = await cloudFetchJson(endpoint, {
+        method: 'GET',
         headers: { 'Authorization': `Bearer ${accessToken}` },
-        signal: controller.signal,
+        timeoutMs: 3000,
       });
       if (!r.ok) continue;
-      const data = await r.json();
-      if (data && typeof data.email === 'string') return data.email;
+      if (r.data && typeof r.data.email === 'string') return r.data.email;
     } catch {
       /* try next endpoint */
-    } finally {
-      clearTimeout(timeoutId);
     }
   }
   return null;
@@ -114,16 +237,17 @@ async function fetchAccountEmail(accessToken) {
  * @param {string} accessToken
  * @returns {Promise<string|null>}
  */
-async function fetchTierFromCloud(accessToken) {
-  const { loadConfig } = require('../config.js');
-  const config = await loadConfig().catch(() => ({}));
+async function fetchTierFromCloud(accessToken, injectedConfig) {
+  let config = injectedConfig;
+  if (!config) {
+    const { loadConfig } = require('../config.js');
+    config = await loadConfig().catch(() => ({}));
+  }
   const endpoints = resolveEndpoints(config);
 
   for (const endpoint of endpoints) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
     try {
-      const r = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+      const r = await cloudFetchJson(`${endpoint}/v1internal:loadCodeAssist`, {
         method: 'POST',
         headers: buildHeaders(accessToken),
         body: JSON.stringify({
@@ -134,17 +258,11 @@ async function fetchTierFromCloud(accessToken) {
             pluginType: 'GEMINI',
           },
         }),
-        signal: controller.signal,
+        timeoutMs: 3000,
       });
-      if (!r.ok) {
-        clearTimeout(timeoutId);
-        continue;
-      }
-      const data = await r.json();
-      clearTimeout(timeoutId);
-      return extractTierName(data);
+      if (!r.ok) continue;
+      return extractTierName(r.data);
     } catch {
-      clearTimeout(timeoutId);
       /* try next endpoint */
     }
   }
@@ -153,12 +271,58 @@ async function fetchTierFromCloud(accessToken) {
 
 // ─── retrieveUserQuotaSummary helpers ──────────────────────────────────────
 
+function deriveCustomProviderKey(displayName, buckets) {
+  const cleanDisplay = String(displayName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\bmodels?\b/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (cleanDisplay) return cleanDisplay;
+
+  for (const b of buckets || []) {
+    const bid = String(b?.bucketId || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[-_](weekly|week|5h|fivehour|five_hour|7d)$/i, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (bid) return bid;
+  }
+  return 'custom';
+}
+
+function classifySummaryBucketWindow(bucket) {
+  const bucketId = String(bucket?.bucketId || '').toLowerCase();
+  const windowRaw = String(bucket?.window || '').toLowerCase();
+  if (
+    windowRaw === 'weekly' ||
+    windowRaw === 'week' ||
+    windowRaw === '7d' ||
+    bucketId.includes('weekly') ||
+    bucketId.includes('week')
+  ) {
+    return 'weekly';
+  }
+  if (
+    windowRaw === '5h' ||
+    windowRaw === 'fivehour' ||
+    windowRaw === 'five_hour' ||
+    bucketId.includes('5h') ||
+    bucketId.includes('fivehour') ||
+    bucketId.includes('five_hour')
+  ) {
+    return 'fiveHour';
+  }
+  return classifyQuotaWindow(bucket?.resetTime);
+}
+
 /**
  * Parse the retrieveUserQuotaSummary response into provider-level windows.
  * Expected shape: { groups: [{ displayName, buckets: [{ bucketId, window, remainingFraction, resetTime }] }] }
  * Handles both bucketId (gemini-weekly, 3p-5h) and window (weekly, 5h) signals.
  * @param {Object} data
- * @returns {{google: Object, claude: Object}|null}
+ * @returns {Object|null}
  */
 function parseQuotaSummary(data) {
   if (!data || !Array.isArray(data.groups)) return null;
@@ -168,25 +332,49 @@ function parseQuotaSummary(data) {
     if (!group || !Array.isArray(group.buckets)) continue;
     const buckets = group.buckets;
     const displayName = (group.displayName || '').toLowerCase();
-    const hasArgonBucket = buckets.some(b => b && typeof b.bucketId === 'string' && b.bucketId.includes('argon'));
-    const hasGeminiBucket = buckets.some(b => b && typeof b.bucketId === 'string' && b.bucketId.startsWith('gemini-') && !b.bucketId.includes('argon'));
-    const has3pBucket = buckets.some(b => b && typeof b.bucketId === 'string' && b.bucketId.startsWith('3p-'));
+    const bucketIds = buckets
+      .map(b => (b && typeof b.bucketId === 'string' ? b.bucketId.toLowerCase() : ''))
+      .filter(Boolean);
+
+    const hasArgonBucket = bucketIds.some(id => id.includes('argon'));
+    const hasGeminiBucket = bucketIds.some(id =>
+      (id.startsWith('gemini-') || id.includes('carbon') || id.includes('hydrogen') || id.includes('orchestrator')) &&
+      !id.includes('argon')
+    );
+    const has3pBucket = bucketIds.some(id =>
+      id.startsWith('3p-') || id.includes('claude') || id.includes('gpt-oss') || id.includes('gpt')
+    );
+
     let target = null;
-    if (displayName.includes('argon') || hasArgonBucket) target = 'argon';
-    else if (displayName.includes('gemini') || hasGeminiBucket) target = 'google';
-    else if (displayName.includes('claude') || displayName.includes('3p') || has3pBucket) target = 'claude';
-    else continue;
+    if (displayName.includes('argon') || hasArgonBucket) {
+      target = 'argon';
+    } else if (
+      displayName.includes('gemini') ||
+      displayName.includes('carbon') ||
+      displayName.includes('hydrogen') ||
+      displayName.includes('orchestrator') ||
+      hasGeminiBucket
+    ) {
+      target = 'google';
+    } else if (
+      displayName.includes('claude') ||
+      displayName.includes('3p') ||
+      displayName.includes('gpt-oss') ||
+      displayName.includes('gpt') ||
+      has3pBucket
+    ) {
+      target = 'claude';
+    } else {
+      target = deriveCustomProviderKey(displayName, buckets);
+      if (!result[target]) result[target] = {};
+    }
 
     for (const b of buckets) {
       if (!b || typeof b.resetTime !== 'string') continue;
       const ts = Date.parse(b.resetTime);
       if (!Number.isFinite(ts)) continue;
-      const bucketId = b.bucketId || '';
-      const windowRaw = b.window || '';
-      let winType = null;
-      if (windowRaw === 'weekly' || bucketId.includes('weekly')) winType = 'weekly';
-      else if (windowRaw === '5h' || bucketId.includes('5h') || bucketId.includes('fiveHour')) winType = 'fiveHour';
-      else continue;
+      const winType = classifySummaryBucketWindow(b);
+      if (!winType) continue;
       // Proto3 may omit a default 0 remainingFraction.
       let rf = typeof b.remainingFraction === 'number' ? b.remainingFraction : 0;
       if (!Number.isFinite(rf) || rf < 0) rf = 0;
@@ -203,37 +391,46 @@ function parseQuotaSummary(data) {
     }
   }
   if (!hasAny) return null;
-  // Prune empty provider keys so callers can distinguish
-  if (!result.google.weekly && !result.google.fiveHour) delete result.google;
-  if (!result.claude.weekly && !result.claude.fiveHour) delete result.claude;
-  if (!result.argon.weekly && !result.argon.fiveHour) delete result.argon;
-  // If all deleted, return null
-  if (!result.google && !result.claude && !result.argon) return null;
-  // Ensure at least one exists
+  for (const key of Object.keys(result)) {
+    if (!result[key].weekly && !result[key].fiveHour) {
+      delete result[key];
+    }
+  }
   if (Object.keys(result).length === 0) return null;
   return result;
 }
 
 /**
  * Enrich normalized models with provider-level weekly/5h windows from summary.
- * Provider mapping: GOOGLE/gemini -> google summary, ANTHROPIC/claude/gpt -> claude summary, ARGON -> argon summary.
+ * Provider mapping: GOOGLE/gemini/carbon/hydrogen/orchestrator -> google summary,
+ * ANTHROPIC/claude/gpt -> claude summary, ARGON -> argon summary, or matching custom keys.
  * @param {Array} models
- * @param {{google:Object, claude:Object, argon:Object}|null} summary
+ * @param {Object|null} summary
  * @param {number} now
  * @returns {Array}
  */
 function enrichModelsWithQuotaSummary(models, summary, now = Date.now()) {
-  if (!Array.isArray(models) || !summary) return models;
-  const hasGoogle = summary.google && (summary.google.weekly || summary.google.fiveHour);
-  const hasClaude = summary.claude && (summary.claude.weekly || summary.claude.fiveHour);
-  const hasArgon = summary.argon && (summary.argon.weekly || summary.argon.fiveHour);
-  if (!hasGoogle && !hasClaude && !hasArgon) return models;
+  if (!Array.isArray(models) || !summary || typeof summary !== 'object') return models;
+  const validSummaryKeys = Object.keys(summary).filter(
+    k => summary[k] && (summary[k].weekly || summary[k].fiveHour)
+  );
+  if (validSummaryKeys.length === 0) return models;
+
   return models.map(m => {
     if (!m || !m.id) return m;
-    const isArgon = /argon/i.test(m.id) || /argon/i.test(m.displayName || '');
-    const isGoogle = !isArgon && (m.modelProvider === 'MODEL_PROVIDER_GOOGLE' || /gemini/i.test(m.id) || /gemini/i.test(m.displayName || ''));
-    const isClaude = m.modelProvider === 'MODEL_PROVIDER_ANTHROPIC' || /claude/i.test(m.id) || /claude/i.test(m.displayName || '') || /gpt/i.test(m.id) || /gpt/i.test(m.displayName || '');
-    const key = isArgon ? 'argon' : isGoogle ? 'google' : isClaude ? 'claude' : null;
+    const idAndName = `${m.id} ${m.displayName || ''}`.toLowerCase();
+    const isArgon = /argon/i.test(idAndName);
+    const isGoogle = !isArgon && (
+      m.modelProvider === 'MODEL_PROVIDER_GOOGLE' ||
+      /gemini|carbon|hydrogen|orchestrator/i.test(idAndName)
+    );
+    const isClaude = m.modelProvider === 'MODEL_PROVIDER_ANTHROPIC' || /claude|gpt/i.test(idAndName);
+    let key = isArgon ? 'argon' : isGoogle ? 'google' : isClaude ? 'claude' : null;
+    if (!key) {
+      key = validSummaryKeys.find(k =>
+        k !== 'google' && k !== 'claude' && k !== 'argon' && idAndName.includes(k.toLowerCase())
+      ) || null;
+    }
     if (!key) return m;
     const providerSummary = summary[key];
     if (!providerSummary) return m;
@@ -271,27 +468,19 @@ async function fetchUserQuotaSummaryFromCloud(accessToken, injectedConfig) {
   }
   const endpoints = resolveEndpoints(config);
   for (const endpoint of endpoints) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
     try {
-      const r = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
+      const r = await cloudFetchJson(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
         method: 'POST',
         headers: buildHeaders(accessToken),
         body: JSON.stringify({}),
-        signal: controller.signal,
+        timeoutMs: 5000,
       });
-      if (!r.ok) {
-        clearTimeout(timeoutId);
-        continue;
-      }
-      const data = await r.json();
-      clearTimeout(timeoutId);
-      const parsed = parseQuotaSummary(data);
+      if (!r.ok) continue;
+      const parsed = parseQuotaSummary(r.data);
       if (parsed) return parsed;
       // Response ok but unparsable -> try next endpoint
       continue;
     } catch {
-      clearTimeout(timeoutId);
       /* try next endpoint */
     }
   }
@@ -306,15 +495,19 @@ async function fetchUserQuotaSummaryFromCloud(accessToken, injectedConfig) {
  * @param {string} accessToken
  * @returns {Promise<ModelQuota[]>}
  */
-async function fetchQuotaFromCloud(accessToken) {
+async function fetchQuotaFromCloud(accessToken, injectedConfig) {
   let sawAuthFailure = false;
-  const { loadConfig } = require('../config.js');
-  const config = await loadConfig().catch(() => ({}));
+  let config = injectedConfig;
+  if (!config) {
+    const { loadConfig } = require('../config.js');
+    config = await loadConfig().catch(() => ({}));
+  }
 
   const endpoints = resolveEndpoints(config);
 
-  const envModelIds = process.env.AGY_HUD_INTERESTING_MODELS
-    ? process.env.AGY_HUD_INTERESTING_MODELS.split(',').map(s => s.trim()).filter(Boolean)
+  const envModelsRaw = process.env.AGY_PULSE_INTERESTING_MODELS || process.env.AGY_HUD_INTERESTING_MODELS;
+  const envModelIds = envModelsRaw
+    ? envModelsRaw.split(',').map(s => s.trim()).filter(Boolean)
     : null;
 
   // Kick off summary fetch in parallel — non-blocking, graceful fallback on failure.
@@ -322,22 +515,18 @@ async function fetchQuotaFromCloud(accessToken) {
 
   let normalized = null;
   for (const endpoint of endpoints) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
     try {
-      const r = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+      const r = await cloudFetchJson(`${endpoint}/v1internal:fetchAvailableModels`, {
         method: 'POST',
         headers: buildHeaders(accessToken),
         body: JSON.stringify({}),
-        signal: controller.signal,
+        timeoutMs: 5000,
       });
       if (!r.ok) {
-        clearTimeout(timeoutId);
         if (r.status === 401 || r.status === 403) sawAuthFailure = true;
         continue;
       }
-      const data = await r.json();
-      clearTimeout(timeoutId);
+      const data = r.data || {};
       const models = data.models || {};
       let interestingModelIds = envModelIds
         || config.interestingModels
@@ -352,7 +541,6 @@ async function fetchQuotaFromCloud(accessToken) {
       normalized = normalizeQuotaModels(models, interestingModelIds);
       break;
     } catch {
-      clearTimeout(timeoutId);
       /* try next endpoint */
     }
   }
@@ -384,4 +572,6 @@ module.exports = {
   parseQuotaSummary,
   enrichModelsWithQuotaSummary,
   fetchUserQuotaSummaryFromCloud,
+  cloudFetchJson,
+  buildCurlConfig,
 };

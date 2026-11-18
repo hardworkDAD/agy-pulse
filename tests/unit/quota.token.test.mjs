@@ -474,4 +474,162 @@ describe('quota / token', () => {
       assert.equal(decodeKeyringRaw('   '), null);
     });
   });
+
+  describe('base64url JWT, fast skip flags, and mirror freshness', () => {
+    test('extractEmailFromIdToken decodes unpadded base64url payloads with - and _', () => {
+      const payloadJson = JSON.stringify({ sub: '123?>?', email: 'user+test_1@example.com' });
+      const b64url = Buffer.from(payloadJson).toString('base64url');
+      assert.equal(b64url.includes('='), false);
+      assert.equal(extractEmailFromIdToken(`hdr.${b64url}.sig`), 'user+test_1@example.com');
+    });
+
+    test('readToken skips Linux keyring and macOS keychain when skip flags are set', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-skip-'));
+      try {
+        const cliDir = path.join(tmp, '.gemini', 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+        let keyringCalls = 0;
+        let keychainCalls = 0;
+
+        assert.equal(readToken({
+          platform: 'linux',
+          roots: [cliDir],
+          skipLinuxKeyring: true,
+          keyringReader: () => {
+            keyringCalls += 1;
+            return { accessToken: 'should-not-read' };
+          },
+        }), null);
+        assert.equal(keyringCalls, 0);
+
+        assert.equal(readToken({
+          platform: 'darwin',
+          roots: [cliDir],
+          skipKeychain: true,
+          keychainReader: () => {
+            keychainCalls += 1;
+            return { accessToken: 'should-not-read' };
+          },
+        }), null);
+        assert.equal(keychainCalls, 0);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('disk credential newer than agy-hud-token.json mirror overrides stale mirror and refreshes it', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-mirror-fresh-'));
+      try {
+        const geminiDir = path.join(tmp, '.gemini');
+        const cliDir = path.join(geminiDir, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+
+        const oldTime = Date.now() - 60_000;
+        const mirrorPath = path.join(cliDir, 'agy-hud-token.json');
+        fs.writeFileSync(mirrorPath, JSON.stringify({
+          tokens: [{
+            accessToken: 'stale-account-a',
+            expiry: new Date(Date.now() + 3600_000).toISOString(),
+            sourceFormat: 'oauth-creds',
+            email: 'a@example.com',
+          }],
+          writtenAt: oldTime,
+        }));
+
+        const oauthPath = path.join(geminiDir, 'oauth_creds.json');
+        fs.writeFileSync(oauthPath, JSON.stringify({
+          access_token: 'fresh-account-b',
+          expiry_date: Date.now() + 3600_000,
+          email: 'b@example.com',
+        }));
+
+        const tok = readToken({
+          platform: 'linux',
+          roots: [cliDir],
+          skipLinuxKeyring: true,
+        });
+        assert.equal(tok?.accessToken, 'fresh-account-b');
+        assert.equal(tok?.email, 'b@example.com');
+
+        const refreshedMirror = JSON.parse(fs.readFileSync(mirrorPath, 'utf8'));
+        assert.equal(refreshedMirror.tokens[0].accessToken, 'fresh-account-b');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('google_accounts.json account switch invalidates mirror even without disk token file', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-mirror-switch-'));
+      try {
+        const geminiDir = path.join(tmp, '.gemini');
+        const cliDir = path.join(geminiDir, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+
+        const mirrorPath = path.join(cliDir, 'agy-hud-token.json');
+        fs.writeFileSync(mirrorPath, JSON.stringify({
+          tokens: [{
+            accessToken: 'stale-account-a',
+            expiry: new Date(Date.now() + 3600_000).toISOString(),
+            sourceFormat: 'linux-keyring',
+            email: 'a@example.com',
+          }],
+          writtenAt: Date.now(),
+        }));
+
+        fs.writeFileSync(path.join(geminiDir, 'google_accounts.json'), JSON.stringify({
+          active: 'b@example.com',
+          old: ['a@example.com'],
+        }));
+
+        const tok = readToken({
+          platform: 'linux',
+          roots: [cliDir],
+          keyringReader: () => ({
+            accessToken: 'keyring-account-b',
+            sourceFormat: 'linux-keyring',
+            email: 'b@example.com',
+          }),
+        });
+        assert.equal(tok?.accessToken, 'keyring-account-b');
+        assert.equal(fs.existsSync(mirrorPath), false);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('expired Linux keyring token does not shadow a valid non-expired disk token', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-expired-keyring-'));
+      try {
+        const cliDir = path.join(tmp, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(cliDir, 'antigravity-oauth-token'),
+          JSON.stringify({
+            token: {
+              access_token: 'fresh-disk-token',
+              expiry: new Date(Date.now() + 3600_000).toISOString(),
+            },
+          })
+        );
+
+        const tok = readToken({
+          platform: 'linux',
+          roots: [cliDir],
+          keyringReader: () => ({
+            accessToken: 'stale-expired-keyring-token',
+            expiry: '2026-09-28T18:47:55.000Z',
+            sourceFormat: 'linux-keyring',
+            all: [{
+              accessToken: 'stale-expired-keyring-token',
+              expiry: '2026-09-28T18:47:55.000Z',
+            }],
+          }),
+        });
+
+        assert.equal(tok?.accessToken, 'fresh-disk-token');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
 });

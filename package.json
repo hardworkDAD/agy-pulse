@@ -1,8 +1,12 @@
 {
-  "name": "agy-hud",
-  "version": "0.3.3",
-  "description": "Premium HUD for Antigravity CLI",
-  "main": "runtime/bin/agy-hud.js",
+  "name": "agy-pulse",
+  "version": "1.0.0",
+  "description": "All-in-one single-process statusline HUD, real-time context & compaction monitor, and quota tracker for Antigravity CLI",
+  "main": "runtime/bin/agy-pulse.js",
+  "bin": {
+    "agy-pulse": "runtime/bin/agy-pulse.js",
+    "agy-hud": "runtime/bin/agy-hud.js"
+  },
   "files": [
     "runtime",
     "scripts",
@@ -11,25 +15,20 @@
     "README.md",
     "package.json"
   ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/icebear0828/agy-hud.git"
-  },
-  "homepage": "https://github.com/icebear0828/agy-hud#readme",
-  "bugs": {
-    "url": "https://github.com/icebear0828/agy-hud/issues"
-  },
+  "repository": "",
   "scripts": {
     "test": "node --test tests/unit/*.test.mjs",
     "bootstrap": "node scripts/bootstrap.js",
     "verify": "node scripts/verify-display.js",
     "diagnose": "node scripts/diagnose-auth.js",
-    "config": "node runtime/bin/agy-hud.js --config"
+    "config": "node runtime/bin/agy-pulse.js --config"
   },
   "keywords": [
     "antigravity",
     "cli",
     "hud",
+    "statusline",
+    "agy-pulse",
     "terminal"
   ],
   "author": "",

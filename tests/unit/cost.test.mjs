@@ -5,6 +5,7 @@ import {
   calculateTokenCost,
   getSessionCostUsd,
   formatUsd,
+  modelIncludesCacheInInput,
 } from '../../runtime/cost.js';
 
 test('getNativeCostUsd extracts native cost from agyData', () => {
@@ -73,4 +74,75 @@ test('formatUsd formats currencies across thresholds', () => {
   assert.equal(formatUsd(0.4567), '$0.457');
   assert.equal(formatUsd(0.01234), '$0.0123');
   assert.equal(formatUsd(0), '$0.00');
+});
+
+test('modelIncludesCacheInInput distinguishes cache-inclusive vs cache-exclusive models', () => {
+  assert.equal(modelIncludesCacheInInput('Gemini 4 Carbon (High)'), true);
+  assert.equal(modelIncludesCacheInInput('gemini-4-hydrogen-xhigh'), true);
+  assert.equal(modelIncludesCacheInInput('Orchestrator (Argon)'), true);
+  assert.equal(modelIncludesCacheInInput('gpt-oss-120b-medium'), true);
+  assert.equal(modelIncludesCacheInInput('claude-opus-4-6-thinking'), false);
+  assert.equal(modelIncludesCacheInInput('claude-sonnet-4-6'), false);
+  assert.equal(modelIncludesCacheInInput(null), false);
+});
+
+test('getSessionCostUsd deducts cache for cache-inclusive models and includes cacheWrite', () => {
+  // Gemini 4 Carbon: input $1.25/1M, output $10.00/1M, cacheRead $0.125/1M, cacheWrite $1.25/1M
+  // input_tokens=200k includes cacheRead=150k and cacheWrite=10k -> nonCachedInput=40k
+  const carbonCost = getSessionCostUsd({
+    model: { id: 'gemini-4-carbon-high' },
+    context_window: {
+      current_usage: {
+        input_tokens: 200_000,
+        output_tokens: 10_000,
+        cache_read_input_tokens: 150_000,
+        cache_creation_input_tokens: 10_000,
+      },
+    },
+  });
+  const expectedCarbon = (40_000 / 1e6) * 1.25 + (10_000 / 1e6) * 10.0 + (150_000 / 1e6) * 0.125 + (10_000 / 1e6) * 1.25;
+  assert.equal(carbonCost?.toFixed(6), expectedCarbon.toFixed(6));
+
+  // Claude Opus 4.6 (cache-exclusive): input $5/1M, output $25/1M, cacheRead $0.50/1M, cacheWrite $6.25/1M
+  // input_tokens=40k does NOT include cache tokens
+  const opusCost = getSessionCostUsd(
+    { model: { id: 'claude-opus-4-6-thinking' } },
+    {
+      usage: {
+        input_tokens: 40_000,
+        output_tokens: 10_000,
+        cache_read_input_tokens: 150_000,
+        cache_creation_input_tokens: 10_000,
+      },
+    }
+  );
+  const expectedOpus = (40_000 / 1e6) * 5.0 + (10_000 / 1e6) * 25.0 + (150_000 / 1e6) * 0.50 + (10_000 / 1e6) * 6.25;
+  assert.equal(opusCost?.toFixed(6), expectedOpus.toFixed(6));
+
+  // GPT-OSS 120B & Orchestrator Argon pricing sanity check
+  const gptOssCost = getSessionCostUsd({
+    model: { id: 'gpt-oss-120b-medium' },
+    context_window: { total_input_tokens: 1_000_000, total_output_tokens: 1_000_000 },
+  });
+  assert.equal(gptOssCost?.toFixed(4), (0.15 + 0.60).toFixed(4));
+
+  const orchArgonCost = getSessionCostUsd({
+    model: { id: 'gemini-pro-orchestrator-argon' },
+    context_window: { total_input_tokens: 1_000_000, total_output_tokens: 1_000_000 },
+  });
+  assert.equal(orchArgonCost?.toFixed(4), (0.50 + 3.00).toFixed(4));
+
+  // Claude Opus 4.6 when AGY CLI reports cache-inclusive input_tokens >= cacheTotal (200k >= 160k -> 40k uncached)
+  const opusInclusiveCost = getSessionCostUsd({
+    model: { id: 'claude-opus-4-6-thinking' },
+    context_window: {
+      current_usage: {
+        input_tokens: 200_000,
+        output_tokens: 10_000,
+        cache_read_input_tokens: 150_000,
+        cache_creation_input_tokens: 10_000,
+      },
+    },
+  });
+  assert.equal(opusInclusiveCost?.toFixed(6), expectedOpus.toFixed(6));
 });

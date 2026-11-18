@@ -58,8 +58,10 @@ function createQuotaRenderers(ctx) {
     const resetTime = critical.resetTime || q.resetTime;
     if (resetTime) {
       const resetMs = new Date(resetTime).getTime();
-      const secsLeft = Math.max(0, Math.round((resetMs - now) / 1000));
-      rawTime = `~${formatDuration(secsLeft)}`;
+      if (Number.isFinite(resetMs) && resetMs > now) {
+        const secsLeft = Math.max(0, Math.round((resetMs - now) / 1000));
+        rawTime = `~${formatDuration(secsLeft)}`;
+      }
     }
     const timePart = rawTime.padEnd(6, ' ');
     const coloredTime = `${gray}${timePart}${reset}`;
@@ -78,9 +80,10 @@ function createQuotaRenderers(ctx) {
 
     for (const q of data || []) {
       if (!q || isImageModel(q)) continue;
-      const isArgon = /argon/i.test(q.id || q.displayName);
-      const isGoogle = !isArgon && (q.modelProvider === 'MODEL_PROVIDER_GOOGLE' || /gemini/i.test(q.id || q.displayName));
-      const isClaude = q.modelProvider === 'MODEL_PROVIDER_ANTHROPIC' || /claude/i.test(q.id || q.displayName) || /gpt/i.test(q.id || q.displayName);
+      const ident = `${q.id || ''} ${q.displayName || ''}`;
+      const isArgon = /argon/i.test(ident);
+      const isGoogle = !isArgon && (q.modelProvider === 'MODEL_PROVIDER_GOOGLE' || /gemini|carbon|hydrogen|orchestrator/i.test(ident));
+      const isClaude = q.modelProvider === 'MODEL_PROVIDER_ANTHROPIC' || /claude|sonnet|opus|haiku|gpt/i.test(ident);
       const key = isArgon ? 'Argon' : isGoogle ? 'Google' : isClaude ? 'Claude' : null;
       if (!key) continue;
 
@@ -136,14 +139,20 @@ function createQuotaRenderers(ctx) {
     }
 
     const renderWindowItem = (label, win) => {
-      const targetWin = win || { remainingFraction: 1.0, resetTime: null };
-      const pct = formatQuotaPercent(targetWin.remainingFraction);
+      const namePart = truncateAndPad(label, 11);
+      const coloredName = `${cyan}${namePart}${reset}`;
+
+      if (!win) {
+        const emptyBar = `${gray}[${glyph.empty.repeat(6)}]${reset}`;
+        const missingPct = `${gray}  --${reset}`;
+        const missingTime = `${gray}${' '.repeat(6)}${reset}`;
+        return `${coloredName} ${emptyBar} ${missingPct} ${missingTime}`;
+      }
+
+      const pct = formatQuotaPercent(win.remainingFraction);
       const pctColor = pct <= (1 - critThresh) * 100 ? red
                      : pct <= (1 - warnThresh) * 100 ? yellow
                      : green;
-
-      const namePart = truncateAndPad(label, 11);
-      const coloredName = `${cyan}${namePart}${reset}`;
 
       const barPart = createProgressBar(pct, pctColor, 6, false);
 
@@ -151,10 +160,12 @@ function createQuotaRenderers(ctx) {
       const coloredPct = `${pctColor}${pctStr}${reset}`;
 
       let rawTime = '';
-      if (targetWin.resetTime) {
-        const resetMs = new Date(targetWin.resetTime).getTime();
-        const secsLeft = Math.max(0, Math.round((resetMs - now) / 1000));
-        rawTime = `~${formatDuration(secsLeft)}`;
+      if (win.resetTime) {
+        const resetMs = new Date(win.resetTime).getTime();
+        if (Number.isFinite(resetMs) && resetMs > now) {
+          const secsLeft = Math.max(0, Math.round((resetMs - now) / 1000));
+          rawTime = `~${formatDuration(secsLeft)}`;
+        }
       }
       const timePart = rawTime.padEnd(6, ' ');
       const coloredTime = `${gray}${timePart}${reset}`;
@@ -184,7 +195,8 @@ function createQuotaRenderers(ctx) {
       }
     }
 
-    const dividerLine = `  ${gray}${glyph.hbar.repeat(81)}${reset}`;
+    const dividerWidth = Math.max(69, (ctx.columnWidth || 40) * 2 + 1);
+    const dividerLine = `  ${gray}${glyph.hbar.repeat(dividerWidth)}${reset}`;
     return `${dividerLine}\n` + rows.join('\n');
   };
 

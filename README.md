@@ -1,12 +1,10 @@
-# agy-hud
+# agy-pulse
 
-[![E2E](https://github.com/icebear0828/agy-hud/actions/workflows/e2e.yml/badge.svg?branch=main)](https://github.com/icebear0828/agy-hud/actions/workflows/e2e.yml)
-[![Release](https://img.shields.io/github/v/release/icebear0828/agy-hud)](https://github.com/icebear0828/agy-hud/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 
-> Real-time statusline HUD plugin for **Antigravity CLI (`agy`)**. Refreshes after every step with session info, detailed token breakdown, workspace context, and **real account quota** (matches `/usage` numbers).
+> **All-in-one single-process statusline HUD, real-time context & compaction monitor, and cloud quota tracker for Antigravity CLI (`agy`).**
 >
-> CI verifies install + HUD render on **macOS, Linux, Windows** on every push — green badge above means it works.
+> Zero external npm dependencies · Pure Node.js runtime · Native SQLite Protobuf compaction limit decoding · Incremental transcript scanning · Bilingual (`en` / `zh`)
 
 [简体中文](./README_zh.md)
 
@@ -14,181 +12,101 @@
 
 ## What it looks like
 
-agy-hud supports two display modes for quota tracking: **Table Mode** (default) and **Compact Mode** (provider-grouped mini bars).
-
-### Table Mode (Default)
-Clean 2x2 provider quota overview (Google 5h/week & Claude 5h/week) matching your active subscription.
+`agy-pulse` unifies the classic `agy-hud` multi-line dashboard & cloud quota table with `agy-statusline`'s real-time context & compaction monitor into a single fast Node.js process:
 
 ```
-diangelosabri@gmail.com │ agy-hud │ ⎇ main │ Gemini 3.7 Flash(M) │ Google AI Pro
-⚿ Tokens 172.3k (in: 2.8k, out: 35.3k, cache: 134.3k) │ ⛁ 129.2k/1M [█░░░░░░░░░] 12%
-1 MEMORY.md │ 1 hooks
+my-project │ Google AI Pro │ out: 42.6 tok/s
+1 MEMORY.md │ 4 rules │ 2 MCPs │ 3 hooks
   ─────────────────────────────────────────────────────────────────────────────────
   Google 5h   [█████░]  87% ~22m   │ Claude 5h   [██████] 100% ~4h59m
   Google week [████░░]  74% ~4d3h  │ Claude week [██████] 100% ~6d23h
+◈ Gemini 4 Carbon (High) · Ctx ████▓······· 38.4% (196.6K/512K) · Compacted×1(peak 480K) · Cache 82% (160K) · Out 12.4K · Cost $0.12
 ```
 
-### Compact Mode
-Highly space-efficient. It embeds the current model's remaining quota directly on line 2, and displays provider-grouped mini progress bars.
+When context usage reaches **85%+**, the bottom bar switches to red and appends **`Compaction imminent`**. On non-UTF-8 terminals (e.g. Windows `cp936`), it automatically degrades cleanly to ASCII (`*`, `#`/`=`/`-`/`.`, `x`, `|`).
 
-```
-⎇ main │ Claude Sonnet 4.6 │ Pro
-⚿ 138.4M ↑6k ↓202k ⟳138.2M │ ⛁ 138.2M/1M [████░░░░░░] 40% │ ⚡42 ✓3 │ Quota: 100% ~5h
-1 GEMINI.md │ 4 rules │ 1 MCPs │ 5 hooks
-Anthropic: Son███ Opus█░░ │ Google: Flash███ Pro███ │ OpenAI: GPT█░░
-```
-
-### Layout breakdown
-- **Line 1** (identity): Resolved username/email (if enabled), Git branch, current model, plan tier.
-- **Line 2** (resources): Compact token breakdown (↑in ↓out ⟳cache — cache hidden when zero), context window bar with percentage, step/task counts. In Compact Mode, also shows current model quota.
-- **Line 3** (metadata): Project memory file, rules, MCPs, hooks — **only non-zero items shown**; entire line omitted when all are zero.
-- **Quota rows**: Account quota by model (matches `/usage` exactly) with reset countdowns. Durations ≥24h show days (e.g. `~6d4h`), ≥10h drop minutes (e.g. `~12h`).
+### Display modes (`display.quotaStyle`)
+- **`table`** (default): 2-column provider window overview (`Google 5h/week`, `Claude 5h/week`, and optional `Argon`) + bottom real-time context monitor. Missing quota windows render `--` instead of a misleading `100%`.
+- **`models`**: 2-column per-model quota breakdown with custom `columnWidth`.
+- **`compact`**: Provider-grouped mini bars (`Google:`, `Anthropic:`, `OpenAI:`) with zero family-name collisions across 2026 models (`Carbon`, `Hydro`, `Argon`, `Orch-C`, `Orch-A`, `G3.8F`, etc.).
 
 ---
 
 ## Install
 
-One command, in a normal shell (NOT inside an active `agy` session):
+Run in a normal shell (NOT inside an active `agy` session):
+
+### Local / self-hosted checkout
 
 **macOS / Linux**:
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/install.sh)
+bash scripts/install.sh
+```
+
+**Or deploy runtime & migrate an existing `agy-hud` / `statusline-combined.sh` setup**:
+```bash
+bash scripts/deploy-local.sh
+```
+
+### Remote GitHub repository / fork
+
+Set `AGY_PULSE_REPO` to your own `owner/repo` slug:
+
+**macOS / Linux**:
+```bash
+AGY_PULSE_REPO="yourname/agy-pulse" \
+  bash <(curl -fsSL "https://raw.githubusercontent.com/$AGY_PULSE_REPO/main/scripts/install.sh")
 ```
 
 **Windows PowerShell**:
 ```powershell
-irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/install.ps1 | iex
-```
-
-**Windows CMD**:
-```cmd
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/install.ps1 | iex"
+$env:AGY_PULSE_REPO = 'yourname/agy-pulse'
+irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.ps1" | iex
 ```
 
 This installer:
-1. Cleanly re-installs the plugin (`agy plugin uninstall` + `agy plugin install`).
-2. Downloads the HUD runtime to `~/.gemini/antigravity-cli/agy-hud-runtime/`.
-3. Writes `statusLine.command` into `~/.gemini/antigravity-cli/settings.json`.
-
-Open a fresh `agy` session — the HUD appears at the bottom of the terminal.
-
-**Idempotent** — re-run the same command anytime to repair drift, upgrade, or clean stale files left by older versions.
-
-### Why not a-single `agy plugin install`?
-
-`agy plugin install` only stages the **declarative** plugin marker (`plugin.json`); it never executes JavaScript and never touches `settings.json`. The HUD's statusLine command and renderer runtime are configured separately. `install.sh` does both pieces atomically.
-
-### For forks / mirrors
-
-**macOS / Linux**:
-```bash
-AGY_HUD_REPO_RAW=https://raw.githubusercontent.com/your-fork/agy-hud/main \
-AGY_HUD_REPO_URL=https://github.com/your-fork/agy-hud.git \
-  bash <(curl -fsSL "$AGY_HUD_REPO_RAW/scripts/install.sh")
-```
-
-**Windows PowerShell**:
-```powershell
-$env:AGY_HUD_REPO_RAW = 'https://raw.githubusercontent.com/your-fork/agy-hud/main'
-$env:AGY_HUD_REPO_URL = 'https://github.com/your-fork/agy-hud.git'
-irm "$env:AGY_HUD_REPO_RAW/scripts/install.ps1" | iex
-```
-
-### Manual / advanced
-
-If you prefer to run the steps yourself:
-
-**macOS / Linux**:
-```bash
-agy plugin install https://github.com/icebear0828/agy-hud.git
-bash <(curl -fsSL https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/bootstrap.sh)
-```
-
-**Windows PowerShell**:
-```powershell
-agy plugin install https://github.com/icebear0828/agy-hud.git
-$t = Join-Path $env:TEMP "agy-hud-bootstrap.js"
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/bootstrap.js -OutFile $t -UseBasicParsing
-node $t; Remove-Item $t
-```
-
-**Windows CMD**:
-```cmd
-agy plugin install https://github.com/icebear0828/agy-hud.git
-powershell -Command "Invoke-WebRequest -Uri https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/bootstrap.js -OutFile %TEMP%\agy-hud-bootstrap.js -UseBasicParsing"
-node %TEMP%\agy-hud-bootstrap.js
-del %TEMP%\agy-hud-bootstrap.js
-```
+1. Stages the declarative plugin (`agy plugin install`).
+2. Installs the pure Node.js runtime to `~/.gemini/antigravity-cli/agy-pulse-runtime/`.
+3. Configures `statusLine.command` in `~/.gemini/antigravity-cli/settings.json` to invoke `runtime/bin/agy-pulse.js` (or `.cmd` shim on Windows), preserving existing `enabled` / `stack_with_default` flags.
 
 ---
 
-## Verify
-
-After bootstrap:
+## Verify & Configure
 
 ```bash
-# settings.statusLine should point at the runtime
-cat ~/.gemini/antigravity-cli/settings.json | grep statusLine -A2
+# Inspect settings.json
+cat ~/.gemini/antigravity-cli/settings.json | grep statusLine -A3
 
-# Direct HUD invocation should print the HUD status lines
-node ~/.gemini/antigravity-cli/agy-hud-runtime/runtime/bin/agy-hud.js
-```
+# Direct invocation
+node ~/.gemini/antigravity-cli/agy-pulse-runtime/runtime/bin/agy-pulse.js
 
-If quota rows show `Antigravity token expired`, refresh your `agy` login. That is **not** a bootstrap failure.
+# Launch interactive configuration wizard
+node ~/.gemini/antigravity-cli/agy-pulse-runtime/runtime/bin/agy-pulse.js --config
 
-Windows PowerShell:
-
-```powershell
-Get-Content "$env:USERPROFILE\.gemini\antigravity-cli\settings.json"
-& "$env:USERPROFILE\.gemini\antigravity-cli\agy-hud-runtime\runtime\bin\agy-hud.cmd"
-```
-
----
-
-## Diagnose
-
-```bash
-# Inspect token + quota cache state
+# Auth & token diagnostics
 node scripts/diagnose-auth.js
-
-# Tail agy's own statusLine runner errors
-ls -t ~/.gemini/antigravity-cli/log/cli-*.log | head -1 | xargs tail -50 | grep statusline
 ```
-
-The most common failure mode is `statusline_runner.go: failure N/30` — that means `statusLine.command` in `settings.json` points to a path that no longer exists. Re-run bootstrap.
 
 ---
 
 ## Uninstall
 
-**macOS / Linux**:
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/icebear0828/agy-hud/main/uninstall.sh)
+bash uninstall.sh
 ```
 
-**Windows PowerShell**:
+Windows PowerShell:
 ```powershell
-irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/uninstall.ps1 | iex
+.\uninstall.ps1
 ```
 
-**Windows CMD**:
-```cmd
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/uninstall.ps1 | iex"
-```
-
-Or, if you have the repo cloned: `bash uninstall.sh` / `.\uninstall.ps1`.
-
-This:
-1. Clears `settings.json` `statusLine` (with `.bak` of the original).
-2. Removes `~/.gemini/antigravity-cli/agy-hud-runtime/`.
-3. Removes the staged plugin (`agy plugin uninstall agy-hud`).
-4. Cleans payload, error log, tmp token mirror, and quota cache files across all roots and tmp directories.
+Removes both `agy-pulse` and legacy `agy-hud` runtime directories, plugin installs, caches, logs, Windows shims, and clears `settings.json` `statusLine` (saving a `.bak` backup).
 
 ---
 
 ## Configuration
 
-Optional. Create `agy-hud.config.json` at the workspace root to override defaults. Without it the HUD uses `runtime/agy-hud.config.json` from the downloaded runtime:
+Optional. Create `agy-pulse.config.json` (or legacy `agy-hud.config.json`) in your workspace root to override defaults. Without it, `agy-pulse` uses `runtime/agy-hud.config.json` deep-merged with `FULL_DEFAULT_CONFIG`:
 
 ```json
 {
@@ -200,12 +118,19 @@ Optional. Create `agy-hud.config.json` at the workspace root to override default
   },
   "display": {
     "quotaStyle": "table",
-    "showTokenBar": true,
-    "showBreadcrumbs": true,
-    "showGitBranch": true,
+    "showContextMonitor": true,
     "showCurrentDir": true,
+    "showSpeed": true,
+    "showModel": false,
+    "showTokenBar": false,
+    "showContextBar": false,
+    "showTurnCacheHitRate": false,
+    "showBreadcrumbs": false,
+    "showGitBranch": false,
     "showUsername": false,
-    "username": "",
+    "showCost": false,
+    "showDailyCost": false,
+    "showWeeklyCost": false,
     "breadcrumbCount": 3,
     "useNerdFonts": false,
     "columnWidth": 40
@@ -219,129 +144,79 @@ Optional. Create `agy-hud.config.json` at the workspace root to override default
 ```
 
 ### Configuration fields
-- **`theme`**: Map of HUD component colors (`primary`, `secondary`, `warning`, `critical`). Supports standard terminal colors (`green`, `gray`, `yellow`, `red`, `blue`, `magenta`, `cyan`).
+- **`theme`**: Foreground colors (`primary`, `secondary`, `warning`, `critical`). Supports `green`, `gray`, `yellow`, `red`, `blue`, `magenta`, `cyan`.
 - **`display`**:
-  - `quotaStyle`: `"table"` (default multi-column layout) or `"compact"` (inline quota + provider grouped mini bars).
-  - `showTokenBar`: Whether to display the token bar.
-  - `showBreadcrumbs`: Whether to display workspace file breadcrumbs.
-  - `showGitBranch`: Whether to display the current Git branch.
-  - `showCurrentDir`: Whether to display the base name of the current working directory.
-  - `showUsername`: Whether to display the username/email at the start of the HUD statusline.
-  - `username`: A custom string to override the resolved OS or login username/email.
-  - `showSpeed`: Whether to display output token generation speed (`out: X tok/s`).
-  - `showCost`: Whether to display current session cost (`Cost $X`).
-  - `showDailyCost`: Whether to display today's accumulated cost (`Today $X`).
-  - `showWeeklyCost`: Whether to display this week's accumulated cost (`Week $X`).
-  - `breadcrumbCount`: Number of files to show in breadcrumbs.
-  - `useNerdFonts`: Set to `true` to use premium developer icons from [Nerd Fonts](https://www.nerdfonts.com/).
-  - `columnWidth`: Max column width for the quota table layout (defaults to `40`).
-- **`thresholds`**: Threshold values (`0.0` to `1.0`) for displaying quota warning and critical usage colors.
-- **`language`**: Lang preference (`"auto"`, `"en"`, `"zh"`).
+  - `showContextMonitor`: Show the bottom real-time context & compaction monitor bar (`true` by default).
+  - `quotaStyle`: `"table"` (default), `"models"`, or `"compact"`.
+  - `showCurrentDir`: Show current working directory basename (`true` by default).
+  - `showSpeed`: Show token output generation speed (`out: X.X tok/s`, `true` by default).
+  - `showModel`: Show model name on Line 1 (`false` by default since Line bottom shows `◈ <Model (Effort)>`).
+  - `showTokenBar` / `showContextBar`: Optional classic Line 2 token & context bars.
+  - `showTurnCacheHitRate`: Show per-turn cache hit rate badge on Line 2.
+  - `showImageQuota`: Show image generation quota bar on Line 2.
+  - `showBreadcrumbs` / `breadcrumbCount`: Show recent file breadcrumbs on Line 3.
+  - `showGitBranch`: Show current Git branch on Line 1 (omitted automatically in non-Git directories).
+  - `showUsername` / `username`: Show resolved login email or custom username.
+  - `showCost` / `showDailyCost` / `showWeeklyCost`: Show session, daily, and weekly USD totals.
+  - `useNerdFonts`: Use Nerd Fonts icons.
+  - `columnWidth`: Max column width in quota table/models layout (default `40`).
+- **`thresholds`**: Quota warning (`0.7`) and critical (`0.9`) ratios.
+- **`language`**: `"auto"` (detects `LC_ALL`/`LC_CTYPE`/`LANG`), `"en"`, or `"zh"`.
+
+---
+
+## Environment Variables (with `AGY_HUD_*` backward compatibility)
+
+| Primary | Legacy Alias | Purpose |
+|---|---|---|
+| `AGY_PULSE_DATA_DIR` | `AGY_HUD_DATA_DIR` | Override Antigravity CLI data directory |
+| `AGY_PULSE_REPO` | `AGY_HUD_REPO` | `owner/repo` slug for self-update / remote install |
+| `AGY_PULSE_REPO_RAW` | `AGY_HUD_REPO_RAW` | Custom raw GitHub base URL |
+| `AGY_PULSE_REPO_URL` | `AGY_HUD_REPO_URL` | Custom Git clone URL for `agy plugin install` |
+| `AGY_PULSE_UPDATE_URL` | `AGY_HUD_UPDATE_URL` | Custom `package.json` URL for update checker |
+| `AGY_HUD_FORCE_ASCII` | — | Set `1` to force ASCII fallback |
+| `AGY_HUD_FORCE_UNICODE` | — | Set `1` to force Unicode output |
 
 ---
 
 ## File structure
 
 ```
-agy-hud/
-├── plugin.json                # {"name":"agy-hud"} — agy plugin marker
-├── gemini-extension.json      # required by agy's remote-install validator
-├── runtime/                   # downloaded by bootstrap to ~/.gemini/.../agy-hud-runtime/runtime/
-│   ├── bin/agy-hud.js         # statusLine entry (stdin JSON → ANSI HUD)
-│   ├── config-wizard.js       # configuration wizard (--config)
-│   ├── config.js              # config loader & writer
-│   ├── cost.js                # session cost calculation & model pricing
-│   ├── daily-cost.js          # daily & weekly cost ledger tracking
-│   ├── encoding.js            # console encoding & Unicode detector
-│   ├── parser.js              # scans workspace metadata & session transcript
-│   ├── paths.js               # cross-platform path resolution helpers
-│   ├── quota.js               # SWR quota orchestrator
-│   ├── quota/                 # quota & auth submodules (PR #62)
-│   │   ├── cache.js           # atomic JSON caching (v3 schema)
-│   │   ├── cloud.js           # API HTTP clients ( OIDC userinfo auth email)
-│   │   ├── models.js          # quota normalizer & window merging
-│   │   └── token.js           # cross-platform OAuth token discovery
-│   ├── renderer.js            # HUD layout orchestrator
-│   ├── renderer/              # ANSI rendering submodules (PR #58)
-│   │   ├── format.js          # colors, abbreviator, duration formatting
-│   │   ├── lang.js            # internationalization (zh/en auto-detection)
-│   │   └── quota-render.js    # column bars & single-row columns (PR #61)
-│   ├── speed.js               # token output speed calculation
-│   ├── statusline-installer.js# writes settings.json statusLine settings
-│   ├── uninstall.js           # cleans and purges runtime files
-│   └── update-checker.js      # checks for new GitHub releases
+agy-pulse/
+├── plugin.json                        # {"name":"agy-pulse"}
+├── gemini-extension.json              # agy remote-install manifest (v1.0.0)
+├── runtime/
+│   ├── brand.js                       # Brand constants & repository slug resolver
+│   ├── compaction.js                  # Pure-JS Protobuf wire decoder & SQLite compaction limit reader
+│   ├── bin/
+│   │   ├── agy-pulse.js / .cmd        # Primary statusLine entrypoint
+│   │   └── agy-hud.js / .cmd          # Backward-compatible entrypoint alias
+│   ├── config-wizard.js               # Interactive terminal config wizard (--config)
+│   ├── config.js                      # Deep-merging config loader & atomic writer
+│   ├── cost.js                        # Model pricing table (2026 models) & session cost
+│   ├── daily-cost.js                  # Lock-safe daily & 7-day rolling cost ledger
+│   ├── encoding.js                    # Terminal UTF-8 / codepage detector
+│   ├── parser.js                      # Incremental byte-offset transcript scanner & metadata
+│   ├── paths.js                       # Cross-platform root & safe executable resolver
+│   ├── quota.js                       # SWR quota orchestrator
+│   ├── quota/                         # token · cache · cloud · models
+│   ├── renderer.js                    # Multi-line HUD orchestrator
+│   ├── renderer/                      # context-monitor · format · lang · quota-render
+│   ├── speed.js                       # Output tok/s calculator with active-turn latching
+│   ├── statusline-installer.js        # settings.json updater & Windows .cmd/.bat shims
+│   ├── uninstall.js                   # Full uninstaller for agy-pulse & legacy agy-hud
+│   └── update-checker.js              # Semver-safe background update checker
 ├── scripts/
-│   ├── install.sh             # one-command installer — macOS/Linux
-│   ├── install.ps1            # one-command installer — Windows PowerShell
-│   ├── bootstrap.sh           # repair-only entry (called by install.sh)
-│   ├── bootstrap.js           # actual download + configure logic
-│   ├── configure-utf8.ps1     # optional Windows UTF-8 profile + Git encoding helper
-│   ├── verify-display.js      # E2E: install + bootstrap + PTY-spawn agy + assert HUD
-│   └── diagnose-auth.js
-├── tests/unit/                # modular unit tests (node --test)
-├── .github/workflows/e2e.yml  # cross-platform CI matrix
-└── release.sh                 # npm test → E2E gate → zip → gh release
+│   ├── install.sh / install.ps1       # One-command installers
+│   ├── bootstrap.sh / bootstrap.js    # Atomic runtime installer
+│   ├── deploy-local.sh                # Local deploy & legacy combined-script migrator
+│   ├── configure-utf8.ps1             # Windows UTF-8 helper
+│   ├── verify-display.js              # E2E verifier
+│   └── diagnose-auth.js               # Auth & token cache diagnostic
+├── skills/hud-config/SKILL.md         # Agent config skill
+├── docs/                              # Architecture & module reference (en / zh)
+└── tests/unit/                        # Modular unit tests (node --test)
 ```
-
----
-
-## Cross-platform notes
-
-**Windows UTF-8 helper**: If your terminal is on a non-UTF-8 codepage and you want Unicode bars/borders by default, run:
-
-```powershell
-irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/configure-utf8.ps1 | iex
-```
-
-This appends a guarded UTF-8 encoding block to your PowerShell profile and sets Git's global UTF-8 filename/log options. It is idempotent and safe to re-run. Restart PowerShell after it finishes.
-
-**Windows token refresh**: Antigravity CLI stores OAuth `refresh_token` + `access_token` in Credential Manager (`gemini:antigravity` / `LegacyGeneric:target=gemini:antigravity`). The HUD prefers a short-lived `agy-hud-token.json` mirror in tmp. When the fast path only sees a missing/expired file token, it triggers a detached background read; the next render uses the refreshed token. agy-hud does **not** swap RT for access tokens — if the Credential Manager access token is expired, refresh agy's login first.
-
-**File token fallback paths** (searched in order):
-- `~/.gemini/antigravity-cli/antigravity-oauth-token`
-- `$XDG_DATA_HOME/antigravity-cli/antigravity-oauth-token`
-- `$APPDATA/antigravity-cli/antigravity-oauth-token`
-- `$LOCALAPPDATA/antigravity-cli/antigravity-oauth-token`
-
----
-
-## Verified by CI
-
-Every push to `main` runs [.github/workflows/e2e.yml](./.github/workflows/e2e.yml) against a 3-OS matrix:
-
-| OS | install.sh runs | bootstrap writes settings.json | HUD command renders status lines |
-|----|------|------|------|
-| ubuntu-latest | ✅ | ✅ | ✅ |
-| macos-latest  | ✅ | ✅ | ✅ |
-| windows-latest | ✅ | ✅ | ✅ |
-
-Each run uploads (14-day retention):
-
-| Artifact | Per-OS | Contents |
-|---|---|---|
-| `e2e-<os>` | all 3 | `e2e-report.json` (diagnostic: `ok`, `hudVisible`, `staleCleaned`, …) + `agy-hud-pty-*.log` (raw ANSI bytes — `cat` to see the HUD render with colors) |
-| `hud-screenshot-<os>` | ubuntu + macos | `hud-ascii-<os>.png` + `hud-unicode-<os>.png` rendered via [charm.sh `freeze`](https://github.com/charmbracelet/freeze). PNG visual evidence — download and open. |
-
-CI runs in **no-auth mode**: it asserts the standalone HUD command renders the status lines. The full "HUD visible inside a live `agy` session with model-step trigger" check runs on dev machines (with real OAuth) via `release.sh`'s built-in E2E gate.
-
----
-
-## Known issues
-
-- **Windows PNG screenshot**: every CI run uploads `hud-ascii-*.png` and `hud-unicode-*.png` for macOS + Linux via [charm.sh `freeze`](https://github.com/charmbracelet/freeze). Windows is skipped — `freeze v0.2.2` errors `No input` for every invocation form (positional file, `--execute`, UTF-8 file via `.WriteAllText`) we tried; it's an upstream Windows bug. Windows reviewers still get the raw ANSI bytes via the `e2e-windows-latest` artifact (`cat` it to see the HUD with colors).
-
-> **Note for Windows users**: The HUD auto-detects your active console codepage. If it's a non-UTF-8 codepage like `cp936` (GBK) or `cp1252`, the progress bar will fall back to ASCII characters (`#`) to prevent encoding corruption.
->
-> If you force Unicode rendering (e.g. by setting `display.unicode: true` in your configuration) while the active codepage is not UTF-8, you may see garbled text or `?` replacement characters.
->
-> **How to enable beautiful Unicode progress bars and borders on Windows:**
-> 1. **PowerShell helper (Recommended)**: Run `irm https://raw.githubusercontent.com/icebear0828/agy-hud/main/scripts/configure-utf8.ps1 | iex`, then restart PowerShell.
-> 2. **Per Session**: Run `chcp 65001` once in your Command Prompt / PowerShell window before opening `agy`.
-> 3. **System-wide UTF-8 (Permanent)**:
->    - Go to Windows Settings -> **Time & language** -> **Language & region** -> **Administrative language settings**.
->    - Click **Change system locale**.
->    - Check **"Beta: Use Unicode UTF-8 for worldwide language support"** and restart your computer.
->    - This forces all terminal sessions to use UTF-8 (`cp65001`) natively.
 
 ---
 

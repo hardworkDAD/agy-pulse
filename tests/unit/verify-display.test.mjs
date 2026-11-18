@@ -32,3 +32,19 @@ test('detectHudRender rejects empty and unrelated command output', () => {
   assert.equal(detectHudRender('', 'random output', 'Usage of agy:'), false);
   assert.equal(detectHudRender('[B] main only has a branch marker'), false);
 });
+
+test('detectHudRender accepts unified agy-pulse unicode and ASCII context monitor HUDs', () => {
+  const unicodePulse = [
+    'agy-hud │ Free',
+    '  Quota unavailable: not logged into Antigravity',
+    '◈ Unknown Model · Ctx ············ 0.0% (limit 512K)',
+  ].join('\n');
+  const asciiPulse = [
+    'agy-hud | Free',
+    '  配额不可用: 未登录 Antigravity',
+    '* Gemini 4 Carbon (H) · 上下文 ######...... 50.0% (256K/512K) · 输出 1.2K',
+  ].join('\n');
+
+  assert.equal(detectHudRender(unicodePulse), true);
+  assert.equal(detectHudRender(asciiPulse), true);
+});

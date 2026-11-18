@@ -36,9 +36,12 @@ const {
   isCachePayloadFresh,
   readCachePayload,
   readCacheLastRefreshed,
+  readCacheLastRefreshAttempt,
   readCacheFallback,
   didAccessTokenRotate,
+  getTokenHash,
   writeCache,
+  recordRefreshAttempt,
 } = cacheMod;
 const { fetchQuotaFromCloud, fetchTierFromCloud, fetchAccountEmail } = cloudMod;
 const { createUnavailableQuotaResult } = modelsMod;
@@ -54,6 +57,10 @@ function triggerBackgroundRefresh() {
     ], {
       detached: true,
       stdio: 'ignore',
+      env: {
+        ...process.env,
+        NODE_USE_ENV_PROXY: process.env.NODE_USE_ENV_PROXY || '1',
+      },
     });
     subprocess.unref();
   } catch { /* ignore spawning issues */ }
@@ -79,65 +86,84 @@ async function getQuota(options = {}) {
     roots = getAntigravityRoots(),
     windowsCredentialRefreshDebounceMs = WINDOWS_CREDENTIAL_REFRESH_DEBOUNCE_MS,
   } = options;
-  const shouldRefreshWindowsCredential = fast && platform === 'win32';
-  const refreshWindowsCredential = () => {
-    if (!shouldRefreshWindowsCredential) return;
+  const shouldRefreshPlatformCredential = fast && (platform === 'win32' || platform === 'linux');
+  const refreshPlatformCredential = () => {
+    if (!shouldRefreshPlatformCredential) return;
     triggerWindowsCredentialRefresh(backgroundRefresh, Date.now(), windowsCredentialRefreshDebounceMs);
   };
+  const cacheOpts = options.roots ? { roots: options.roots } : {};
   const tok = tokenReader({
     platform,
     roots,
     credentialReader,
     skipWindowsCredential: fast && platform === 'win32',
+    skipLinuxKeyring: fast && platform === 'linux',
   });
   if (!tok) {
     // Token file exists but failed to parse → transient (OAuth mid-refresh).
     // Return fresh cache rather than flashing "not logged in".
     // Token file absent → genuine logout, skip fallback.
     if (anyTokenFileExists(roots)) {
-      const fallback = readCacheFallback();
+      const fallback = readCacheFallback(cacheOpts);
       if (fallback && isCachePayloadFresh(fallback)) {
         return fallback.data;
       }
     }
-    refreshWindowsCredential();
+    refreshPlatformCredential();
     return createUnavailableQuotaResult('not_logged_in');
   }
 
   // For multi-account (Windows Credential Manager), use the primary token for
   // cache keying but fall back to alternates if the primary has no cache.
-  const payload = readCachePayload(tok) ||
-    (tok.all && tok.all.slice(1).reduce((acc, t) => acc || readCachePayload(t), null));
+  const payload = readCachePayload(tok, cacheOpts) ||
+    (tok.all && tok.all.slice(1).reduce((acc, t) => acc || readCachePayload(t, cacheOpts), null));
   const isFresh = payload && isCachePayloadFresh(payload);
   const tokenExpired = isTokenExpired(tok);
   const needsRefresh = !tokenExpired && (!isFresh || didAccessTokenRotate(payload, tok));
 
   if (needsRefresh) {
-    // Read lastRefreshed from cache even when payload doesn't match our token,
+    // Read lastAttempt from cache even when payload doesn't match our token,
     // to prevent a storm of concurrent background refresh processes.
-    const lastRefreshed = payload
-      ? payload.lastRefreshed || 0
-      : readCacheLastRefreshed();
+    const lastAttempt = payload
+      ? Math.max(payload.lastRefreshed || 0, payload.lastRefreshAttempt || 0)
+      : readCacheLastRefreshAttempt(cacheOpts);
+    const currentTokenHash = getTokenHash(tok);
+    const sameAttemptToken = Boolean(
+      payload?.lastAttemptTokenHash &&
+      currentTokenHash &&
+      payload.lastAttemptTokenHash === currentTokenHash
+    );
     // Debounce stale/no-cache refreshes, but refresh immediately when a fresh
-    // cache belongs to the same source and only the access token has rotated.
-    if (didAccessTokenRotate(payload, tok) || Date.now() - lastRefreshed > 30 * 1000) {
+    // cache belongs to the same source and only the access token has rotated
+    // (unless we already attempted and failed on that rotated token within 30s).
+    if ((didAccessTokenRotate(payload, tok) && !sameAttemptToken) || Date.now() - lastAttempt > 30 * 1000) {
       backgroundRefresh();
     }
   }
 
   if (payload) {
+    if (payload.data.length === 0 && payload.unavailableReason) {
+      if (tokenExpired) {
+        refreshPlatformCredential();
+        return createUnavailableQuotaResult('expired_token');
+      }
+      return createUnavailableQuotaResult(payload.unavailableReason);
+    }
     return payload.data;
   }
 
   if (tokenExpired) {
-    refreshWindowsCredential();
+    refreshPlatformCredential();
     return createUnavailableQuotaResult('expired_token');
   }
 
   // Fallback to any readable cache payload on disk to prevent "Quota loading" flicker
   // while we perform a background refresh for the current token.
-  const fallback = readCacheFallback();
+  const fallback = readCacheFallback(cacheOpts);
   if (fallback) {
+    if (fallback.data.length === 0 && fallback.unavailableReason) {
+      return createUnavailableQuotaResult(fallback.unavailableReason);
+    }
     return fallback.data;
   }
 
@@ -146,22 +172,39 @@ async function getQuota(options = {}) {
   return [];
 }
 
+/**
+ * Persists a background quota refresh result without overwriting existing valid
+ * cached data with an empty array when the cloud fetch fails.
+ */
+function applyRefreshResult(fresh, tok, tier = null, accountEmail = null, options = {}) {
+  if (!tok) return;
+  if (fresh && fresh.unavailableReason === 'auth_failed') {
+    tokenMod.clearTokenTemp(options.roots);
+    recordRefreshAttempt(tok, 'auth_failed', options);
+    return;
+  }
+  if (Array.isArray(fresh) && fresh.length > 0) {
+    writeCache(fresh, tok, tier, accountEmail, fresh.providerQuota, options);
+    return;
+  }
+  const reason = (fresh && fresh.unavailableReason) || 'quota_fetch_failed';
+  recordRefreshAttempt(tok, reason, { ...options, tier, accountEmail });
+}
+
 // ─── CLI Execution for background refreshes ──────────────────────────────────
 if (process.argv.includes('--refresh')) {
   (async () => {
     try {
       const tok = readToken();
       if (tok) {
+        const { loadConfig } = require('./config.js');
+        const config = await loadConfig().catch(() => ({}));
         const [fresh, tier, accountEmail] = await Promise.all([
-          fetchQuotaFromCloud(tok.accessToken),
-          fetchTierFromCloud(tok.accessToken),
+          fetchQuotaFromCloud(tok.accessToken, config),
+          fetchTierFromCloud(tok.accessToken, config),
           fetchAccountEmail(tok.accessToken),
         ]);
-        if (fresh && fresh.unavailableReason === 'auth_failed') {
-          tokenMod.clearTokenTemp();
-        } else if (fresh.length > 0 || accountEmail) {
-          writeCache(fresh, tok, tier, accountEmail, fresh.providerQuota);
-        }
+        applyRefreshResult(fresh, tok, tier, accountEmail);
       }
     } catch {}
     process.exit(0);
@@ -171,13 +214,16 @@ if (process.argv.includes('--refresh')) {
 module.exports = {
   // orchestrator
   getQuota,
+  applyRefreshResult,
   // cache module
   CACHE_PATH,
   isCachePayloadFresh,
   readCache: cacheMod.readCache,
   writeCache,
+  recordRefreshAttempt,
   readCachePayload,
   readCacheLastRefreshed,
+  readCacheLastRefreshAttempt,
   readCacheFallback,
   getCachedTier: cacheMod.getCachedTier,
   getCachedAccountEmail: cacheMod.getCachedAccountEmail,
@@ -202,7 +248,12 @@ module.exports = {
   parseQuotaSummary: cloudMod.parseQuotaSummary,
   enrichModelsWithQuotaSummary: cloudMod.enrichModelsWithQuotaSummary,
   fetchUserQuotaSummaryFromCloud: cloudMod.fetchUserQuotaSummaryFromCloud,
+  cloudFetchJson: cloudMod.cloudFetchJson,
+  buildCurlConfig: cloudMod.buildCurlConfig,
   // models module
+  MODEL_DISPLAY_NAMES: modelsMod.MODEL_DISPLAY_NAMES,
+  FALLBACK_AGENT_MODEL_IDS: modelsMod.FALLBACK_AGENT_MODEL_IDS,
+  resolveModelDisplayName: modelsMod.resolveModelDisplayName,
   normalizeQuotaModels: modelsMod.normalizeQuotaModels,
   discoverAgentModelIds: modelsMod.discoverAgentModelIds,
   resolveDeprecatedIds: modelsMod.resolveDeprecatedIds,

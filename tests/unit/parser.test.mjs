@@ -324,7 +324,7 @@ test('getSessionState falls back outside git repositories without stderr noise',
   assert.equal(result.stderr, '');
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.steps, 0);
-  assert.equal(parsed.branch, 'main');
+  assert.equal(parsed.branch, null);
 });
 
 test('getSessionState resolves username from id_token in oauth_creds.json', async () => {
@@ -581,4 +581,186 @@ test('parseAgyQuota returns null for missing or invalid quota', () => {
   assert.equal(parseAgyQuota({}), null);
   assert.equal(parseAgyQuota('invalid'), null);
 });
+
+test('getSessionState incrementally parses PLANNER_RESPONSE tokens, CHECKPOINT count, and handles partial/truncated files', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-parser-incremental-'));
+  try {
+    const transcriptPath = path.join(tempDir, 'transcript.jsonl');
+    const turn1 = {
+      step_index: 1,
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-18T10:00:00Z',
+      model: 'gemini-4-carbon-high',
+      input_tokens: 100000,
+      output_tokens: 1200,
+      cache_read_tokens: 80000,
+      cache_creation_tokens: 5000,
+    };
+    fs.writeFileSync(transcriptPath, JSON.stringify(turn1) + '\n');
+
+    let state = await getSessionState(transcriptPath, tempDir);
+    assert.equal(state.branch, null);
+    assert.equal(state.compactionCount, 0);
+    assert.equal(state.totalOutputTokens, 1200);
+    assert.equal(state.maxHistoricalCache, 80000);
+    assert.deepEqual(state.lastTurnUsage, {
+      input_tokens: 100000,
+      output_tokens: 1200,
+      cache_read_input_tokens: 80000,
+      cache_creation_input_tokens: 5000,
+      model: 'gemini-4-carbon-high',
+    });
+    // inclusive: max(100000, 85000) + 1200 = 101200; exclusive: 100000 + 85000 + 1200 = 186200
+    assert.deepEqual(state.turnHistoryMaxByMode, {
+      inclusivePeak: 101200,
+      exclusivePeak: 186200,
+    });
+    assert.equal(state.peakRawTurnTokens, 186200);
+    assert.equal(state.usage.current_usage.input_tokens, 100000);
+    assert.equal(state.usage.total_output_tokens, 1200);
+    assert.equal(state.serverCompactionLimit, 512000);
+
+    // Append CHECKPOINT + partial line WITHOUT trailing newline -> partial line must wait
+    const ckpt = { step_index: 2, type: 'CHECKPOINT', created_at: '2026-11-18T10:01:00Z' };
+    const turn2 = {
+      step_index: 3,
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-18T10:02:00Z',
+      input_tokens: 20000,
+      output_tokens: 800,
+      cache_read_tokens: 15000,
+      cache_creation_tokens: 1000,
+    };
+    const turn2Str = JSON.stringify(turn2);
+    const halfIdx = Math.floor(turn2Str.length / 2);
+    fs.appendFileSync(transcriptPath, JSON.stringify(ckpt) + '\n' + turn2Str.slice(0, halfIdx));
+
+    state = await getSessionState(transcriptPath, tempDir);
+    assert.equal(state.steps, 2);
+    assert.equal(state.compactionCount, 1);
+    assert.equal(state.totalOutputTokens, 1200);
+
+    // Complete the partial line with trailing newline -> now parsed cleanly
+    fs.appendFileSync(transcriptPath, turn2Str.slice(halfIdx) + '\n');
+    state = await getSessionState(transcriptPath, tempDir);
+    assert.equal(state.steps, 3);
+    assert.equal(state.compactionCount, 1);
+    assert.equal(state.totalOutputTokens, 2000);
+    assert.equal(state.lastTurnUsage.input_tokens, 20000);
+    assert.equal(state.turnHistoryMaxByMode.inclusivePeak, 101200);
+
+    // Truncate/reset transcript to smaller file -> resets incremental cache cleanly
+    const resetTurn = {
+      step_index: 1,
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-18T11:00:00Z',
+      input_tokens: 500,
+      output_tokens: 100,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+    };
+    fs.writeFileSync(transcriptPath, JSON.stringify(resetTurn) + '\n');
+    state = await getSessionState(transcriptPath, tempDir);
+    assert.equal(state.steps, 1);
+    assert.equal(state.compactionCount, 0);
+    assert.equal(state.totalOutputTokens, 100);
+    assert.deepEqual(state.turnHistoryMaxByMode, {
+      inclusivePeak: 600,
+      exclusivePeak: 600,
+    });
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('getSessionState clears pendingPlannerStartMs on SYSTEM_MESSAGE, source=SYSTEM, or missing timestamp', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-parser-sys-timing-'));
+  try {
+    const transcriptPath = path.join(tempDir, 'transcript.jsonl');
+    fs.writeFileSync(transcriptPath, [
+      JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', created_at: '2026-11-18T10:00:00Z', output_tokens: 200 }),
+      JSON.stringify({ step_index: 2, type: 'SYSTEM_MESSAGE', created_at: '2026-11-18T10:05:00Z' }),
+      JSON.stringify({ step_index: 3, type: 'GENERIC', created_at: '2026-11-18T10:05:01Z' }),
+      JSON.stringify({ step_index: 4, type: 'PLANNER_RESPONSE', created_at: '2026-11-18T10:06:00Z', output_tokens: 300 }),
+      JSON.stringify({ step_index: 5, type: 'GENERIC', source: 'SYSTEM', created_at: '2026-11-18T10:09:00Z' }),
+      JSON.stringify({ step_index: 6, type: 'PLANNER_RESPONSE', created_at: '2026-11-18T10:10:00Z', output_tokens: 400 }),
+      JSON.stringify({ step_index: 7, type: 'GENERIC' }), // missing timestamp clears pending start
+      JSON.stringify({ step_index: 8, type: 'GENERIC', created_at: '2026-11-18T10:15:00Z' }),
+      '',
+    ].join('\n'));
+
+    const state = await getSessionState(transcriptPath, tempDir);
+    assert.equal(state.totalApiDurationMs, undefined);
+    assert.deepEqual(state.lastPlannerResponse, {
+      startMs: Date.parse('2026-11-18T10:10:00Z'),
+      endMs: null,
+      outputTokens: 400,
+    });
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('getSessionState ignores 429 text in non-error entries and resolves truncated_fields from transcript_full.jsonl', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-parser-429-full-'));
+  try {
+    const transcriptPath = path.join(tempDir, 'transcript.jsonl');
+    const fullPath = path.join(tempDir, 'transcript_full.jsonl');
+
+    // Non-error PLANNER_RESPONSE mentioning HTTP 429 / RESOURCE_EXHAUSTED in code/text must NOT trigger imageExhausted
+    const chattyPlanner = {
+      step_index: 1,
+      type: 'PLANNER_RESPONSE',
+      created_at: new Date().toISOString(),
+      content: 'Handling HTTP 429 RESOURCE_EXHAUSTED with quotaResetDelay in docs',
+    };
+    fs.writeFileSync(transcriptPath, JSON.stringify(chattyPlanner) + '\n');
+    let state = await getSessionState(transcriptPath, tempDir);
+    assert.equal(state.imageExhausted, undefined);
+
+    // Structured ERROR entry with truncated content -> reads transcript_full.jsonl for step_index 2
+    const futureTs = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+    const truncatedErr = {
+      step_index: 2,
+      status: 'ERROR',
+      created_at: new Date().toISOString(),
+      content: 'Error truncated...',
+      truncated_fields: ['content'],
+    };
+    const fullErr = {
+      step_index: 2,
+      status: 'ERROR',
+      created_at: truncatedErr.created_at,
+      content: 'HTTP 429 RESOURCE_EXHAUSTED',
+      error: {
+        code: 429,
+        status: 'RESOURCE_EXHAUSTED',
+        details: [{ quotaResetTimeStamp: futureTs }],
+      },
+    };
+    fs.writeFileSync(fullPath, JSON.stringify(fullErr) + '\n');
+    fs.appendFileSync(transcriptPath, JSON.stringify(truncatedErr) + '\n');
+
+    state = await getSessionState(transcriptPath, tempDir);
+    assert.ok(state.imageExhausted);
+    assert.equal(state.imageExhausted.exhausted, true);
+    assert.equal(state.imageExhausted.resetTime, new Date(futureTs).toISOString());
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('getSessionState decodes JWT email with base64url characters (- and _)', async () => {
+  await withTempHome(async (geminiDir) => {
+    // 'a>?>?@example.com' encodes '-' and '_' in base64url
+    const targetEmail = 'a>?>?@example.com';
+    const b64u = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+    const token = `${b64u({ alg: 'RS256' })}.${b64u({ email: targetEmail })}.sig`;
+    fs.writeFileSync(path.join(geminiDir, 'oauth_creds.json'), JSON.stringify({ id_token: token }));
+
+    const state = await getSessionState('missing-transcript-nonexistent.jsonl');
+    assert.equal(state.username, targetEmail);
+  });
+});
+
 

@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, getLocalConfigPath, getGlobalConfigPath, saveConfig } from '../../runtime/config.js';
+import {
+  FULL_DEFAULT_CONFIG,
+  loadConfig,
+  getLocalConfigPath,
+  getGlobalConfigPath,
+  saveConfig,
+} from '../../runtime/config.js';
 
 function withCwd(cwd, fn) {
   const previous = process.cwd();
@@ -15,29 +21,52 @@ function withCwd(cwd, fn) {
   }
 }
 
-test('loadConfig reads project-local config before plugin defaults', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-config-local-'));
+test('loadConfig reads project-local config and deep-merges defaults', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-config-local-'));
   try {
-    fs.writeFileSync(path.join(tmp, 'agy-hud.config.json'), JSON.stringify({
+    fs.writeFileSync(path.join(tmp, 'agy-pulse.config.json'), JSON.stringify({
       display: { columnWidth: 45 },
       enabled: false,
+      customField: 'kept',
     }));
 
-    const config = await withCwd(tmp, () => loadConfig());
+    const config = await loadConfig(tmp);
 
     assert.equal(config.enabled, false);
-    assert.deepEqual(config.display, { columnWidth: 45 });
+    assert.equal(config.customField, 'kept');
+    assert.equal(config.display.columnWidth, 45);
+    assert.equal(config.display.showContextMonitor, true);
+    assert.equal(config.thresholds.warning, 0.7);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig supports legacy agy-hud.config.json in target cwd', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-config-legacy-'));
+  try {
+    fs.writeFileSync(path.join(tmp, 'agy-hud.config.json'), JSON.stringify({
+      display: { showContextMonitor: false, columnWidth: 50 },
+    }));
+
+    const config = await loadConfig(tmp);
+    assert.equal(config.display.showContextMonitor, false);
+    assert.equal(config.display.columnWidth, 50);
+    assert.equal(config.display.showCurrentDir, true);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
 test('loadConfig falls back to bundled plugin config when local config is absent', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-config-plugin-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-config-plugin-'));
   try {
     const config = await withCwd(tmp, () => loadConfig());
 
     assert.equal(config.enabled, true);
+    assert.equal(config.display.showContextMonitor, FULL_DEFAULT_CONFIG.display.showContextMonitor);
+    assert.equal(config.display.showSpeed, true);
+    assert.equal(config.display.showModel, false);
     assert.equal(config.thresholds.warning, 0.7);
     assert.equal(config.thresholds.critical, 0.9);
   } finally {
@@ -45,23 +74,18 @@ test('loadConfig falls back to bundled plugin config when local config is absent
   }
 });
 
-test('bundled plugin config sets display.unicode to true by default', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-config-unicode-'));
+test('bundled plugin config leaves display.unicode undefined for auto detection', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-config-unicode-'));
   try {
     const config = await withCwd(tmp, () => loadConfig());
-
-    assert.equal(
-      config.display.unicode,
-      true,
-      'bundled config defaults to unicode: true'
-    );
+    assert.equal(config.display.unicode, undefined);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
 test('saveConfig writes config to local path', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-config-save-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-config-save-'));
   try {
     await withCwd(tmp, async () => {
       const localPath = getLocalConfigPath();
@@ -79,7 +103,7 @@ test('saveConfig writes config to local path', async () => {
 });
 
 test('saveConfig writes config to global path', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-config-global-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-config-global-'));
   const globalPath = getGlobalConfigPath();
   const backup = fs.existsSync(globalPath) ? fs.readFileSync(globalPath) : null;
   try {
@@ -99,10 +123,9 @@ test('saveConfig writes config to global path', async () => {
 });
 
 test('saveConfig throws on write failure', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-config-err-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-config-err-'));
   try {
     await withCwd(tmp, async () => {
-      // Make a directory at the config path so writeFileSync fails
       const localPath = getLocalConfigPath();
       fs.mkdirSync(localPath);
       await assert.rejects(() => saveConfig({ enabled: true }, false));
@@ -111,4 +134,3 @@ test('saveConfig throws on write failure', async () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
-

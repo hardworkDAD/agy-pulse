@@ -279,4 +279,19 @@ describe('renderer / cache badge temperature scale', () => {
       assert.equal(calculateTurnCacheMetrics(usage, 'Claude Sonnet 4.6 (Thinking)').available, false);
     }
   });
+
+  test('does not underestimate denominator for non-cache-inclusive models when input >= cacheTotal', () => {
+    const usage = {
+      input_tokens: 5000,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 3000,
+    };
+    const exclusive = calculateTurnCacheMetrics(usage, 'CustomExclusiveModel');
+    assert.equal(exclusive.totalPrompt, 8000);
+    assert.equal(exclusive.hitRate, 37.5);
+
+    const inclusive = calculateTurnCacheMetrics(usage, 'Orchestrator (Carbon)');
+    assert.equal(inclusive.totalPrompt, 5000);
+    assert.equal(inclusive.hitRate, 60);
+  });
 });

@@ -147,3 +147,92 @@ test('formatSpeed formats output speed in en and zh', () => {
   assert.equal(formatSpeed(42.56, 'en'), 'out: 42.6 tok/s');
   assert.equal(formatSpeed(42.56, 'zh'), '输出: 42.6 tok/s');
 });
+
+test('computes and latches speed for first-turn plain-text reply within 500ms..120s window, and returns null when stale or too short', () => {
+  const activeTranscript = path.join(tempDir, 'first-turn-active.jsonl');
+  const agyTurn = {
+    transcript_path: activeTranscript,
+    context_window: {
+      total_output_tokens: 500,
+      current_usage: {
+        input_tokens: 1500,
+        output_tokens: 500,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  };
+
+  // Active first turn (endMs === null, elapsed = 5000ms within [500, 120000])
+  const firstSpeed = getOutputSpeed(agyTurn, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
+  }, 15000);
+  assert.equal(firstSpeed, 100); // 500 / 5s
+
+  // Subsequent idle re-render holds the latched speed
+  const heldSpeed = getOutputSpeed(agyTurn, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
+  }, 300000);
+  assert.equal(heldSpeed, 100);
+
+  // Attached historical session (> 120000ms old, !previous) returns null
+  const staleTranscript = path.join(tempDir, 'first-turn-stale.jsonl');
+  const staleSpeed = getOutputSpeed({ ...agyTurn, transcript_path: staleTranscript }, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
+  }, 135000);
+  assert.equal(staleSpeed, null);
+
+  // Under 500ms noise threshold (!previous) returns null
+  const shortTranscript = path.join(tempDir, 'first-turn-short.jsonl');
+  const shortSpeed = getOutputSpeed({ ...agyTurn, transcript_path: shortTranscript }, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
+  }, 10300);
+  assert.equal(shortSpeed, null);
+});
+
+test('allows 5% (min 5 tokens) alignment tolerance and supports first-turn speed from cumulative total_output_tokens', () => {
+  const tolTranscript = path.join(tempDir, 'tolerance.jsonl');
+  const makeAgy = (output, totalOutput) => ({
+    transcript_path: tolTranscript,
+    context_window: {
+      total_output_tokens: totalOutput,
+      current_usage: {
+        input_tokens: 1000,
+        output_tokens: output,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  });
+
+  // 1000 vs 1045 -> diff 45 <= max(5, round(1000 * 0.05) = 50) -> accepted
+  const alignedSpeed = getOutputSpeed(makeAgy(1000, 1000), tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 20000, outputTokens: 1045 },
+  }, 20500);
+  assert.equal(alignedSpeed, 100);
+
+  // 100 vs 500 -> diff 400 > 5 -> rejected, falls back to previous speed (100)
+  const misalignedSpeed = getOutputSpeed(makeAgy(100, 1100), tempDir, {
+    lastPlannerResponse: { startMs: 25000, endMs: 27000, outputTokens: 500 },
+  }, 27500);
+  assert.equal(misalignedSpeed, 100);
+
+  // First turn with ONLY cumulative total_output_tokens (no per-turn output_tokens)
+  const cumTranscript = path.join(tempDir, 'cum-first-turn.jsonl');
+  const cumAgy = {
+    transcript_path: cumTranscript,
+    context_window: {
+      total_output_tokens: 600,
+      current_usage: {
+        input_tokens: 2000,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  };
+  const cumSpeed = getOutputSpeed(cumAgy, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 14000, outputTokens: 600 },
+  }, 14500);
+  assert.equal(cumSpeed, 150); // 600 / 4s
+});
+

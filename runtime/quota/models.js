@@ -5,6 +5,29 @@
 // (5 h max for the short window, ~7 d for the weekly).
 const FIVE_HOUR_WINDOW_THRESHOLD_MS = 12 * 60 * 60 * 1000;
 
+// Authoritative display-name mapping for 2026 and legacy model IDs when the
+// upstream API omits `displayName`.
+const MODEL_DISPLAY_NAMES = {
+  'gemini-4-carbon-high': 'Gemini 4 Carbon (High)',
+  'gemini-4-carbon-medium': 'Gemini 4 Carbon (Medium)',
+  'gemini-4-carbon-low': 'Gemini 4 Carbon (Low)',
+  'gemini-4-hydrogen-xhigh': 'Gemini 4 Hydrogen (XHigh)',
+  'gemini-4-hydrogen-high': 'Gemini 4 Hydrogen (High)',
+  'gemini-4-hydrogen-medium': 'Gemini 4 Hydrogen (Medium)',
+  'gemini-4-hydrogen-low': 'Gemini 4 Hydrogen (Low)',
+  'gemini-4-argon-high': 'Gemini 4 Argon (High)',
+  'gemini-4-argon-medium': 'Gemini 4 Argon (Medium)',
+  'gemini-4-argon-low': 'Gemini 4 Argon (Low)',
+  'gemini-3.8-flash-high': 'Gemini 3.8 Flash (High)',
+  'gemini-3.8-flash-medium': 'Gemini 3.8 Flash (Medium)',
+  'gemini-3.8-flash-low': 'Gemini 3.8 Flash (Low)',
+  'gemini-pro-orchestrator': 'Orchestrator (Carbon)',
+  'gemini-pro-orchestrator-argon': 'Orchestrator (Argon)',
+  'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
+  'claude-sonnet-4-6': 'Claude Sonnet 4.6 (Thinking)',
+  'gpt-oss-120b-medium': 'GPT-OSS 120B (Medium)',
+};
+
 // Fallback model list when agentModelSorts is absent from the API response
 const FALLBACK_AGENT_MODEL_IDS = [
   'gemini-3-flash-agent',
@@ -13,10 +36,32 @@ const FALLBACK_AGENT_MODEL_IDS = [
   'gemini-pro-agent',
   'gemini-3.1-pro-low',
   'gemini-4-argon',
+  'gemini-4-carbon-high',
+  'gemini-4-carbon-medium',
+  'gemini-4-carbon-low',
+  'gemini-4-hydrogen-xhigh',
+  'gemini-4-hydrogen-high',
+  'gemini-4-hydrogen-medium',
+  'gemini-4-hydrogen-low',
+  'gemini-4-argon-high',
+  'gemini-4-argon-medium',
+  'gemini-4-argon-low',
+  'gemini-3.8-flash-high',
+  'gemini-3.8-flash-medium',
+  'gemini-3.8-flash-low',
+  'gemini-pro-orchestrator',
+  'gemini-pro-orchestrator-argon',
   'claude-sonnet-4-6',
   'claude-opus-4-6-thinking',
   'gpt-oss-120b-medium',
 ];
+
+function resolveModelDisplayName(id, explicitDisplayName) {
+  if (typeof explicitDisplayName === 'string' && explicitDisplayName.trim()) {
+    return explicitDisplayName;
+  }
+  return MODEL_DISPLAY_NAMES[id] || id;
+}
 
 function discoverAgentModelIds(apiResponse) {
   if (!apiResponse || typeof apiResponse !== 'object') return null;
@@ -120,7 +165,7 @@ function normalizeQuotaModels(models, interestingModelIds = FALLBACK_AGENT_MODEL
       : null;
     results.push({
       id,
-      displayName: m.displayName || id,
+      displayName: resolveModelDisplayName(id, m.displayName),
       modelProvider: m.modelProvider || null,
       remainingFraction,
       resetTime,
@@ -200,8 +245,10 @@ function createUnavailableQuotaResult(reason) {
 }
 
 module.exports = {
+  MODEL_DISPLAY_NAMES,
   FALLBACK_AGENT_MODEL_IDS,
   FIVE_HOUR_WINDOW_THRESHOLD_MS,
+  resolveModelDisplayName,
   discoverAgentModelIds,
   resolveDeprecatedIds,
   normalizeRemainingFraction,

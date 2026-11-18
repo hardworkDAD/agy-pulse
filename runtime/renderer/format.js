@@ -18,11 +18,12 @@ const DEFAULT_THRESHOLDS = {
 const DEFAULT_COLUMN_WIDTH = 40;
 const QUOTA_CHROME_WIDTH = 21;
 
-const TIER_ABBREVS = { Thinking: 'Th', High: 'H', Medium: 'M', Low: 'L' };
+const TIER_ABBREVS = { XHigh: 'XH', Thinking: 'Th', High: 'H', Medium: 'M', Low: 'L' };
 
 const ABBREVIATION_RULES = [
-  [/^Gemini ([\d.]+) (Flash|Pro|Argon) \((\w+)\)/, (_, ver, fam, tier) =>
+  [/^Gemini ([\d.]+) (Flash|Pro|Argon|Carbon|Hydrogen) \((\w+)\)/, (_, ver, fam, tier) =>
     `Gemini ${ver} ${fam}(${TIER_ABBREVS[tier] || tier[0]})`],
+  [/^Orchestrator \(([^)]+)\)/, (_, fam) => `Orch (${fam})`],
   [/^Claude (\w+) ([\d.]+) \((\w+)\)/, (_, fam, ver, tier) =>
     `${fam} ${ver}(${TIER_ABBREVS[tier] || tier[0]})`],
   [/^GPT-OSS (.+?) \(\w+\)/, (_, spec) => `GPT-OSS ${spec}`],
@@ -42,9 +43,16 @@ function simplifyModelName(name) {
 }
 
 const COMPACT_NAME_RULES = [
-  [/^Gemini [\d.]+ (Flash|Pro|Argon).*/i, (_, fam) => fam],
+  [/^Gemini [\d.]+ (Flash|Pro|Argon|Carbon|Hydrogen).*/i, (_, fam) =>
+    (fam.toLowerCase() === 'hydrogen' ? 'Hydro' : fam)],
+  [/^Orchestrator \((Carbon|Argon)\)/i, (_, fam) =>
+    (fam.toLowerCase() === 'carbon' ? 'Orch-C' : 'Orch-A')],
   [/^Claude (\w+) [\d.]+ \((\w+)\)/i, (_, fam) => fam],
   [/^GPT-OSS .*/i, () => 'GPT'],
+  [/gemini-.*orchestrator.*argon/i, () => 'Orch-A'],
+  [/gemini-.*orchestrator/i, () => 'Orch-C'],
+  [/gemini-.*carbon/i, () => 'Carbon'],
+  [/gemini-.*hydrogen/i, () => 'Hydro'],
   [/gemini-.*argon/i, () => 'Argon'],
   [/gemini-.*flash/i, () => 'Flash'],
   [/gemini-.*pro/i, () => 'Pro'],
@@ -80,10 +88,7 @@ function modelNamesMatch(left, right) {
 
 function modelIncludesCacheInInput(nameOrId) {
   if (!nameOrId) return false;
-  const name = nameOrId.toLowerCase();
-  return name.includes('claude') || name.includes('sonnet') || name.includes('opus') ||
-    name.includes('haiku') || name.includes('gpt') || name.includes('deepseek') ||
-    name.includes('gemini');
+  return /claude|anthropic|sonnet|opus|haiku|gemini|carbon|hydrogen|argon|orchestrator|gpt|deepseek|o1-|o3-|o4-/i.test(String(nameOrId));
 }
 
 function normalizeTokenCount(value) {
@@ -92,8 +97,8 @@ function normalizeTokenCount(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
-/** Calculate a per-turn cache hit rate with self-adaptive total prompt resolution. */
-function calculateTurnCacheMetrics(usage) {
+/** Calculate a per-turn cache hit rate respecting model cache-inclusive semantics. */
+function calculateTurnCacheMetrics(usage, rawModelName) {
   if (!usage || typeof usage !== 'object') return null;
 
   const cacheRead = normalizeTokenCount(usage.cache_read_input_tokens);
@@ -103,7 +108,8 @@ function calculateTurnCacheMetrics(usage) {
   if (cacheRead === null || input === null) return { available: false };
 
   const cacheTotal = cacheRead + cacheWrite;
-  const totalPrompt = input >= cacheTotal ? input : input + cacheTotal;
+  const isInclusive = !rawModelName || modelIncludesCacheInInput(rawModelName);
+  const totalPrompt = (input >= cacheTotal && isInclusive) ? input : input + cacheTotal;
   if (totalPrompt === 0) return { available: false };
 
   return {
@@ -192,6 +198,65 @@ function sanitizeTerminalText(value, maxLength = 120) {
     .slice(0, maxLength);
 }
 
+function charDisplayWidth(codePoint) {
+  if (!codePoint) return 0;
+  if (
+    (codePoint >= 0x0300 && codePoint <= 0x036f) ||
+    (codePoint >= 0x1ab0 && codePoint <= 0x1aff) ||
+    (codePoint >= 0x1dc0 && codePoint <= 0x1dff) ||
+    (codePoint >= 0x20d0 && codePoint <= 0x20ff) ||
+    (codePoint >= 0xfe20 && codePoint <= 0xfe2f)
+  ) {
+    return 0;
+  }
+  if (
+    codePoint >= 0x1100 && (
+      codePoint <= 0x115f ||
+      codePoint === 0x2329 || codePoint === 0x232a ||
+      (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+      (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+      (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+      (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+      (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+      (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+      (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+      (codePoint >= 0x1f300 && codePoint <= 0x1faf8) ||
+      (codePoint >= 0x20000 && codePoint <= 0x2fffd) ||
+      (codePoint >= 0x30000 && codePoint <= 0x3fffd)
+    )
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+function getDisplayWidth(str) {
+  let width = 0;
+  for (const ch of String(str || '')) {
+    width += charDisplayWidth(ch.codePointAt(0));
+  }
+  return width;
+}
+
+function truncateToDisplayWidth(str, width, ellipsis = '...') {
+  const input = String(str || '');
+  if (getDisplayWidth(input) <= width) {
+    return input + ' '.repeat(Math.max(0, width - getDisplayWidth(input)));
+  }
+  const ellipsisWidth = getDisplayWidth(ellipsis);
+  const budget = Math.max(0, width - ellipsisWidth);
+  let out = '';
+  let used = 0;
+  for (const ch of input) {
+    const w = charDisplayWidth(ch.codePointAt(0));
+    if (used + w > budget) break;
+    out += ch;
+    used += w;
+  }
+  const result = out + ellipsis;
+  return result + ' '.repeat(Math.max(0, width - getDisplayWidth(result)));
+}
+
 /**
  * Format remainingFraction into an integer percentage.
  * Clamps non-100% values (e.g. 0.9953883) to at most 99% so that
@@ -219,6 +284,8 @@ module.exports = {
   calculateTurnCacheMetrics,
   formatTurnCacheBadge,
   sanitizeTerminalText,
+  getDisplayWidth,
+  truncateToDisplayWidth,
   formatTokens,
   formatDuration,
   formatQuotaPercent,

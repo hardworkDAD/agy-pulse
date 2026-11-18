@@ -629,5 +629,48 @@ describe('renderer / quota lines', () => {
       // Image model must NOT appear as a separate table column row
       assert.doesNotMatch(output, /Gemini 3\.1 Flash I/);
     });
+
+    test('renders -- for missing provider quota windows instead of fake 100%', () => {
+      const now = Date.now();
+      const quotaData = [{
+        id: 'gemini-4-carbon-high',
+        displayName: 'Gemini 4 Carbon (High)',
+        modelProvider: 'MODEL_PROVIDER_GOOGLE',
+        remainingFraction: 0.72,
+        resetTime: new Date(now + 2 * 3600 * 1000).toISOString(),
+        windows: {
+          fiveHour: { remainingFraction: 0.72, resetTime: new Date(now + 2 * 3600 * 1000).toISOString(), observedAt: now },
+        },
+      }];
+      const clean = renderHUD({ steps: 1, branch: 'main' }, { context_window: {} }, { display: { unicode: true } }, quotaData)
+        .replace(/\x1b\[[0-9;]*m/g, '');
+
+      assert.match(clean, /Google 5h\s+\[[█░]+\]\s+72%/);
+      assert.match(clean, /Claude 5h\s+\[░+\]\s+--/);
+      assert.doesNotMatch(clean, /Claude 5h.*100%/);
+    });
+
+    test('distinguishes XHigh tier and 2026 families in compact mode without collisions', () => {
+      const now = Date.now();
+      const quotaData = [
+        { id: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.9, resetTime: new Date(now + 3600000).toISOString() },
+        { id: 'gemini-4-hydrogen-high', displayName: 'Gemini 4 Hydrogen (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.8, resetTime: new Date(now + 3600000).toISOString() },
+        { id: 'gemini-4-hydrogen-xhigh', displayName: 'Gemini 4 Hydrogen (XHigh)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.4, resetTime: new Date(now + 3600000).toISOString() },
+        { id: 'gemini-pro-orchestrator', displayName: 'Orchestrator (Carbon)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.7, resetTime: new Date(now + 3600000).toISOString() },
+        { id: 'gemini-pro-orchestrator-argon', displayName: 'Orchestrator (Argon)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.5, resetTime: new Date(now + 3600000).toISOString() },
+      ];
+      const agyData = {
+        context_window: {},
+        model: { display_name: 'Gemini 4 Hydrogen (XHigh)' },
+      };
+      const clean = renderHUD({ steps: 1, branch: 'main' }, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData)
+        .replace(/\x1b\[[0-9;]*m/g, '');
+
+      assert.match(clean, /Quota: 40%/);
+      assert.match(clean, /Carbon/);
+      assert.match(clean, /Hydro/);
+      assert.match(clean, /Orch-C/);
+      assert.match(clean, /Orch-A/);
+    });
   });
 });

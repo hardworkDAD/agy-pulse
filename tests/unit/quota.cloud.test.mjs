@@ -9,6 +9,8 @@ const {
   extractTierName,
   parseQuotaSummary,
   enrichModelsWithQuotaSummary,
+  cloudFetchJson,
+  buildCurlConfig,
 } = quotaModule;
 
 describe('quota / cloud', () => {
@@ -421,6 +423,44 @@ describe('quota / cloud', () => {
       assert.equal(parsed.argon.weekly.remainingFraction, 0.60);
       assert.equal(parsed.argon.fiveHour, undefined);
     });
+
+    test('parses carbon, hydrogen, orchestrator, gpt-oss, and custom buckets without dropping them', () => {
+      const resetTime = '2026-10-31T12:00:00Z';
+      const parsed = parseQuotaSummary({
+        groups: [
+          {
+            displayName: 'Gemini 4 Carbon & Hydrogen',
+            buckets: [
+              { bucketId: 'carbon-weekly', window: 'weekly', remainingFraction: 0.80, resetTime },
+              { bucketId: 'hydrogen-5h', window: '5h', remainingFraction: 0.50, resetTime },
+            ],
+          },
+          {
+            displayName: 'Orchestrator',
+            buckets: [
+              { bucketId: 'orchestrator-weekly', window: 'weekly', remainingFraction: 0.70, resetTime },
+            ],
+          },
+          {
+            displayName: 'GPT-OSS 120B',
+            buckets: [
+              { bucketId: 'gpt-oss-5h', window: '5h', remainingFraction: 0.60, resetTime },
+            ],
+          },
+          {
+            displayName: 'DeepSeek Models',
+            buckets: [
+              { bucketId: 'deepseek-weekly', window: 'weekly', remainingFraction: 0.45, resetTime },
+            ],
+          },
+        ],
+      });
+
+      assert.equal(parsed.google.weekly.remainingFraction, 0.70);
+      assert.equal(parsed.google.fiveHour.remainingFraction, 0.50);
+      assert.equal(parsed.claude.fiveHour.remainingFraction, 0.60);
+      assert.equal(parsed.deepseek.weekly.remainingFraction, 0.45);
+    });
   });
 
   describe('enrichModelsWithQuotaSummary', () => {
@@ -459,6 +499,120 @@ describe('quota / cloud', () => {
     test('returns original models when summary is null', () => {
       const models = [{ id: 'm1' }];
       assert.equal(enrichModelsWithQuotaSummary(models, null), models);
+    });
+
+    test('enriches 2026 carbon, hydrogen, orchestrator, and gpt-oss models', () => {
+      const models = [
+        { id: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High)', windows: {} },
+        { id: 'gemini-4-hydrogen-xhigh', displayName: 'Gemini 4 Hydrogen (XHigh)', windows: {} },
+        { id: 'gemini-pro-orchestrator', displayName: 'Orchestrator (Carbon)', windows: {} },
+        { id: 'gemini-pro-orchestrator-argon', displayName: 'Orchestrator (Argon)', windows: {} },
+        { id: 'gpt-oss-120b-medium', displayName: 'GPT-OSS 120B (Medium)', windows: {} },
+      ];
+      const summary = {
+        google: { weekly: { remainingFraction: 0.88, resetTime: '2026-10-31T00:00:00Z' } },
+        argon: { weekly: { remainingFraction: 0.66, resetTime: '2026-10-31T00:00:00Z' } },
+        claude: { fiveHour: { remainingFraction: 0.44, resetTime: '2026-10-31T00:00:00Z' } },
+      };
+      const enriched = enrichModelsWithQuotaSummary(models, summary, 999);
+      assert.equal(enriched[0].windows.weekly.remainingFraction, 0.88);
+      assert.equal(enriched[1].windows.weekly.remainingFraction, 0.88);
+      assert.equal(enriched[2].windows.weekly.remainingFraction, 0.88);
+      assert.equal(enriched[3].windows.weekly.remainingFraction, 0.66);
+      assert.equal(enriched[4].windows.fiveHour.remainingFraction, 0.44);
+    });
+  });
+
+  describe('cloudFetchJson / proxy curl fallback', () => {
+    test('buildCurlConfig passes url, headers, and body via stdin config without CLI arg exposure', () => {
+      const cfg = buildCurlConfig('https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer secret-token-value',
+          'Content-Type': 'application/json',
+        },
+        body: '{"ok":true}',
+        timeoutMs: 4200,
+      });
+
+      assert.match(cfg, /^url = "https:\/\/daily-cloudcode-pa\.googleapis\.com\/v1internal:fetchAvailableModels"/m);
+      assert.match(cfg, /^request = "POST"/m);
+      assert.match(cfg, /^max-time = "5"/m);
+      assert.match(cfg, /^write-out = "\\n%\{http_code\}"/m);
+      assert.match(cfg, /^header = "Authorization: Bearer secret-token-value"/m);
+      assert.match(cfg, /^data = "\{\\"ok\\":true\}"/m);
+    });
+
+    test('falls back to curl -sS -K - with stdin config on native fetch network failure', async () => {
+      const originalFetch = globalThis.fetch;
+      let capturedCmd = null;
+      let capturedArgs = null;
+      let capturedStdin = '';
+
+      globalThis.fetch = async () => {
+        throw new Error('ECONNREFUSED proxy error');
+      };
+
+      const fakeExecFile = (cmd, args, opts, cb) => {
+        capturedCmd = cmd;
+        capturedArgs = args;
+        return {
+          stdin: {
+            end(chunk) {
+              capturedStdin = String(chunk);
+              cb(null, '{"models":{"m1":{"displayName":"M1"}}}\n200\n');
+            },
+          },
+        };
+      };
+
+      try {
+        const res = await cloudFetchJson('https://example.test/api', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer super-secret-tok' },
+          body: '{}',
+          timeoutMs: 3000,
+          _forceNativeFallback: true,
+          _curlPath: '/usr/bin/curl',
+          _execFile: fakeExecFile,
+        });
+
+        assert.equal(capturedCmd, '/usr/bin/curl');
+        assert.deepEqual(capturedArgs, ['-sS', '-K', '-']);
+        assert.equal(capturedArgs.join(' ').includes('super-secret-tok'), false);
+        assert.match(capturedStdin, /Authorization: Bearer super-secret-tok/);
+        assert.equal(res.ok, true);
+        assert.equal(res.status, 200);
+        assert.equal(res.data.models.m1.displayName, 'M1');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    test('returns non-ok status from curl fallback without throwing', async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () => {
+        throw new Error('network down');
+      };
+      const fakeExecFile = (cmd, args, opts, cb) => ({
+        stdin: {
+          end() {
+            cb(null, '{"error":"unauthorized"}\n401\n');
+          },
+        },
+      });
+
+      try {
+        const res = await cloudFetchJson('https://example.test/api', {
+          _forceNativeFallback: true,
+          _curlPath: '/usr/bin/curl',
+          _execFile: fakeExecFile,
+        });
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 401);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     });
   });
 });

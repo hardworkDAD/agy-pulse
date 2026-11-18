@@ -29,6 +29,7 @@ test('bootstrap.sh invokes bootstrap.js via curl + node', () => {
 
 test('bootstrap.js downloads runtime/* files and invokes configureStatusLine', () => {
   const bootstrap = fs.readFileSync(path.join(projectRoot, 'scripts', 'bootstrap.js'), 'utf8');
+  assert.match(bootstrap, /runtime\/bin\/agy-pulse\.js/);
   assert.match(bootstrap, /runtime\/bin\/agy-hud\.js/);
   assert.match(bootstrap, /statusline-installer\.js/);
   assert.match(bootstrap, /configureStatusLine/);
@@ -213,6 +214,34 @@ test('ensureWindowsShShim skips writes when on-disk content already matches', ()
 });
 
 test('writeCmdShim is a no-op on non-Windows', () => {
-  const result = writeCmdShim('/tmp/whatever/agy-hud.js', 'linux');
+  const result = writeCmdShim('/tmp/whatever/agy-pulse.js', 'linux');
   assert.equal(result, null);
+});
+
+test('configureStatusLine preserves enabled and stack_with_default and prefers agy-pulse.js', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-installer-'));
+  try {
+    const baseDir = path.join(tmp, 'runtime');
+    fs.mkdirSync(path.join(baseDir, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(baseDir, 'bin', 'agy-pulse.js'), '// entry');
+    const settingsPath = path.join(tmp, 'settings.json');
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      statusLine: {
+        type: 'command',
+        command: '/old/statusline-combined.sh',
+        enabled: true,
+        stack_with_default: true,
+      },
+    }));
+
+    const res = statuslineModule.configureStatusLine(baseDir, { settingsPath });
+    const updated = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+
+    assert.match(res.command, /agy-pulse\.(?:js|cmd)/);
+    assert.equal(updated.statusLine.enabled, true);
+    assert.equal(updated.statusLine.stack_with_default, true);
+    assert.equal(updated.statusLine.command, res.command);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

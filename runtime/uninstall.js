@@ -5,15 +5,15 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { resolveAntigravityPath, getAntigravityRoots } = require('./paths.js');
+const { RUNTIME_DIR_NAME, LEGACY_RUNTIME_DIR_NAME } = require('./brand.js');
 
-function isOurStatusLineCommand(command, runtimeDir) {
-  if (!command) return false;
-  // Match either the unix node-prefixed form or the windows .cmd shim form,
-  // and only when the command points into our runtime tree.
-  return command.includes(runtimeDir);
+function isOurStatusLineCommand(command, runtimeDirOrDirs) {
+  if (!command || !runtimeDirOrDirs) return false;
+  const dirs = Array.isArray(runtimeDirOrDirs) ? runtimeDirOrDirs : [runtimeDirOrDirs];
+  return dirs.some(dir => Boolean(dir) && command.includes(dir));
 }
 
-function clearStatusLine(settingsPath, runtimeDir) {
+function clearStatusLine(settingsPath, runtimeDirOrDirs) {
   if (!fs.existsSync(settingsPath)) {
     return { changed: false, reason: 'no_settings' };
   }
@@ -25,7 +25,7 @@ function clearStatusLine(settingsPath, runtimeDir) {
   }
   const current = settings && settings.statusLine && settings.statusLine.command;
   if (!current) return { changed: false, reason: 'no_status_line' };
-  if (!isOurStatusLineCommand(current, runtimeDir)) {
+  if (!isOurStatusLineCommand(current, runtimeDirOrDirs)) {
     return { changed: false, reason: 'foreign_status_line' };
   }
   fs.copyFileSync(settingsPath, settingsPath + '.bak');
@@ -43,6 +43,8 @@ function removeRuntimeDir(runtimeDir) {
 function removeTokenMirrors() {
   const removed = [];
   const candidates = [
+    path.join(os.tmpdir(), 'agy-pulse-token.json'),
+    path.join(os.tmpdir(), 'agy-pulse-quota-cache.json'),
     path.join(os.tmpdir(), 'agy-hud-token.json'),
     path.join(os.tmpdir(), 'agy-hud-quota-cache.json'),
   ];
@@ -60,8 +62,8 @@ function removeTokenMirrors() {
 }
 
 /**
- * Remove extra files written by the bootstrap/runtime that uninstall.js
- * previously missed: agy-hud-payload.json and the hud/ directory.
+ * Remove extra files written by the runtime/bootstrap across agy-pulse and
+ * legacy agy-hud installations.
  *
  * @param {string} root  antigravity-cli data root
  * @returns {string[]}   list of paths actually removed
@@ -69,13 +71,23 @@ function removeTokenMirrors() {
 function removeExtraFiles(root) {
   const removed = [];
   const targets = [
+    path.join(root, 'agy-pulse-payload.json'),
+    path.join(root, 'agy-pulse-token.json'),
+    path.join(root, 'agy-pulse-quota-cache.json'),
+    path.join(root, 'agy-pulse-error.log'),
+    path.join(root, 'agy-pulse-update-status.json'),
+    path.join(root, 'agy-pulse-compaction-cache.json'),
     path.join(root, 'agy-hud-payload.json'),
     path.join(root, 'agy-hud-token.json'),
     path.join(root, 'agy-hud-quota-cache.json'),
     path.join(root, 'agy-hud-error.log'),
+    path.join(root, 'agy-hud-update-status.json'),
     path.join(root, 'daily-cost.json'),
     path.join(root, 'speed-cache'),
+    path.join(root, 'transcript-cache'),
     path.join(root, 'hud'),
+    path.join(root, 'statusline-combined.sh'),
+    path.join(root, 'agy-statusline'),
   ];
   for (const target of targets) {
     if (fs.existsSync(target)) {
@@ -120,29 +132,38 @@ function removeWindowsShShims(platform = process.platform, env = process.env) {
 function uninstall(options = {}) {
   const env = options.env || process.env;
   const homeDir = options.homeDir || os.homedir();
-  // Search all candidate roots — uninstall should clean any root we may have
-  // touched, not just the first one we'd pick today.
   const roots = options.roots || getAntigravityRoots(env, homeDir);
-  const settingsPath = options.settingsPath || resolveAntigravityPath('settings.json');
+  const settingsPath = options.settingsPath || resolveAntigravityPath('settings.json', env, homeDir);
 
   const results = { settingsPath, statusLine: null, runtimes: [], tokenMirrors: [], extraFiles: [] };
 
   for (const root of roots) {
-    const runtimeDir = path.join(root, 'agy-hud-runtime');
-    const runtimeResult = removeRuntimeDir(runtimeDir);
-    results.runtimes.push({ runtimeDir, ...runtimeResult });
-    // Best-effort clear for each root's settings.json (most installs only have one).
+    const pulseRuntimeDir = path.join(root, RUNTIME_DIR_NAME);
+    const legacyRuntimeDir = path.join(root, LEGACY_RUNTIME_DIR_NAME);
+    for (const runtimeDir of [pulseRuntimeDir, legacyRuntimeDir]) {
+      const runtimeResult = removeRuntimeDir(runtimeDir);
+      results.runtimes.push({ runtimeDir, ...runtimeResult });
+    }
     const rootSettings = path.join(root, 'settings.json');
     if (rootSettings !== settingsPath) {
-      results.runtimes.push({ runtimeDir: rootSettings, ...clearStatusLine(rootSettings, runtimeDir) });
+      results.runtimes.push({
+        runtimeDir: rootSettings,
+        ...clearStatusLine(rootSettings, [
+          pulseRuntimeDir,
+          legacyRuntimeDir,
+          path.join(root, 'statusline-combined.sh'),
+        ]),
+      });
     }
-    // Remove extra files (payload cache, hud dir) that earlier versions left behind.
     results.extraFiles.push(...removeExtraFiles(root));
   }
 
-  // Primary settings.json cleared against the active runtime path.
-  const activeRuntimeDir = path.join(path.dirname(settingsPath), 'agy-hud-runtime');
-  results.statusLine = clearStatusLine(settingsPath, activeRuntimeDir);
+  const activeBaseDir = path.dirname(settingsPath);
+  results.statusLine = clearStatusLine(settingsPath, [
+    path.join(activeBaseDir, RUNTIME_DIR_NAME),
+    path.join(activeBaseDir, LEGACY_RUNTIME_DIR_NAME),
+    path.join(activeBaseDir, 'statusline-combined.sh'),
+  ]);
   results.tokenMirrors = removeTokenMirrors();
   results.shShims = removeWindowsShShims(process.platform, env);
 
@@ -151,7 +172,7 @@ function uninstall(options = {}) {
 
 if (require.main === module) {
   const result = uninstall();
-  process.stdout.write(`AGY-HUD uninstall complete\n`);
+  process.stdout.write(`agy-pulse uninstall complete\n`);
   process.stdout.write(`settings: ${result.settingsPath} (${result.statusLine.changed ? 'cleared' : result.statusLine.reason})\n`);
   for (const r of result.runtimes) {
     if (r.removed) process.stdout.write(`runtime removed: ${r.runtimeDir}\n`);

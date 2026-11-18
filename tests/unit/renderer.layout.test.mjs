@@ -419,4 +419,16 @@ describe('renderer / username', () => {
     assert.doesNotMatch(output, /\x1b\]52/);
     assert.doesNotMatch(output, /\x1b\\/);
   });
+
+  test('omits git branch in non-git directories when branch is null', () => {
+    const output = renderHUD(
+      { steps: 1, branch: null, currentDir: 'plain-folder' },
+      { context_window: {}, plan_tier: 'Pro' },
+      { display: { showGitBranch: true, unicode: true } }
+    ).replace(/\x1b\[[0-9;]*m/g, '');
+
+    assert.match(output, /plain-folder/);
+    assert.doesNotMatch(output, /⎇/);
+    assert.doesNotMatch(output, /unknown/);
+  });
 });
