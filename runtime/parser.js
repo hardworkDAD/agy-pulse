@@ -177,7 +177,8 @@ async function getSessionState(transcriptPath, customCwd = null) {
   let maxHistoricalCache = 0;
   let imageExhausted = null;
   let totalApiDurationMs = 0;
-  let lastStepTimeMs = null;
+  let pendingPlannerStartMs = null;
+  let lastPlannerResponse = null;
 
   try {
     const fileContent = fs.readFileSync(transcriptPath, 'utf8');
@@ -189,11 +190,25 @@ async function getSessionState(transcriptPath, customCwd = null) {
           steps = entry.step_index;
         }
         const entryTimeMs = entry.created_at ? Date.parse(entry.created_at) : null;
-        if (entry.type === 'PLANNER_RESPONSE' && lastStepTimeMs !== null && entryTimeMs !== null && entryTimeMs >= lastStepTimeMs) {
-          totalApiDurationMs += (entryTimeMs - lastStepTimeMs);
+        const validTimeMs = entryTimeMs !== null && Number.isFinite(entryTimeMs) ? entryTimeMs : null;
+        if (pendingPlannerStartMs !== null && validTimeMs !== null && validTimeMs >= pendingPlannerStartMs) {
+          // `created_at` records when a step started; the next non-user step marks
+          // when the preceding PLANNER_RESPONSE ended (USER_INPUT includes user idle time).
+          if (entry.type !== 'USER_INPUT') {
+            totalApiDurationMs += (validTimeMs - pendingPlannerStartMs);
+            if (lastPlannerResponse && lastPlannerResponse.endMs === null) {
+              lastPlannerResponse.endMs = validTimeMs;
+            }
+          }
+          pendingPlannerStartMs = null;
         }
-        if (entryTimeMs !== null && Number.isFinite(entryTimeMs)) {
-          lastStepTimeMs = entryTimeMs;
+        if (entry.type === 'PLANNER_RESPONSE' && validTimeMs !== null) {
+          pendingPlannerStartMs = validTimeMs;
+          lastPlannerResponse = {
+            startMs: validTimeMs,
+            endMs: null,
+            outputTokens: Number.isFinite(entry.output_tokens) && entry.output_tokens >= 0 ? entry.output_tokens : null,
+          };
         }
         const contextWindow = findContextWindow(entry);
         if (contextWindow) {
@@ -385,6 +400,7 @@ async function getSessionState(transcriptPath, customCwd = null) {
   if (usage) state.usage = usage;
   if (imageExhausted) state.imageExhausted = imageExhausted;
   if (totalApiDurationMs > 0) state.totalApiDurationMs = totalApiDurationMs;
+  if (lastPlannerResponse) state.lastPlannerResponse = lastPlannerResponse;
   return state;
 }
 

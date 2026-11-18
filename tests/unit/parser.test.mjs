@@ -182,20 +182,28 @@ test('getSessionState captures context window token usage from transcript lines'
   }
 });
 
-test('getSessionState accumulates totalApiDurationMs from PLANNER_RESPONSE steps', async () => {
+test('getSessionState measures PLANNER_RESPONSE durations to next non-user step and excludes USER_INPUT idle time', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-parser-timing-'));
   try {
     const transcriptPath = path.join(tempDir, 'transcript.jsonl');
     fs.writeFileSync(transcriptPath, [
       JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: '2026-10-08T10:00:00Z' }),
-      JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', created_at: '2026-10-08T10:00:05Z' }), // 5000ms
-      JSON.stringify({ step_index: 2, type: 'GENERIC', created_at: '2026-10-08T10:00:08Z' }),
-      JSON.stringify({ step_index: 3, type: 'PLANNER_RESPONSE', created_at: '2026-10-08T10:00:11Z' }), // 3000ms
+      JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', created_at: '2026-10-08T10:00:00Z', output_tokens: 400 }),
+      JSON.stringify({ step_index: 2, type: 'GENERIC', created_at: '2026-10-08T10:00:05Z' }), // Step 1 took 5000ms
+      JSON.stringify({ step_index: 3, type: 'PLANNER_RESPONSE', created_at: '2026-10-08T10:00:15Z', output_tokens: 300 }),
+      JSON.stringify({ step_index: 4, type: 'USER_INPUT', created_at: '2026-10-08T10:05:00Z' }), // User idle time excluded
+      JSON.stringify({ step_index: 5, type: 'PLANNER_RESPONSE', created_at: '2026-10-08T10:05:00Z', output_tokens: 600 }),
+      JSON.stringify({ step_index: 6, type: 'GENERIC', created_at: '2026-10-08T10:05:04Z' }), // Step 5 took 4000ms
       '',
     ].join('\n'));
 
     const state = await getSessionState(transcriptPath);
-    assert.equal(state.totalApiDurationMs, 8000);
+    assert.equal(state.totalApiDurationMs, 9000);
+    assert.deepEqual(state.lastPlannerResponse, {
+      startMs: Date.parse('2026-10-08T10:05:00Z'),
+      endMs: Date.parse('2026-10-08T10:05:04Z'),
+      outputTokens: 600,
+    });
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -57,6 +57,10 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
   const showDailyCost = display.showDailyCost === true;
   const showWeeklyCost = display.showWeeklyCost === true;
   const showSpeed = display.showSpeed === true;
+  // Composable visibility flags (default true, so upstream behaviour is kept).
+  // Useful when another status line provides model/context info.
+  const showModel = display.showModel !== false;
+  const showContextBar = display.showContextBar !== false;
   const quotaStyle = display.quotaStyle || 'table';
   const isCompact = quotaStyle === 'compact';
   const text = LANGUAGE_TEXT[resolveLanguage(config)];
@@ -188,10 +192,9 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
   const divider = ` ${gray}${glyph.vbar}${reset} `;
 
   // Layer 1: identity + status
-  const line1Parts = [
-    `${green}${modelName}${reset}`,
-    `${magenta}${plan}${reset}`,
-  ];
+  const line1Parts = [];
+  if (showModel) line1Parts.push(`${green}${modelName}${reset}`);
+  line1Parts.push(`${magenta}${plan}${reset}`);
   if (showGitBranch) line1Parts.unshift(branchName);
   const currentDir = sanitizeTerminalText(state.currentDir || '', 80);
   if (showCurrentDir && currentDir) {
@@ -378,7 +381,7 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
     );
     line2Parts.push(cacheBadge);
   }
-  line2Parts.push(ctxStr);
+  if (showContextBar) line2Parts.push(ctxStr);
   if (isCompact && currentModelQuota) {
     const critical = pickCriticalWindow(currentModelQuota.windows, Date.now()) || currentModelQuota;
     const pct = formatQuotaPercent(critical.remainingFraction);
@@ -494,7 +497,7 @@ function renderHUD(state, agyData, config, quotaData, tierName, updateInfo) {
     quotaLines = `\n${dividerLine}\n  ${gray}${text.quotaLoading}${glyph.ellipsis}${reset}\n${dividerLine}`;
   }
 
-  const lines = [line1, line2];
+  const lines = [line1, line2].filter(Boolean);
   if (line3) lines.push(line3);
   return lines.join('\n') + quotaLines;
 }

@@ -85,3 +85,34 @@ test('renderHUD omits cost and speed when display flags are false', () => {
   assert.doesNotMatch(line1, /Week/);
   assert.doesNotMatch(line1, /tok\/s/);
 });
+
+test('renderHUD hides model, context bar, and empty line2 when disabled for combined mode', () => {
+  const state = {
+    branch: 'main',
+    currentDir: 'proj',
+    outputSpeed: 88.2,
+  };
+  const agyData = {
+    model: { display_name: 'Gemini 3.8 Flash (Medium)' },
+    plan_tier: 'Pro',
+    context_window: { total_input_tokens: 1000, total_output_tokens: 200, used_percentage: 5 },
+  };
+  const config = {
+    display: {
+      showModel: false,
+      showContextBar: false,
+      showTokenBar: false,
+      showGitBranch: false,
+      showBreadcrumbs: false,
+      showSpeed: true,
+    },
+    language: 'zh',
+  };
+
+  const output = renderHUD(state, agyData, config);
+  const lines = output.split('\n');
+  assert.equal(lines.length, 1);
+  assert.doesNotMatch(lines[0], /Gemini/);
+  assert.match(lines[0], /proj/);
+  assert.match(lines[0], /输出: 88\.2 tok\/s/);
+});
