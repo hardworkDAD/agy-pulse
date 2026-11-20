@@ -11,6 +11,7 @@ const {
   createStatusLineCommand,
   buildCmdShimContents,
   buildShShimContents,
+  buildCombinedShimContents,
   writeCmdShim,
   ensureWindowsShShim,
   getWindowsAgyBinDirs,
@@ -31,21 +32,20 @@ test('bootstrap.sh invokes bootstrap.js via curl + node', () => {
 test('bootstrap.js downloads runtime/* files and invokes configureStatusLine', () => {
   const bootstrap = fs.readFileSync(path.join(projectRoot, 'scripts', 'bootstrap.js'), 'utf8');
   assert.match(bootstrap, /runtime\/bin\/agy-pulse\.js/);
-  assert.match(bootstrap, /runtime\/bin\/agy-hud\.js/);
   assert.match(bootstrap, /statusline-installer\.js/);
   assert.match(bootstrap, /configureStatusLine/);
 });
 
 test('Windows statusLine command points at the .cmd shim, not raw node invocation', () => {
   const command = createStatusLineCommand(
-    'C:\\Users\\testuser\\.gemini\\antigravity-cli\\agy-hud-runtime\\runtime\\bin\\agy-hud.js',
+    'C:\\Users\\testuser\\.gemini\\antigravity-cli\\agy-pulse-runtime\\runtime\\bin\\agy-pulse.js',
     'C:\\Program Files\\nodejs\\node.exe',
     'win32'
   );
 
   assert.equal(
     command,
-    'C:\\Users\\testuser\\.gemini\\antigravity-cli\\agy-hud-runtime\\runtime\\bin\\agy-hud.cmd'
+    'C:\\Users\\testuser\\.gemini\\antigravity-cli\\agy-pulse-runtime\\runtime\\bin\\agy-pulse.cmd'
   );
   // The shim path replaces .js with .cmd — no inline node invocation or outer quotes.
   assert.doesNotMatch(command, /^node /);
@@ -55,30 +55,30 @@ test('Windows statusLine command points at the .cmd shim, not raw node invocatio
 
 test('Windows statusLine command returns unquoted shim path even with spaces', () => {
   const command = createStatusLineCommand(
-    'C:\\Users\\John Doe\\.gemini\\antigravity-cli\\agy-hud-runtime\\runtime\\bin\\agy-hud.js',
+    'C:\\Users\\John Doe\\.gemini\\antigravity-cli\\agy-pulse-runtime\\runtime\\bin\\agy-pulse.js',
     'C:\\Program Files\\nodejs\\node.exe',
     'win32'
   );
 
   assert.equal(
     command,
-    'C:\\Users\\John Doe\\.gemini\\antigravity-cli\\agy-hud-runtime\\runtime\\bin\\agy-hud.cmd'
+    'C:\\Users\\John Doe\\.gemini\\antigravity-cli\\agy-pulse-runtime\\runtime\\bin\\agy-pulse.cmd'
   );
 });
 
 test('Unix statusLine command uses absolute process.execPath', () => {
   const command = createStatusLineCommand(
-    '/Users/me/.gemini/antigravity-cli/agy-hud-runtime/runtime/bin/agy-hud.js',
+    '/Users/me/.gemini/antigravity-cli/agy-pulse-runtime/runtime/bin/agy-pulse.js',
     '/usr/local/bin/node',
     'darwin'
   );
-  assert.equal(command, '"/usr/local/bin/node" "/Users/me/.gemini/antigravity-cli/agy-hud-runtime/runtime/bin/agy-hud.js"');
+  assert.equal(command, '"/usr/local/bin/node" "/Users/me/.gemini/antigravity-cli/agy-pulse-runtime/runtime/bin/agy-pulse.js"');
 });
 
 test('buildCmdShimContents includes node-on-PATH first then Program Files fallback', () => {
-  const body = buildCmdShimContents('C:\\runtime\\bin\\agy-hud.js');
+  const body = buildCmdShimContents('C:\\runtime\\bin\\agy-pulse.js');
   assert.match(body, /^@echo off/);
-  assert.match(body, /node "%~dp0agy-hud\.js"/);
+  assert.match(body, /node "%~dp0agy-pulse\.js"/);
   assert.match(body, /%ProgramFiles%\\nodejs\\node\.exe/);
   // CRLF line endings for Windows .cmd files
   assert.match(body, /\r\n/);
@@ -288,7 +288,7 @@ test('deploy-local.sh replaces legacy statusline-combined.sh, upgrades secondary
     const combinedPath = path.join(agyDir, 'statusline-combined.sh');
     fs.writeFileSync(
       combinedPath,
-      '#!/usr/bin/env bash\n"$NODE_BIN" "$AGY_DIR/agy-hud-runtime/runtime/bin/agy-hud.js"\n"$PY_BIN" "$AGY_DIR/agy-statusline/statusline.sh"\n',
+      '#!/usr/bin/env bash\n"$NODE_BIN" "$AGY_DIR/agy-pulse-runtime/runtime/bin/agy-pulse.js"\n"$PY_BIN" "$AGY_DIR/agy-statusline/statusline.sh"\n',
       { mode: 0o755 }
     );
 
@@ -311,7 +311,7 @@ test('deploy-local.sh replaces legacy statusline-combined.sh, upgrades secondary
       USERPROFILE: tmpHome,
       XDG_CONFIG_HOME: '',
       AGY_PULSE_DATA_DIR: '',
-      AGY_HUD_DATA_DIR: '',
+      AGY_PULSE_DATA_DIR: '',
     };
 
     const deployRes = spawnSync('/bin/bash', [path.join(projectRoot, 'scripts', 'deploy-local.sh')], {
@@ -355,6 +355,7 @@ test('deploy-local.sh replaces legacy statusline-combined.sh, upgrades secondary
       cwd: projectRoot,
       env: {
         ...cleanEnv,
+        COLUMNS: '120',
         AGY_STATUSLINE_NODE: process.execPath,
       },
       input: payload,
@@ -371,5 +372,86 @@ test('deploy-local.sh replaces legacy statusline-combined.sh, upgrades secondary
     assert.equal(contextMatches.length, 1, `Expected 1 context label occurrence, got:\n${plain}`);
   } finally {
     fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+});
+
+test('configureStatusLine backs up corrupt non-empty settings.json before overwriting', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-corrupt-settings-'));
+  try {
+    const baseDir = path.join(tmp, 'runtime');
+    fs.mkdirSync(path.join(baseDir, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(baseDir, 'bin', 'agy-pulse.js'), '// entry');
+    const settingsPath = path.join(tmp, 'settings.json');
+    const corruptRaw = '{ invalid json';
+    fs.writeFileSync(settingsPath, corruptRaw, 'utf8');
+
+    statuslineModule.configureStatusLine(baseDir, { settingsPath });
+
+    assert.equal(fs.readFileSync(`${settingsPath}.bak`, 'utf8'), corruptRaw);
+    const repaired = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    assert.equal(repaired.statusLine.type, 'command');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('buildCombinedShimContents honors AGY_PULSE_NODE and falls back when node path is missing', { skip: process.platform === 'win32' }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-combined-node-'));
+  try {
+    const fakeEntry = path.join(tmp, 'entry.js');
+    const shimPath = path.join(tmp, 'statusline-combined.sh');
+    fs.writeFileSync(fakeEntry, 'process.stdout.write("OK:" + process.argv.slice(2).join(","));\n');
+
+    const shim = buildCombinedShimContents(fakeEntry, process.execPath);
+    assert.match(shim, /^#!\/usr\/bin\/env bash\nexec /);
+    assert.match(shim, /AGY_PULSE_NODE/);
+    assert.match(shim, /AGY_STATUSLINE_NODE/);
+    assert.match(shim, /command -v node/);
+
+    fs.writeFileSync(shimPath, shim, { mode: 0o755 });
+
+    const missingNodeRes = spawnSync('/bin/bash', [shimPath, '--flag'], {
+      env: {
+        ...process.env,
+        AGY_PULSE_NODE: '/nonexistent/path/to/node',
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(missingNodeRes.status, 0, missingNodeRes.stderr);
+    assert.equal(missingNodeRes.stdout, 'OK:--flag');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('deploy-local.sh respects XDG_CONFIG_HOME/gemini/plugins and syncs skills/pulse-config', { skip: process.platform === 'win32' }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-deploy-xdg-'));
+  try {
+    const home = path.join(tmp, 'home');
+    const xdgConfig = path.join(tmp, 'xdg-config');
+    const dataDir = path.join(tmp, 'data');
+    const staleSkillDir = path.join(xdgConfig, 'gemini', 'plugins', 'agy-pulse', 'skills', 'hud-config');
+    fs.mkdirSync(staleSkillDir, { recursive: true });
+    fs.writeFileSync(path.join(staleSkillDir, 'SKILL.md'), 'old');
+    fs.writeFileSync(path.join(xdgConfig, 'gemini', 'plugins', 'agy-pulse', 'hooks.json'), '{}');
+
+    const deployRes = spawnSync('/bin/bash', [path.join(projectRoot, 'scripts', 'deploy-local.sh')], {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: xdgConfig,
+        AGY_PULSE_DATA_DIR: dataDir,
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(deployRes.status, 0, deployRes.stderr || deployRes.stdout);
+
+    assert.equal(fs.existsSync(staleSkillDir), false);
+    assert.equal(fs.existsSync(path.join(xdgConfig, 'gemini', 'plugins', 'agy-pulse', 'hooks.json')), false);
+    assert.ok(fs.existsSync(path.join(xdgConfig, 'gemini', 'plugins', 'agy-pulse', 'skills', 'pulse-config', 'SKILL.md')));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

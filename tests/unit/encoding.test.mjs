@@ -10,20 +10,20 @@ function fakeEnv(overrides) {
   return env;
 }
 
-test('respects AGY_HUD_FORCE_ASCII=1 — disables Unicode', () => {
+test('respects AGY_PULSE_FORCE_ASCII=1 — disables Unicode', () => {
   assert.equal(
     detectUnicodeSupport({
-      env: fakeEnv({ AGY_HUD_FORCE_ASCII: '1' }),
+      env: fakeEnv({ AGY_PULSE_FORCE_ASCII: '1' }),
       platform: 'darwin',
     }),
     false
   );
 });
 
-test('respects AGY_HUD_FORCE_UNICODE=1 — enables Unicode', () => {
+test('respects AGY_PULSE_FORCE_UNICODE=1 — enables Unicode', () => {
   assert.equal(
     detectUnicodeSupport({
-      env: fakeEnv({ AGY_HUD_FORCE_UNICODE: '1' }),
+      env: fakeEnv({ AGY_PULSE_FORCE_UNICODE: '1' }),
       platform: 'win32',
       readCodepage: () => '936',
     }),
@@ -34,7 +34,7 @@ test('respects AGY_HUD_FORCE_UNICODE=1 — enables Unicode', () => {
 test('Windows cp936 console without env override → ASCII', () => {
   assert.equal(
     detectUnicodeSupport({
-      env: fakeEnv({ AGY_HUD_FORCE_ASCII: undefined, AGY_HUD_FORCE_UNICODE: undefined, WT_SESSION: undefined }),
+      env: fakeEnv({ AGY_PULSE_FORCE_ASCII: undefined, AGY_PULSE_FORCE_UNICODE: undefined, WT_SESSION: undefined }),
       platform: 'win32',
       readCodepage: () => '936',
     }),
@@ -45,7 +45,7 @@ test('Windows cp936 console without env override → ASCII', () => {
 test('Windows codepage 65001 (UTF-8) → Unicode', () => {
   assert.equal(
     detectUnicodeSupport({
-      env: fakeEnv({ AGY_HUD_FORCE_ASCII: undefined, AGY_HUD_FORCE_UNICODE: undefined, WT_SESSION: undefined }),
+      env: fakeEnv({ AGY_PULSE_FORCE_ASCII: undefined, AGY_PULSE_FORCE_UNICODE: undefined, WT_SESSION: undefined }),
       platform: 'win32',
       readCodepage: () => '65001',
     }),

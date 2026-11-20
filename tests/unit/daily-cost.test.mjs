@@ -32,7 +32,7 @@ const NOON = new Date(2026, 6, 15, 12, 0, 0).getTime();
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 beforeEach(async () => {
-  tempDir = await mkdtemp(path.join(tmpdir(), 'agy-hud-daily-test-'));
+  tempDir = await mkdtemp(path.join(tmpdir(), 'agy-pulse-daily-test-'));
 });
 
 afterEach(async () => {
@@ -181,4 +181,175 @@ test('continues accumulating spend after context compaction causes estimated cos
   const totals = getCostTotals(s, undefined, deps(NOON + 3000));
   assert.equal(totals.todayUsd, 3.5);
   assert.equal(totals.weekUsd, 3.5);
+});
+
+test('cleans stale lock files and preserves active locks held by another process', () => {
+  const ledgerPath = getDailyCostLedgerPath(tempDir);
+  const lockPath = `${ledgerPath}.lock`;
+  fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
+
+  // Stale lock (> 5000ms old) should be cleaned up and released
+  fs.writeFileSync(lockPath, '999999');
+  const staleSec = (Date.now() - 10_000) / 1000;
+  fs.utimesSync(lockPath, staleSec, staleSec);
+  const t1 = getCostTotals({ session_id: 'lock-stale', cost: { total_cost_usd: 1.0 } }, undefined, deps(NOON));
+  assert.equal(t1.todayUsd, 0);
+  assert.equal(fs.existsSync(lockPath), false);
+
+  // Fresh active lock should NOT be deleted by this process after degraded write
+  fs.writeFileSync(lockPath, '888888');
+  const t2 = getCostTotals({ session_id: 'lock-stale', cost: { total_cost_usd: 2.5 } }, undefined, deps(NOON + 1000));
+  assert.equal(t2.todayUsd, 1.5);
+  assert.equal(fs.existsSync(lockPath), true);
+});
+
+test('tolerates 60s week.start clock jitter without resetting week and avoids double-counting concurrently revived evicted sessions', () => {
+  const opts = { sevenDayResetAt: new Date(NOON + 7 * DAY_MS) };
+  getCostTotals({ session_id: 'active', cost: { total_cost_usd: 1.0 } }, opts, deps(NOON));
+
+  // Small 10s forward jitter in sevenDayResetAt (< 60s) must NOT reset the week
+  const jittered = { sevenDayResetAt: new Date(NOON + 7 * DAY_MS + 10_000) };
+  const afterJitter = getCostTotals({ session_id: 'active', cost: { total_cost_usd: 3.0 } }, jittered, deps(NOON + 20_000));
+  assert.equal(afterJitter.weekUsd, 2.0);
+
+  // Evicted session concurrently refreshed on disk must not be double-counted in week.carry + sessions
+  const ledgerPath = getDailyCostLedgerPath(tempDir);
+  const stored = readLedger();
+  stored.sessions.staleRace = {
+    baseline: 1.0,
+    weekBaseline: 1.0,
+    total: 5.0, // $4.0 week spend
+    lastObservedCost: 5.0,
+    ts: NOON - DAY_MS - 1000, // expired (> 24h) when NOON + 30_000 runs
+  };
+  fs.writeFileSync(ledgerPath, JSON.stringify(stored, null, 2));
+
+  const racingStdin = { session_id: 'active' };
+  Object.defineProperty(racingStdin, 'cost', {
+    get() {
+      // Simulate concurrent process refreshing 'staleRace' on disk before mergeDiskLedgerBeforeWrite
+      const disk = readLedger();
+      disk.sessions.staleRace.ts = NOON + 29_000;
+      fs.writeFileSync(ledgerPath, JSON.stringify(disk, null, 2));
+      return { total_cost_usd: 3.0 };
+    },
+  });
+
+  const totals = getCostTotals(racingStdin, undefined, deps(NOON + 30_000));
+  // active ($2.0) + staleRace ($4.0) = $6.0 (NOT $10.0!)
+  assert.equal(totals.weekUsd, 6.0);
+});
+
+test('normalizes /brain/<uuid>/ sessionId across conversation_id and transcriptPath and rejects shell brain path', () => {
+  const uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const transcriptPath = `/home/user/.gemini/antigravity/brain/${uuid}/.system_generated/logs/transcript.jsonl`;
+
+  // 1. First call via conversation_id
+  getCostTotals(
+    { conversation_id: uuid, cost: { total_cost_usd: 1.0 } },
+    undefined,
+    deps(NOON),
+    { transcriptPath }
+  );
+  // 2. Second call via transcriptPath only (no session_id / conversation_id) -> hits SAME uuid key
+  const totals = getCostTotals(
+    {},
+    undefined,
+    deps(NOON + 1000),
+    { transcriptPath, costBreakdown: { totalCostUsd: 2.5, mainCostUsd: 2.5, childrenCostUsd: 0 } }
+  );
+  assert.equal(totals.todayUsd, 1.5);
+  assert.deepEqual(Object.keys(readLedger().sessions), [uuid]);
+
+  // 3. Shell path `/brain/.system_generated/logs/transcript.jsonl` must NOT become shared sessionId
+  const shellPath = '/home/user/.gemini/antigravity/brain/.system_generated/logs/transcript.jsonl';
+  assert.equal(
+    getCostTotals(
+      { cost: { total_cost_usd: 3.0 } },
+      undefined,
+      deps(NOON + 2000),
+      { transcriptPath: shellPath }
+    )?.todayUsd,
+    1.5 // unchanged; anonymous shell path ignored
+  );
+
+  // With workspace cwd, shell path isolates by cwd:<dir>
+  getCostTotals(
+    { cwd: '/tmp/ws-a', cost: { total_cost_usd: 1.0 } },
+    undefined,
+    deps(NOON + 3000),
+    { transcriptPath: shellPath }
+  );
+  const withCwd = getCostTotals(
+    { cwd: '/tmp/ws-a', cost: { total_cost_usd: 1.75 } },
+    undefined,
+    deps(NOON + 4000),
+    { transcriptPath: shellPath }
+  );
+  assert.equal(withCwd.todayUsd, 2.25);
+  assert.ok(readLedger().sessions['cwd:/tmp/ws-a']);
+  assert.equal(readLedger().sessions[shellPath], undefined);
+});
+
+test('prioritizes state.costBreakdown with childrenCostUsd over main-only native cost and ignores <50% jitter dips', () => {
+  const s = {
+    session_id: 'child-plus-jitter',
+    cost: { total_cost_usd: 1.0 },
+  };
+  const state1 = {
+    costBreakdown: { totalCostUsd: 3.0, mainCostUsd: 1.0, childrenCostUsd: 2.0 },
+  };
+  getCostTotals(s, undefined, deps(NOON), state1);
+
+  // Main + child grows to $5.00 (+2.00)
+  const state2 = {
+    costBreakdown: { totalCostUsd: 5.0, mainCostUsd: 1.5, childrenCostUsd: 3.5 },
+  };
+  let totals = getCostTotals({ session_id: 'child-plus-jitter', cost: { total_cost_usd: 1.5 } }, undefined, deps(NOON + 1000), state2);
+  assert.equal(totals.todayUsd, 2.0);
+
+  // Minor estimation dip (<50% drop: 5.0 -> 4.2) then rebound back to 5.0 must NOT double-count +0.8
+  const stateDip = { costBreakdown: { totalCostUsd: 4.2, mainCostUsd: 1.5, childrenCostUsd: 2.7 } };
+  totals = getCostTotals({ session_id: 'child-plus-jitter', cost: { total_cost_usd: 1.5 } }, undefined, deps(NOON + 2000), stateDip);
+  assert.equal(totals.todayUsd, 2.0);
+  totals = getCostTotals({ session_id: 'child-plus-jitter', cost: { total_cost_usd: 1.5 } }, undefined, deps(NOON + 3000), state2);
+  assert.equal(totals.todayUsd, 2.0);
+});
+
+test('mergeDiskLedgerBeforeWrite adopts newer disk week window without regressing rolled-over weekBaseline', () => {
+  const week1Opts = { sevenDayResetAt: new Date(NOON + 6 * DAY_MS) };
+  getCostTotals({ session_id: 'w-sess', cost: { total_cost_usd: 1.0 } }, week1Opts, deps(NOON));
+  getCostTotals({ session_id: 'w-sess', cost: { total_cost_usd: 4.0 } }, week1Opts, deps(NOON + 1000));
+
+  const ledgerPath = getDailyCostLedgerPath(tempDir);
+  const week2Start = NOON + 200_000;
+  const racingStdin = { session_id: 'w-sess' };
+  Object.defineProperty(racingStdin, 'cost', {
+    get() {
+      // Simulate concurrent process rolling over to Week 2 on disk before mergeDiskLedgerBeforeWrite runs
+      const disk = readLedger();
+      disk.week = { start: week2Start, carry: 0 };
+      disk.sessions['w-sess'].weekBaseline = 4.0;
+      disk.sessions['w-sess'].weekStart = week2Start;
+      disk.sessions['w-sess'].total = 4.0;
+      disk.sessions['other-new'] = {
+        baseline: 2.0,
+        weekBaseline: 2.0,
+        weekStart: week2Start,
+        total: 3.5,
+        lastObservedCost: 3.5,
+        ts: NOON + 200_500,
+      };
+      fs.writeFileSync(ledgerPath, JSON.stringify(disk, null, 2));
+      return { total_cost_usd: 4.5 };
+    },
+  });
+
+  const totals = getCostTotals(racingStdin, week1Opts, deps(NOON + 201_000));
+  // In Week 2: w-sess gained +0.5 since rollover (4.5 - 4.0) + other-new gained +1.5 (3.5 - 2.0) = $2.0
+  // Must NOT pull w-sess.weekBaseline back to Week 1's 1.0!
+  assert.equal(totals.weekUsd, 2.0);
+  const merged = readLedger();
+  assert.equal(merged.week.start, week2Start);
+  assert.equal(merged.sessions['w-sess'].weekBaseline, 4.0);
 });

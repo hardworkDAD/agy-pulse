@@ -8,8 +8,10 @@ const { execFileSync } = require('child_process');
 const { getAntigravityRoots, resolveSafeExecutable } = require('../runtime/paths.js');
 const {
   getTokenCandidates,
+  getGoogleAccountsCandidates,
   parseTokenPayload,
   readToken,
+  isTokenExpired,
   probeLinuxKeyringAvailability,
   probeMacosKeychainAvailability,
 } = require('../runtime/quota.js');
@@ -63,6 +65,28 @@ function summarizeTokenCandidate(candidatePath) {
   summary.keys = listJsonKeys(parsed);
   if (parsed && typeof parsed === 'object' && parsed.token) {
     summary.tokenKeys = listJsonKeys(parsed.token);
+  }
+
+  const baseName = path.basename(candidatePath);
+  if (baseName === 'agy-pulse-token.json') {
+    const tokens = Array.isArray(parsed?.tokens) ? parsed.tokens : [];
+    summary.sourceFormat = 'token-mirror';
+    summary.tokenCount = tokens.length;
+    summary.parseable = tokens.some(t => Boolean(t && t.accessToken));
+    if (!summary.parseable) summary.reason = 'unsupported_token_shape';
+    return summary;
+  }
+
+  if (baseName === 'google_accounts.json') {
+    summary.sourceFormat = 'google-accounts';
+    summary.hasActiveAccount = Boolean(
+      (typeof parsed?.active === 'string' && parsed.active.includes('@')) ||
+      (typeof parsed?.activeAccount === 'string' && parsed.activeAccount.includes('@')) ||
+      (typeof parsed?.email === 'string' && parsed.email.includes('@'))
+    );
+    summary.parseable = Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed));
+    if (!summary.parseable) summary.reason = 'unsupported_token_shape';
+    return summary;
   }
 
   const token = parseTokenPayload(parsed);
@@ -143,6 +167,50 @@ function resolveAgyInfo() {
   });
 }
 
+function maskEmail(email) {
+  if (typeof email !== 'string' || !email.includes('@')) return undefined;
+  const [local, domain] = email.split('@');
+  if (!local || !domain) return undefined;
+  const maskedLocal = local.length <= 2
+    ? `${local[0]}*`
+    : `${local.slice(0, 2)}***`;
+  const domainParts = domain.split('.');
+  const maskedDomain = domainParts.length >= 2
+    ? `${domainParts[0].slice(0, 2)}***.${domainParts.slice(1).join('.')}`
+    : `${domain.slice(0, 2)}***`;
+  return `${maskedLocal}@${maskedDomain}`;
+}
+
+function summarizeQuotaCache(roots) {
+  for (const root of roots) {
+    if (!root) continue;
+    const candidate = path.join(root, 'agy-pulse-quota-cache.json');
+    if (!pathExists(candidate)) continue;
+    try {
+      const raw = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      return compactObject({
+        exists: true,
+        path: candidate,
+        version: raw?.version,
+        dataCount: Array.isArray(raw?.data) ? raw.data.length : 0,
+        lastRefreshed: raw?.lastRefreshed || undefined,
+        lastRefreshAttempt: raw?.lastRefreshAttempt || undefined,
+        lastRefreshError: raw?.lastRefreshError || undefined,
+        unavailableReason: raw?.unavailableReason || undefined,
+        hasAccountEmail: Boolean(raw?.accountEmail),
+        accountEmail: maskEmail(raw?.accountEmail),
+      });
+    } catch {
+      return {
+        exists: true,
+        path: candidate,
+        parseable: false,
+      };
+    }
+  }
+  return { exists: false };
+}
+
 function sanitizeReadTokenResult(token) {
   if (!token) return { found: false };
 
@@ -151,6 +219,7 @@ function sanitizeReadTokenResult(token) {
     sourceFormat: token.sourceFormat || undefined,
     sourcePath: token.sourcePath || undefined,
     hasExpiry: Boolean(token.expiry),
+    isExpired: isTokenExpired(token),
     hasEmail: Boolean(token.email),
     tokenCount: Array.isArray(token.all) ? token.all.length : 1,
   });
@@ -162,6 +231,12 @@ function buildAuthDiagnostic(options = {}) {
   const platform = options.platform || process.platform;
   const keyringProbe = options.keyringProbe || probeLinuxKeyringAvailability;
   const keychainProbe = options.keychainProbe || probeMacosKeychainAvailability;
+
+  const candidatePaths = [...new Set([
+    ...getTokenCandidates(roots),
+    ...roots.filter(Boolean).map(root => path.join(root, 'agy-pulse-token.json')),
+    ...getGoogleAccountsCandidates(roots),
+  ])];
 
   return {
     schemaVersion: 1,
@@ -175,12 +250,15 @@ function buildAuthDiagnostic(options = {}) {
       path: root,
       exists: pathExists(root),
     })),
-    tokenCandidates: getTokenCandidates(roots).map(summarizeTokenCandidate),
+    tokenCandidates: candidatePaths.map(summarizeTokenCandidate),
     readToken: sanitizeReadTokenResult(readToken({
       platform,
+      credentialReader: options.credentialReader,
       keyringReader: options.keyringReader,
       keychainReader: options.keychainReader,
+      noWriteMirror: true,
     })),
+    quotaCache: summarizeQuotaCache(roots),
     keyringProbe: keyringProbe(platform),
     keychainProbe: keychainProbe(platform),
   };
@@ -202,5 +280,7 @@ module.exports = {
   buildAuthDiagnostic,
   resolveAgyInfo,
   summarizeTokenCandidate,
+  summarizeQuotaCache,
+  maskEmail,
   sanitizeReadTokenResult,
 };

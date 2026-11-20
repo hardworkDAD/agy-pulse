@@ -3,7 +3,7 @@
  *
  * Calls the same `fetchAvailableModels` endpoint that agy uses for /usage.
  * Token is auto-discovered from known agy app-data locations across platforms.
- * Results are cached to os.tmpdir()/agy-hud-quota-cache.json. The cache key is
+ * Results are cached via resolveAntigravityPath('agy-pulse-quota-cache.json'). The cache key is
  * the stable credential source when available, so access-token rotation does
  * not hide a still-fresh quota cache from the statusline.
  *
@@ -30,18 +30,22 @@ const {
   readWindowsCredentialTokens,
   isTokenExpired,
   anyTokenFileExists,
+  anyTokenMirrorExists,
 } = tokenMod;
 const {
   CACHE_PATH,
   isCachePayloadFresh,
   readCachePayload,
+  readCacheRaw,
   readCacheLastRefreshed,
   readCacheLastRefreshAttempt,
   readCacheFallback,
+  readAnyCachePayload,
   didAccessTokenRotate,
   getTokenHash,
   writeCache,
   recordRefreshAttempt,
+  markCacheRefreshAttempt,
 } = cacheMod;
 const { fetchQuotaFromCloud, fetchTierFromCloud, fetchAccountEmail } = cloudMod;
 const { createUnavailableQuotaResult } = modelsMod;
@@ -66,9 +70,14 @@ function triggerBackgroundRefresh() {
   } catch { /* ignore spawning issues */ }
 }
 
-function triggerWindowsCredentialRefresh(backgroundRefresh, now, debounceMs) {
-  if (now - lastWindowsCredentialRefreshAt < debounceMs) return;
+function triggerWindowsCredentialRefresh(backgroundRefresh, now, debounceMs, cacheOpts = {}) {
+  if (debounceMs > 0) {
+    if (now - lastWindowsCredentialRefreshAt < debounceMs) return;
+    const diskLastAttempt = readCacheLastRefreshAttempt(cacheOpts);
+    if (now - diskLastAttempt < debounceMs) return;
+  }
   lastWindowsCredentialRefreshAt = now;
+  markCacheRefreshAttempt(null, cacheOpts);
   backgroundRefresh();
 }
 
@@ -86,13 +95,19 @@ async function getQuota(options = {}) {
     roots = getAntigravityRoots(),
     windowsCredentialRefreshDebounceMs = WINDOWS_CREDENTIAL_REFRESH_DEBOUNCE_MS,
   } = options;
+  const cacheOpts = options.roots ? { roots: options.roots } : {};
   const shouldRefreshPlatformCredential = fast && (platform === 'win32' || platform === 'linux');
   const refreshPlatformCredential = () => {
     if (!shouldRefreshPlatformCredential) return;
-    triggerWindowsCredentialRefresh(backgroundRefresh, Date.now(), windowsCredentialRefreshDebounceMs);
+    triggerWindowsCredentialRefresh(
+      backgroundRefresh,
+      Date.now(),
+      windowsCredentialRefreshDebounceMs,
+      cacheOpts
+    );
   };
-  const cacheOpts = options.roots ? { roots: options.roots } : {};
   const tok = tokenReader({
+    fast,
     platform,
     roots,
     credentialReader,
@@ -102,24 +117,68 @@ async function getQuota(options = {}) {
   if (!tok) {
     // Token file exists but failed to parse → transient (OAuth mid-refresh).
     // Return fresh cache rather than flashing "not logged in".
-    // Token file absent → genuine logout, skip fallback.
     if (anyTokenFileExists(roots)) {
       const fallback = readCacheFallback(cacheOpts);
       if (fallback && isCachePayloadFresh(fallback)) {
         return fallback.data;
       }
+      refreshPlatformCredential();
+      return createUnavailableQuotaResult('not_logged_in');
     }
+
+    // On keyring/credential platforms in fast mode, an expired mirror returns
+    // tok === null even when the user is still logged in. Serve non-empty quota
+    // cache (or loading [] if an expired mirror exists) while refreshing in background.
+    if (fast) {
+      const anyCache = readAnyCachePayload(
+        options.roots ? { roots: options.roots, strictRoots: true } : {}
+      );
+      if (anyCache) {
+        triggerWindowsCredentialRefresh(
+          backgroundRefresh,
+          Date.now(),
+          windowsCredentialRefreshDebounceMs,
+          cacheOpts
+        );
+        return anyCache.data;
+      }
+      if (anyTokenMirrorExists(roots)) {
+        triggerWindowsCredentialRefresh(
+          backgroundRefresh,
+          Date.now(),
+          windowsCredentialRefreshDebounceMs,
+          cacheOpts
+        );
+        return [];
+      }
+    }
+
     refreshPlatformCredential();
     return createUnavailableQuotaResult('not_logged_in');
   }
 
   // For multi-account (Windows Credential Manager), use the primary token for
   // cache keying but fall back to alternates if the primary has no cache.
-  const payload = readCachePayload(tok, cacheOpts) ||
+  let payload = readCachePayload(tok, cacheOpts) ||
     (tok.all && tok.all.slice(1).reduce((acc, t) => acc || readCachePayload(t, cacheOpts), null));
+  if (
+    payload &&
+    tok.email &&
+    payload.accountEmail &&
+    tok.email.toLowerCase() !== payload.accountEmail.toLowerCase()
+  ) {
+    payload = null;
+  }
   const isFresh = payload && isCachePayloadFresh(payload);
   const tokenExpired = isTokenExpired(tok);
   const needsRefresh = !tokenExpired && (!isFresh || didAccessTokenRotate(payload, tok));
+
+  const fallback = payload ? null : readCacheFallback(cacheOpts);
+  const fallbackEmailMismatch = Boolean(
+    tok.email &&
+    fallback?.accountEmail &&
+    tok.email.toLowerCase() !== fallback.accountEmail.toLowerCase()
+  );
 
   if (needsRefresh) {
     // Read lastAttempt from cache even when payload doesn't match our token,
@@ -128,15 +187,21 @@ async function getQuota(options = {}) {
       ? Math.max(payload.lastRefreshed || 0, payload.lastRefreshAttempt || 0)
       : readCacheLastRefreshAttempt(cacheOpts);
     const currentTokenHash = getTokenHash(tok);
+    const attemptSource = payload || fallback;
     const sameAttemptToken = Boolean(
-      payload?.lastAttemptTokenHash &&
+      attemptSource?.lastAttemptTokenHash &&
       currentTokenHash &&
-      payload.lastAttemptTokenHash === currentTokenHash
+      attemptSource.lastAttemptTokenHash === currentTokenHash
     );
-    // Debounce stale/no-cache refreshes, but refresh immediately when a fresh
-    // cache belongs to the same source and only the access token has rotated
-    // (unless we already attempted and failed on that rotated token within 30s).
-    if ((didAccessTokenRotate(payload, tok) && !sameAttemptToken) || Date.now() - lastAttempt > 30 * 1000) {
+    const now = Date.now();
+    // Debounce stale/no-cache refreshes, but refresh immediately when:
+    //  1) a fresh cache belongs to the same source and only the access token rotated, or
+    //  2) an explicit account email switch is detected across unmatched sources
+    // (unless we already attempted and failed on that exact token within 30s).
+    const shouldBypassDebounce = payload
+      ? (didAccessTokenRotate(payload, tok) && !sameAttemptToken)
+      : (fallbackEmailMismatch && !(sameAttemptToken && now - lastAttempt <= 30 * 1000));
+    if (shouldBypassDebounce || now - lastAttempt > 30 * 1000) {
       backgroundRefresh();
     }
   }
@@ -149,6 +214,12 @@ async function getQuota(options = {}) {
       }
       return createUnavailableQuotaResult(payload.unavailableReason);
     }
+    if (tokenExpired) {
+      refreshPlatformCredential();
+      if (!isFresh) {
+        return createUnavailableQuotaResult('expired_token');
+      }
+    }
     return payload.data;
   }
 
@@ -158,9 +229,9 @@ async function getQuota(options = {}) {
   }
 
   // Fallback to any readable cache payload on disk to prevent "Quota loading" flicker
-  // while we perform a background refresh for the current token.
-  const fallback = readCacheFallback(cacheOpts);
-  if (fallback) {
+  // while we perform a background refresh for the current token — unless the cache
+  // explicitly belongs to a different account email.
+  if (fallback && !fallbackEmailMismatch) {
     if (fallback.data.length === 0 && fallback.unavailableReason) {
       return createUnavailableQuotaResult(fallback.unavailableReason);
     }
@@ -191,40 +262,59 @@ function applyRefreshResult(fresh, tok, tier = null, accountEmail = null, option
   recordRefreshAttempt(tok, reason, { ...options, tier, accountEmail });
 }
 
+async function runBackgroundRefresh(options = {}) {
+  const {
+    tokenReader = readToken,
+    loadConfigFn,
+    quotaFetcher = fetchQuotaFromCloud,
+    tierFetcher = fetchTierFromCloud,
+    emailFetcher = fetchAccountEmail,
+    cacheOpts = {},
+  } = options;
+  try {
+    const tok = tokenReader();
+    if (!tok || isTokenExpired(tok)) {
+      markCacheRefreshAttempt(tok || null, cacheOpts);
+      return;
+    }
+    const loadCfg = loadConfigFn || require('./config.js').loadConfig;
+    const config = await loadCfg().catch(() => ({}));
+    const [fresh, tier, accountEmail] = await Promise.all([
+      quotaFetcher(tok.accessToken, config),
+      tierFetcher(tok.accessToken, config),
+      emailFetcher(tok.accessToken),
+    ]);
+    applyRefreshResult(fresh, tok, tier, accountEmail, cacheOpts);
+  } catch {
+    try { markCacheRefreshAttempt(null, cacheOpts); } catch {}
+  }
+}
+
 // ─── CLI Execution for background refreshes ──────────────────────────────────
 if (process.argv.includes('--refresh')) {
-  (async () => {
-    try {
-      const tok = readToken();
-      if (tok) {
-        const { loadConfig } = require('./config.js');
-        const config = await loadConfig().catch(() => ({}));
-        const [fresh, tier, accountEmail] = await Promise.all([
-          fetchQuotaFromCloud(tok.accessToken, config),
-          fetchTierFromCloud(tok.accessToken, config),
-          fetchAccountEmail(tok.accessToken),
-        ]);
-        applyRefreshResult(fresh, tok, tier, accountEmail);
-      }
-    } catch {}
+  runBackgroundRefresh().finally(() => {
     process.exit(0);
-  })();
+  });
 }
 
 module.exports = {
   // orchestrator
   getQuota,
   applyRefreshResult,
+  runBackgroundRefresh,
   // cache module
   CACHE_PATH,
   isCachePayloadFresh,
   readCache: cacheMod.readCache,
   writeCache,
   recordRefreshAttempt,
+  markCacheRefreshAttempt,
   readCachePayload,
+  readCacheRaw,
   readCacheLastRefreshed,
   readCacheLastRefreshAttempt,
   readCacheFallback,
+  readAnyCachePayload,
   getCachedTier: cacheMod.getCachedTier,
   getCachedAccountEmail: cacheMod.getCachedAccountEmail,
   // token module
@@ -237,9 +327,11 @@ module.exports = {
   probeMacosKeychainAvailability: tokenMod.probeMacosKeychainAvailability,
   isTokenExpired,
   getTokenCandidates: tokenMod.getTokenCandidates,
+  getGoogleAccountsCandidates: tokenMod.getGoogleAccountsCandidates,
   parseTokenPayload: tokenMod.parseTokenPayload,
   selectUsableTokens: tokenMod.selectUsableTokens,
   anyTokenFileExists,
+  anyTokenMirrorExists,
   // cloud module
   fetchQuotaFromCloud,
   fetchTierFromCloud,

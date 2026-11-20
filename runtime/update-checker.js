@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const http = require('http');
 const https = require('https');
 const path = require('path');
 const { resolveAntigravityPath } = require('./paths.js');
@@ -38,7 +39,28 @@ function compareSemver(a, b) {
   if (pa.prerelease === pb.prerelease) return 0;
   if (!pa.prerelease) return 1;
   if (!pb.prerelease) return -1;
-  return pa.prerelease > pb.prerelease ? 1 : -1;
+
+  const partsA = pa.prerelease.split('.');
+  const partsB = pb.prerelease.split('.');
+  const maxLen = Math.max(partsA.length, partsB.length);
+  for (let i = 0; i < maxLen; i++) {
+    if (i >= partsA.length) return -1;
+    if (i >= partsB.length) return 1;
+    const ai = partsA[i];
+    const bi = partsB[i];
+    if (ai === bi) continue;
+
+    const aNumeric = /^\d+$/.test(ai);
+    const bNumeric = /^\d+$/.test(bi);
+    if (aNumeric && bNumeric) {
+      return Number(ai) > Number(bi) ? 1 : -1;
+    }
+    if (aNumeric !== bNumeric) {
+      return aNumeric ? -1 : 1;
+    }
+    return ai > bi ? 1 : -1;
+  }
+  return 0;
 }
 
 function isNewerVersion(remoteVersion, localVersion) {
@@ -49,7 +71,7 @@ function isNewerVersion(remoteVersion, localVersion) {
 
 function resolveUpdateUrl(config, env = process.env) {
   const safeEnv = env || process.env;
-  const explicit = safeEnv.AGY_PULSE_UPDATE_URL || safeEnv.AGY_HUD_UPDATE_URL;
+  const explicit = safeEnv.AGY_PULSE_UPDATE_URL;
   if (explicit && explicit.trim()) return explicit.trim();
 
   const repoSlug = resolveRepoSlug(config, safeEnv);
@@ -57,14 +79,24 @@ function resolveUpdateUrl(config, env = process.env) {
   return getRawGitHubUrl(repoSlug, 'main', 'package.json');
 }
 
-function fetchRemoteVersion(url, timeoutMs = DEFAULT_TIMEOUT_MS) {
+function fetchRemoteVersion(url, timeoutMs = DEFAULT_TIMEOUT_MS, redirectsLeft = 5) {
   if (!url) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
-    const req = https.get(parsed, { timeout: timeoutMs }, response => {
-      if (response.statusCode !== 200) {
+    const client = parsed.protocol === 'http:' ? http : https;
+    const req = client.get(parsed, { timeout: timeoutMs }, response => {
+      const status = response.statusCode || 0;
+      if (status >= 300 && status < 400 && response.headers.location && redirectsLeft > 0) {
         response.resume();
-        return reject(new Error(`Failed to fetch version: ${response.statusCode}`));
+        const nextUrl = new URL(response.headers.location, parsed);
+        if (parsed.protocol === 'https:' && nextUrl.protocol === 'http:') {
+          return reject(new Error(`Insecure redirect from https to http forbidden: ${url} -> ${nextUrl.toString()}`));
+        }
+        return resolve(fetchRemoteVersion(nextUrl.toString(), timeoutMs, redirectsLeft - 1));
+      }
+      if (status !== 200) {
+        response.resume();
+        return reject(new Error(`Failed to fetch version: ${status}`));
       }
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
@@ -107,15 +139,18 @@ async function checkForUpdates(options = {}) {
   const now = typeof options.now === 'number' ? options.now : Date.now();
   const fetchFn = options.fetchVersion || fetchRemoteVersion;
 
+  let localVersion = null;
   try {
     const localPkgPath = options.localPkgPath || findLocalPackageJson();
     if (!localPkgPath || !fs.existsSync(localPkgPath)) {
       return null;
     }
     const localPkg = JSON.parse(fs.readFileSync(localPkgPath, 'utf8'));
-    const localVersion = localPkg.version;
+    localVersion = localPkg.version;
 
-    const config = options.config !== undefined ? options.config : await loadConfig();
+    const argvCwd = process.argv[2] && !process.argv[2].startsWith('-') ? process.argv[2] : null;
+    const cwd = options.cwd || argvCwd || process.cwd();
+    const config = options.config !== undefined ? options.config : await loadConfig(cwd);
     const updateUrl = options.updateUrl !== undefined
       ? options.updateUrl
       : resolveUpdateUrl({ ...localPkg, ...config, repository: config?.repository || localPkg.repository }, env);
@@ -150,6 +185,12 @@ async function checkForUpdates(options = {}) {
         ? JSON.parse(fs.readFileSync(statusFile, 'utf8'))
         : {};
       current.lastCheck = now;
+      if (localVersion) {
+        current.localVersion = localVersion;
+        if (current.updateAvailable && (!current.latestVersion || !isNewerVersion(current.latestVersion, localVersion))) {
+          current.updateAvailable = false;
+        }
+      }
       writeStatusFile(statusFile, current);
       return current;
     } catch {

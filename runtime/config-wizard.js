@@ -2,20 +2,27 @@
 
 const fs = require('fs');
 const readline = require('readline');
-const { loadConfig, saveConfig, getLocalConfigPath, getGlobalConfigPath } = require('./config.js');
-const { renderHUD } = require('./renderer.js');
+const {
+  FULL_DEFAULT_CONFIG,
+  mergeConfig,
+  loadConfig,
+  saveConfig,
+  getLocalConfigPath,
+  getGlobalConfigPath,
+} = require('./config.js');
+const { renderStatusLine } = require('./renderer.js');
+const { THEME_PRESETS, normalizeThemeObject } = require('./renderer/format.js');
 
-const THEME_PRESETS = {
-  'Emerald Green': { primary: 'green', secondary: 'gray', warning: 'yellow', critical: 'red' },
-  'Ocean Blue': { primary: 'blue', secondary: 'gray', warning: 'yellow', critical: 'red' },
-  'Cyberpunk Magenta': { primary: 'magenta', secondary: 'gray', warning: 'yellow', critical: 'red' },
-  'Amber Gold': { primary: 'yellow', secondary: 'gray', warning: 'cyan', critical: 'red' },
-};
-
-const QUOTA_STYLES = ['table', 'compact', 'models'];
+const QUOTA_STYLES = ['table', 'compact', 'models', 'none'];
+const BREADCRUMB_COUNTS = [0, 1, 2, 3, 5];
 const LANGUAGES = ['auto', 'en', 'zh'];
 
+const _wizardNow = Date.now();
+const _wizardFiveHourReset = new Date(_wizardNow + 4 * 60 * 60 * 1000).toISOString();
+const _wizardWeeklyReset = new Date(_wizardNow + 5 * 24 * 60 * 60 * 1000).toISOString();
+
 const mockState = {
+  username: 'developer@agy.local',
   branch: 'main',
   currentDir: 'agy-pulse',
   steps: 12,
@@ -24,6 +31,34 @@ const mockState = {
   mcpCount: 2,
   hooksCount: 3,
   outputSpeed: 43.4,
+  modelPerf: {
+    Carbon: {
+      model: 'Carbon',
+      avgSpeed: 83.6,
+      avgTtftSec: 10.8,
+      streamSamples: 89,
+      ttftSamples: 89,
+      lastUpdatedMs: _wizardNow,
+    },
+    Hydro: {
+      model: 'Hydro',
+      avgSpeed: 64.2,
+      avgTtftSec: 4.3,
+      streamSamples: 24,
+      ttftSamples: 24,
+      lastUpdatedMs: _wizardNow - 60000,
+    },
+  },
+  childModelSpeeds: [
+    { model: 'Hydro', speed: 64.2 },
+  ],
+  costBreakdown: {
+    totalCostUsd: 0.125,
+    mainCostUsd: 0.085,
+    childrenCostUsd: 0.04,
+    childSessionCount: 1,
+    source: 'sqlite',
+  },
   compactionCount: 1,
   totalOutputTokens: 13900,
   serverCompactionLimit: 512000,
@@ -51,7 +86,9 @@ const mockState = {
 
 const mockAgyData = {
   plan_tier: 'Pro',
+  cycle_mode: 'auto',
   task_count: 5,
+  terminal_width: process.stdout?.columns || 120,
   model: {
     display_name: 'Gemini 4 Carbon (High)',
     id: 'gemini-4-carbon-high',
@@ -68,9 +105,6 @@ const mockAgyData = {
   },
 };
 
-const _wizardNow = Date.now();
-const _wizardFiveHourReset = new Date(_wizardNow + 4 * 60 * 60 * 1000).toISOString();
-const _wizardWeeklyReset = new Date(_wizardNow + 5 * 24 * 60 * 60 * 1000).toISOString();
 const mockQuotaData = [
   {
     id: 'gemini-4-carbon-high',
@@ -102,16 +136,27 @@ const mockQuotaData = [
     modelProvider: 'MODEL_PROVIDER_OPENAI',
     windows: {},
   },
+  {
+    id: 'gemini-3.1-flash-image',
+    displayName: 'Gemini 3.1 Flash Image',
+    remainingFraction: 0.85,
+    resetTime: _wizardFiveHourReset,
+    modelProvider: 'MODEL_PROVIDER_GOOGLE',
+    windows: {
+      fiveHour: { remainingFraction: 0.85, resetTime: _wizardFiveHourReset, observedAt: _wizardNow },
+    },
+  },
 ];
 
 function detectThemePresetName(theme) {
-  if (!theme || typeof theme !== 'object') return 'Custom';
+  if (!theme || (typeof theme !== 'object' && typeof theme !== 'string')) return 'Custom';
+  const normalized = typeof theme === 'string' ? normalizeThemeObject(theme) : theme;
   for (const [name, colors] of Object.entries(THEME_PRESETS)) {
     if (
-      theme.primary === colors.primary &&
-      theme.secondary === colors.secondary &&
-      theme.warning === colors.warning &&
-      theme.critical === colors.critical
+      normalized.primary === colors.primary &&
+      normalized.secondary === colors.secondary &&
+      normalized.warning === colors.warning &&
+      normalized.critical === colors.critical
     ) {
       return name;
     }
@@ -120,10 +165,34 @@ function detectThemePresetName(theme) {
 }
 
 function createWizardState(currentConfig = {}, options = {}) {
-  const config = JSON.parse(JSON.stringify(currentConfig || {}));
-  config.display = config.display || {};
-  config.theme = config.theme || { ...THEME_PRESETS['Emerald Green'] };
-  if (!config.language) config.language = 'auto';
+  const rawConfig = currentConfig && typeof currentConfig === 'object' ? currentConfig : {};
+  const config = JSON.parse(JSON.stringify(rawConfig));
+  if (config.enabled === undefined) {
+    config.enabled = FULL_DEFAULT_CONFIG.enabled;
+  }
+  config.thresholds = {
+    ...FULL_DEFAULT_CONFIG.thresholds,
+    ...(config.thresholds && typeof config.thresholds === 'object' ? config.thresholds : {}),
+  };
+  const rawDisplay = config.display && typeof config.display === 'object' ? config.display : {};
+  config.display = {
+    ...rawDisplay,
+    breadcrumbCount: rawDisplay.breadcrumbCount ?? FULL_DEFAULT_CONFIG.display.breadcrumbCount,
+    useNerdFonts: rawDisplay.useNerdFonts ?? FULL_DEFAULT_CONFIG.display.useNerdFonts,
+    showContextMonitor: rawDisplay.showContextMonitor ?? FULL_DEFAULT_CONFIG.display.showContextMonitor,
+    showModelCache: rawDisplay.showModelCache ?? FULL_DEFAULT_CONFIG.display.showModelCache,
+    showCurrentDir: rawDisplay.showCurrentDir ?? FULL_DEFAULT_CONFIG.display.showCurrentDir,
+    showCycleMode: rawDisplay.showCycleMode ?? FULL_DEFAULT_CONFIG.display.showCycleMode,
+    showModel: rawDisplay.showModel ?? FULL_DEFAULT_CONFIG.display.showModel,
+    showTurnCacheHitRate: rawDisplay.showTurnCacheHitRate ?? FULL_DEFAULT_CONFIG.display.showTurnCacheHitRate,
+    showUsername: rawDisplay.showUsername ?? FULL_DEFAULT_CONFIG.display.showUsername,
+    showCost: rawDisplay.showCost ?? FULL_DEFAULT_CONFIG.display.showCost,
+    showDailyCost: rawDisplay.showDailyCost ?? FULL_DEFAULT_CONFIG.display.showDailyCost,
+    showWeeklyCost: rawDisplay.showWeeklyCost ?? FULL_DEFAULT_CONFIG.display.showWeeklyCost,
+  };
+  const normalizedTheme = normalizeThemeObject(config.theme);
+  config.theme = { ...normalizedTheme };
+  if (!config.language) config.language = FULL_DEFAULT_CONFIG.language || 'auto';
 
   const cwd = options.cwd || process.cwd();
   const localExists = typeof options.localExists === 'boolean'
@@ -134,23 +203,65 @@ function createWizardState(currentConfig = {}, options = {}) {
     config,
     cwd,
     targetIsGlobal: !localExists,
-    themeName: detectThemePresetName(config.theme),
-    originalTheme: { ...config.theme },
+    themeName: detectThemePresetName(normalizedTheme),
+    originalTheme: { ...normalizedTheme },
+    changes: {
+      display: {},
+    },
   };
+}
+
+function readRawJsonSafe(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    }
+  } catch {}
+  return {};
+}
+
+function buildConfigForScopeSave(state) {
+  const targetPath = state.targetIsGlobal
+    ? getGlobalConfigPath()
+    : getLocalConfigPath(state.cwd);
+  const base = readRawJsonSafe(targetPath);
+  const changes = state.changes || {};
+  const override = {};
+  if (changes.enabled !== undefined) override.enabled = changes.enabled;
+  if (changes.language !== undefined) override.language = changes.language;
+  if (changes.theme !== undefined) override.theme = changes.theme;
+  if (changes.display && Object.keys(changes.display).length > 0) {
+    override.display = { ...changes.display };
+  }
+  const next = mergeConfig(base, override);
+  if (next.display && next.display.unicode === null) {
+    delete next.display.unicode;
+  }
+  return next;
 }
 
 function buildMenuItems(state, actions = {}) {
   const { config } = state;
+  if (!state.changes || typeof state.changes !== 'object') {
+    state.changes = { display: {} };
+  }
+  if (!state.changes.display || typeof state.changes.display !== 'object') {
+    state.changes.display = {};
+  }
   const boolToggle = (key, defaultValue) => {
-    const isEnabled = defaultValue ? config.display[key] !== false : config.display[key] === true;
+    const readEffective = () => (defaultValue ? config.display[key] !== false : config.display[key] === true);
+    const isEnabled = readEffective();
     return {
-      getValue: () => {
-        const cur = defaultValue ? config.display[key] !== false : config.display[key] === true;
-        return cur ? 'Enabled' : 'Disabled';
-      },
+      displayKey: key,
+      getEffectiveBool: readEffective,
+      getValue: () => (readEffective() ? 'Enabled' : 'Disabled'),
       toggle: () => {
-        const cur = defaultValue ? config.display[key] !== false : config.display[key] === true;
-        config.display[key] = !cur;
+        const nextVal = !readEffective();
+        config.display[key] = nextVal;
+        state.changes.display[key] = nextVal;
       },
       _default: isEnabled,
     };
@@ -172,6 +283,7 @@ function buildMenuItems(state, actions = {}) {
       toggle: () => {
         const idx = LANGUAGES.indexOf(config.language || 'auto');
         config.language = LANGUAGES[(idx + 1) % LANGUAGES.length];
+        state.changes.language = config.language;
       },
     },
     {
@@ -183,8 +295,9 @@ function buildMenuItems(state, actions = {}) {
         const idx = keys.indexOf(state.themeName);
         state.themeName = keys[(idx + 1) % keys.length];
         config.theme = state.themeName === 'Custom'
-          ? { ...state.originalTheme }
+          ? { ...normalizeThemeObject(state.originalTheme) }
           : { ...THEME_PRESETS[state.themeName] };
+        state.changes.theme = { ...config.theme };
       },
     },
     {
@@ -194,12 +307,14 @@ function buildMenuItems(state, actions = {}) {
         const style = config.display.quotaStyle || 'table';
         if (style === 'compact') return 'Compact';
         if (style === 'models') return 'Models';
+        if (style === 'none') return 'None';
         return 'Table';
       },
       toggle: () => {
         const current = config.display.quotaStyle || 'table';
         const idx = QUOTA_STYLES.indexOf(current);
         config.display.quotaStyle = QUOTA_STYLES[(idx + 1) % QUOTA_STYLES.length];
+        state.changes.display.quotaStyle = config.display.quotaStyle;
       },
     },
     {
@@ -215,20 +330,30 @@ function buildMenuItems(state, actions = {}) {
         if (config.display.useNerdFonts) {
           config.display.useNerdFonts = false;
           delete config.display.unicode;
+          state.changes.display.useNerdFonts = false;
+          state.changes.display.unicode = null;
         } else if (config.display.unicode === undefined) {
           config.display.useNerdFonts = false;
           config.display.unicode = true;
+          state.changes.display.useNerdFonts = false;
+          state.changes.display.unicode = true;
         } else if (config.display.unicode === true) {
           config.display.useNerdFonts = false;
           config.display.unicode = false;
+          state.changes.display.useNerdFonts = false;
+          state.changes.display.unicode = false;
         } else {
           config.display.useNerdFonts = true;
           config.display.unicode = true;
+          state.changes.display.useNerdFonts = true;
+          state.changes.display.unicode = true;
         }
       },
     },
     { key: 'showContextMonitor', label: 'Show Context Monitor', ...boolToggle('showContextMonitor', true) },
+    { key: 'showModelCache', label: 'Show Model Cache Line', ...boolToggle('showModelCache', true) },
     { key: 'showCurrentDir', label: 'Show Current Directory', ...boolToggle('showCurrentDir', true) },
+    { key: 'showCycleMode', label: 'Show Cycle Mode (Shift+Tab)', ...boolToggle('showCycleMode', true) },
     { key: 'showModel', label: 'Show Model (Line 1)', ...boolToggle('showModel', false) },
     { key: 'showGit', label: 'Show Git Branch', ...boolToggle('showGitBranch', true) },
     { key: 'showUsername', label: 'Show Username', ...boolToggle('showUsername', false) },
@@ -243,13 +368,27 @@ function buildMenuItems(state, actions = {}) {
       getValue: () => (config.display.breadcrumbCount !== undefined ? config.display.breadcrumbCount : 3),
       toggle: () => {
         const val = config.display.breadcrumbCount !== undefined ? config.display.breadcrumbCount : 3;
-        config.display.breadcrumbCount = (val % 5) + 1;
+        const idx = BREADCRUMB_COUNTS.indexOf(val);
+        const nextVal = idx >= 0
+          ? BREADCRUMB_COUNTS[(idx + 1) % BREADCRUMB_COUNTS.length]
+          : (BREADCRUMB_COUNTS.find(v => v > val) ?? BREADCRUMB_COUNTS[0]);
+        config.display.breadcrumbCount = nextVal;
+        state.changes.display.breadcrumbCount = nextVal;
       },
     },
     { key: 'showSpeed', label: 'Show Output Speed', ...boolToggle('showSpeed', false) },
     { key: 'showCost', label: 'Show Session Cost', ...boolToggle('showCost', false) },
     { key: 'showDailyCost', label: 'Show Daily Cost', ...boolToggle('showDailyCost', false) },
     { key: 'showWeeklyCost', label: 'Show Weekly Cost', ...boolToggle('showWeeklyCost', false) },
+    {
+      key: 'enabled',
+      label: 'Enable agy-pulse Status Line',
+      getValue: () => (config.enabled !== false ? 'Enabled' : 'Disabled'),
+      toggle: () => {
+        config.enabled = config.enabled === false;
+        state.changes.enabled = config.enabled;
+      },
+    },
     {
       key: 'save',
       label: 'Save & Exit',
@@ -267,6 +406,19 @@ function buildMenuItems(state, actions = {}) {
       },
     },
   ];
+}
+
+function buildPreviewConfig(state, menuItems) {
+  const baseConfig = state?.config ? JSON.parse(JSON.stringify(state.config)) : {};
+  baseConfig.display = baseConfig.display && typeof baseConfig.display === 'object' ? baseConfig.display : {};
+  baseConfig.theme = normalizeThemeObject(baseConfig.theme);
+  const items = Array.isArray(menuItems) ? menuItems : buildMenuItems(state);
+  for (const item of items) {
+    if (item && item.displayKey && typeof item.getEffectiveBool === 'function') {
+      baseConfig.display[item.displayKey] = item.getEffectiveBool();
+    }
+  }
+  return baseConfig;
 }
 
 async function handleWizardKeypress(str, key, wizardCtx) {
@@ -301,6 +453,29 @@ async function handleWizardKeypress(str, key, wizardCtx) {
   }
 }
 
+function computeMenuViewport(totalItems, selectedIdx, termRows, previewLineCount = 6) {
+  if (!Number.isFinite(termRows) || termRows <= 0) {
+    return { startIdx: 0, endIdx: totalItems, hasAbove: false, hasBelow: false };
+  }
+  const reservedLines = 8 + Math.max(1, previewLineCount);
+  const maxVisible = Math.max(3, termRows - reservedLines);
+  if (totalItems <= maxVisible) {
+    return { startIdx: 0, endIdx: totalItems, hasAbove: false, hasBelow: false };
+  }
+  const windowSize = Math.max(3, maxVisible - 2);
+  const startIdx = Math.max(0, Math.min(
+    selectedIdx - Math.floor(windowSize / 2),
+    totalItems - windowSize
+  ));
+  const endIdx = Math.min(totalItems, startIdx + windowSize);
+  return {
+    startIdx,
+    endIdx,
+    hasAbove: startIdx > 0,
+    hasBelow: endIdx < totalItems,
+  };
+}
+
 async function startWizard(options = {}) {
   const cwd = options.cwd || process.cwd();
   const currentConfig = await loadConfig(cwd);
@@ -321,7 +496,8 @@ async function startWizard(options = {}) {
 
   const menuItems = buildMenuItems(state, {
     onSave: async (curState) => {
-      await saveConfig(curState.config, curState.targetIsGlobal, curState.cwd);
+      const nextConfig = buildConfigForScopeSave(curState);
+      await saveConfig(nextConfig, curState.targetIsGlobal, curState.cwd);
       cleanup();
       const targetPath = curState.targetIsGlobal
         ? getGlobalConfigPath()
@@ -343,10 +519,35 @@ async function startWizard(options = {}) {
       readline.cursorTo(stdout, 0, 0);
       readline.clearScreenDown(stdout);
 
+      let previewBody = '';
+      let previewError = null;
+      try {
+        const previewConfig = buildPreviewConfig(state, menuItems);
+        const previewAgyData = {
+          ...mockAgyData,
+          terminal_width: stdout?.columns || process.stdout?.columns || 120,
+        };
+        const statusLinePreview = renderStatusLine(mockState, previewAgyData, previewConfig, mockQuotaData, 'Pro');
+        previewBody = previewConfig.enabled === false
+          ? '\x1b[90m(agy-pulse status line is disabled)\x1b[0m'
+          : statusLinePreview;
+      } catch (err) {
+        previewError = err;
+        previewBody = `\x1b[31mFailed to render preview: ${err.message}\x1b[0m`;
+      }
+
+      const previewLineCount = previewBody ? previewBody.split('\n').length : 1;
+      const termRows = Number(stdout?.rows || process.stdout?.rows || 0);
+      const viewport = computeMenuViewport(menuItems.length, wizardCtx.selectedIdx, termRows, previewLineCount);
+
       stdout.write('\x1b[1m\x1b[35m=== agy-pulse Configuration Wizard ===\x1b[0m\n\n');
       stdout.write('Use \x1b[1m↑/↓\x1b[0m, \x1b[1mj/k\x1b[0m, or \x1b[1m1-9/0\x1b[0m to navigate, \x1b[1mSpace/Enter\x1b[0m to toggle, \x1b[1ms\x1b[0m to save, \x1b[1mq\x1b[0m to cancel.\n\n');
 
-      for (let i = 0; i < menuItems.length; i++) {
+      if (viewport.hasAbove) {
+        stdout.write(`  \x1b[90m▲ (${viewport.startIdx} more above)\x1b[0m\n`);
+      }
+
+      for (let i = viewport.startIdx; i < viewport.endIdx; i++) {
         const item = menuItems[i];
         const isSelected = i === wizardCtx.selectedIdx;
         const marker = isSelected ? '\x1b[32m▸ \x1b[0m' : '  ';
@@ -364,14 +565,13 @@ async function startWizard(options = {}) {
         }
       }
 
-      stdout.write('\n\x1b[90m─────────────────────────────────────────────────────────────────────────────────\x1b[0m\n');
-      stdout.write('\x1b[1mHUD PREVIEW:\x1b[0m\n');
-      try {
-        const hudPreview = renderHUD(mockState, mockAgyData, state.config, mockQuotaData, 'Pro');
-        stdout.write(`${hudPreview}\n`);
-      } catch (err) {
-        stdout.write(`\x1b[31mFailed to render preview: ${err.message}\x1b[0m\n`);
+      if (viewport.hasBelow) {
+        stdout.write(`  \x1b[90m▼ (${menuItems.length - viewport.endIdx} more below)\x1b[0m\n`);
       }
+
+      stdout.write('\n\x1b[90m─────────────────────────────────────────────────────────────────────────────────\x1b[0m\n');
+      stdout.write('\x1b[1magy-pulse Status Line Preview\x1b[0m\n');
+      stdout.write(`${previewBody}${previewError ? '\n' : '\n'}`);
       stdout.write('\x1b[90m─────────────────────────────────────────────────────────────────────────────────\x1b[0m\n');
     },
     abort: async () => {
@@ -403,10 +603,18 @@ async function startWizard(options = {}) {
 module.exports = {
   THEME_PRESETS,
   QUOTA_STYLES,
+  BREADCRUMB_COUNTS,
   LANGUAGES,
+  mockState,
+  mockAgyData,
+  mockQuotaData,
+  normalizeThemeObject,
   detectThemePresetName,
   createWizardState,
+  buildConfigForScopeSave,
+  computeMenuViewport,
   buildMenuItems,
+  buildPreviewConfig,
   handleWizardKeypress,
   startWizard,
 };

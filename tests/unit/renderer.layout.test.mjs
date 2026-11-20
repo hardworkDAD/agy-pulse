@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert';
-import { renderHUD } from '../../runtime/renderer.js';
+import { renderStatusLine } from '../../runtime/renderer.js';
+import { getAnsiDisplayWidth } from '../../runtime/renderer/format.js';
 
 describe('renderer / line composition', () => {
   test('should contain branch', () => {
@@ -22,9 +23,9 @@ describe('renderer / line composition', () => {
       }
     };
 
-    const output = renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } });
+    const output = renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } });
     assert.doesNotMatch(output, /^\n/);
-    // Layer 1: branch, model, plan (no AGY-HUD brand, no labels)
+    // Layer 1: branch, model, plan (no AGY-PULSE brand, no labels)
     assert.match(output, /⎇ main/);
     assert.match(output, /Gemini 3\.5 Flash\(H\)/);
     assert.match(output, /Google AI Pro/);
@@ -35,7 +36,7 @@ describe('renderer / line composition', () => {
   });
 
   test('preserves model name suffixes when applying display aliases', () => {
-    const output = renderHUD(
+    const output = renderStatusLine(
       { steps: 1, branch: 'main' },
       {
         context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 },
@@ -46,7 +47,7 @@ describe('renderer / line composition', () => {
 
     assert.match(output, /Gemini 3\.5 Flash\(H\) Preview/);
 
-    const outputLow = renderHUD(
+    const outputLow = renderStatusLine(
       { steps: 1, branch: 'main' },
       {
         context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 },
@@ -68,10 +69,10 @@ describe('renderer / line composition', () => {
       latestVersion: '1.2.3'
     };
 
-    const outputUnicode = renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } }, [], 'tier', updateInfo);
+    const outputUnicode = renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } }, [], 'tier', updateInfo);
     assert.match(outputUnicode, /⟳ v1\.2\.3/);
 
-    const outputAscii = renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: false } }, [], 'tier', updateInfo);
+    const outputAscii = renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: false } }, [], 'tier', updateInfo);
     assert.match(outputAscii, /\[UP\] v1\.2\.3/);
   });
 });
@@ -89,7 +90,7 @@ describe('renderer / metadata line', () => {
     const agyData = {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
-    const output = renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } });
+    const output = renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } });
     assert.match(output, /1 MEMORY.md/);
     assert.match(output, /4 rules/);
     assert.match(output, /1 MCPs/);
@@ -108,7 +109,7 @@ describe('renderer / metadata line', () => {
     const agyData = {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
-    const output = renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } });
+    const output = renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } });
     assert.match(output, /1 GEMINI.md/);
     assert.match(output, /2 hooks/);
     assert.doesNotMatch(output, /0 rules/);
@@ -126,7 +127,7 @@ describe('renderer / metadata line', () => {
     const agyData = {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
-    const output = renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } });
+    const output = renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } });
     const lines = output.trim().split('\n');
     // Only 2 lines (identity + resources), no metadata line
     assert.equal(lines.length, 2);
@@ -142,7 +143,7 @@ describe('renderer / metadata line', () => {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
 
-    const output = renderHUD(state, agyData, {
+    const output = renderStatusLine(state, agyData, {
       display: {
         breadcrumbCount: 2,
         unicode: false
@@ -165,7 +166,7 @@ describe('renderer / theme & icons', () => {
       model: { display_name: 'GPT-OSS 120B (Medium)' }
     };
 
-    const output = renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: false } });
+    const output = renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: false } });
 
     // Box-drawing characters should NOT appear
     assert.doesNotMatch(output, /│/);
@@ -187,8 +188,8 @@ describe('renderer / theme & icons', () => {
     const agyData = {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
-    const output = renderHUD(state, agyData, { display: { useNerdFonts: true } });
-    assert.doesNotMatch(output, /AGY-HUD/);
+    const output = renderStatusLine(state, agyData, { display: { useNerdFonts: true } });
+    assert.doesNotMatch(output, /AGY-PULSE/);
     assert.match(output, /main/);
     assert.match(output, /0%/);
     assert.doesNotMatch(output, /\[B\]/);
@@ -210,7 +211,7 @@ describe('renderer / theme & icons', () => {
         critical: 'blue'
       }
     };
-    const output = renderHUD(state, agyData, config);
+    const output = renderStatusLine(state, agyData, config);
     assert.match(output, /\x1b\[34m\[█+/);
   });
 
@@ -228,7 +229,7 @@ describe('renderer / theme & icons', () => {
         critical: 0.4
       }
     };
-    const output = renderHUD(state, agyData, config);
+    const output = renderStatusLine(state, agyData, config);
     assert.match(output, /\x1b\[33m\[█+/);
   });
 });
@@ -247,7 +248,7 @@ describe('renderer / display visibility toggles', () => {
       model: { display_name: 'Gemini 3.5 Flash (High)' }
     };
 
-    const output = renderHUD(state, agyData, {
+    const output = renderStatusLine(state, agyData, {
       display: {
         showGitBranch: false,
         showTokenBar: false,
@@ -278,7 +279,7 @@ describe('renderer / current directory', () => {
     };
 
     // Test with showCurrentDir = true
-    const output1 = renderHUD(state, agyData, {
+    const output1 = renderStatusLine(state, agyData, {
       display: {
         showCurrentDir: true,
         showGitBranch: true,
@@ -289,7 +290,7 @@ describe('renderer / current directory', () => {
     assert.match(output1, /my-project-dir.*[|│].*\[B\] main/);
 
     // Test with showCurrentDir = false
-    const output2 = renderHUD(state, agyData, {
+    const output2 = renderStatusLine(state, agyData, {
       display: {
         showCurrentDir: false,
         showGitBranch: true,
@@ -309,7 +310,7 @@ describe('renderer / current directory', () => {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
 
-    const output = renderHUD(state, agyData, {
+    const output = renderStatusLine(state, agyData, {
       display: {
         showCurrentDir: true,
         unicode: false
@@ -335,7 +336,7 @@ describe('renderer / username', () => {
     };
 
     // Test with showUsername = true
-    const output1 = renderHUD(state, agyData, {
+    const output1 = renderStatusLine(state, agyData, {
       display: {
         showUsername: true,
         unicode: false
@@ -344,7 +345,7 @@ describe('renderer / username', () => {
     assert.match(output1, /shetterelland@gmail\.com/);
 
     // Test with showUsername = false (default behavior)
-    const output2 = renderHUD(state, agyData, {
+    const output2 = renderStatusLine(state, agyData, {
       display: {
         showUsername: false,
         unicode: false
@@ -363,7 +364,7 @@ describe('renderer / username', () => {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
 
-    const output = renderHUD(state, agyData, {
+    const output = renderStatusLine(state, agyData, {
       display: {
         showUsername: true,
         username: 'custom-user',
@@ -384,7 +385,7 @@ describe('renderer / username', () => {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
 
-    const output = renderHUD(state, agyData, {
+    const output = renderStatusLine(state, agyData, {
       display: {
         showUsername: true,
         unicode: false
@@ -407,7 +408,7 @@ describe('renderer / username', () => {
       context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 }
     };
 
-    const output = renderHUD(state, agyData, {
+    const output = renderStatusLine(state, agyData, {
       display: {
         showUsername: true,
         unicode: false
@@ -421,7 +422,7 @@ describe('renderer / username', () => {
   });
 
   test('omits git branch in non-git directories when branch is null', () => {
-    const output = renderHUD(
+    const output = renderStatusLine(
       { steps: 1, branch: null, currentDir: 'plain-folder' },
       { context_window: {}, plan_tier: 'Pro' },
       { display: { showGitBranch: true, unicode: true } }
@@ -430,5 +431,134 @@ describe('renderer / username', () => {
     assert.match(output, /plain-folder/);
     assert.doesNotMatch(output, /⎇/);
     assert.doesNotMatch(output, /unknown/);
+  });
+
+  test('returns empty string when config.enabled is false', () => {
+    const output = renderStatusLine(
+      { steps: 1, branch: 'main', currentDir: 'proj' },
+      { context_window: { total_input_tokens: 100, total_output_tokens: 50, used_percentage: 10 } },
+      { enabled: false, display: { unicode: false } }
+    );
+    assert.equal(output, '');
+  });
+
+  test('clamps out-of-range and non-finite progress percentages without throwing RangeError', () => {
+    for (const usedPct of [-25, 150, NaN, Infinity]) {
+      const output = renderStatusLine(
+        { steps: 1, branch: 'main' },
+        { context_window: { total_input_tokens: 100, total_output_tokens: 50, used_percentage: usedPct } },
+        { display: { unicode: false } }
+      );
+      assert.match(output, /\[[#-]{10}\]/);
+    }
+  });
+
+  test('supports string config.theme for preset names and single colors', () => {
+    const state = { steps: 1, branch: 'main' };
+    const agyData = {
+      context_window: { total_input_tokens: 100, total_output_tokens: 50, used_percentage: 10 },
+      model: { display_name: 'Gemini 3.5 Flash (High)' },
+    };
+
+    const presetOut = renderStatusLine(state, agyData, { theme: 'Ocean Blue', display: { unicode: false } });
+    assert.match(presetOut, /\x1b\[34mGemini 3\.5 Flash\(H\)/);
+
+    const singleOut = renderStatusLine(state, agyData, { theme: 'yellow', display: { unicode: false } });
+    assert.match(singleOut, /\x1b\[33mGemini 3\.5 Flash\(H\)/);
+  });
+
+  test('supports string agyData.model', () => {
+    const output = renderStatusLine(
+      { steps: 1, branch: 'main' },
+      { model: 'Claude 4.6 Sonnet (Thinking)', context_window: {} },
+      { display: { unicode: false } }
+    ).replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(output, /Sonnet 4\.6\(Th\)/);
+  });
+
+  test('suppresses stale update badge when latestVersion is equal to or older than local package version', () => {
+    const state = { steps: 1, branch: 'main' };
+    const agyData = { context_window: { total_input_tokens: 0, total_output_tokens: 0, used_percentage: 0 } };
+    const config = { display: { unicode: true, useNerdFonts: false } };
+
+    const sameVer = renderStatusLine(state, agyData, config, [], 'Pro', {
+      updateAvailable: true,
+      latestVersion: '1.0.0',
+    });
+    assert.doesNotMatch(sameVer, /v1\.0\.0/);
+
+    const olderVer = renderStatusLine(state, agyData, config, [], 'Pro', {
+      updateAvailable: true,
+      latestVersion: '0.9.9',
+    });
+    assert.doesNotMatch(olderVer, /v0\.9\.9/);
+  });
+
+  test('gracefully degrades Line 1, Line 2, and Line 3 within explicit 80/100/120 terminal_width (including CJK)', () => {
+    const now = Date.now();
+    const state = {
+      branch: 'feature/very-long-branch-name',
+      currentDir: 'my-long-workspace-folder',
+      username: 'developer@example.com',
+      breadcrumbs: ['src/components/DashboardView.tsx', 'runtime/renderer.js', 'tests/unit/renderer.layout.test.mjs'],
+      rulesCount: 4,
+      mcpCount: 3,
+      hooksCount: 2,
+      modelPerf: {
+        Carbon: { model: 'Carbon', avgSpeed: 83.6, avgTtftSec: 10.8, lastUpdatedMs: now - 1000 },
+        Hydro: { model: 'Hydro', avgSpeed: 260.9, avgTtftSec: 5.5, lastUpdatedMs: now - 2000 },
+        Flash: { model: 'Flash', avgSpeed: 320.1, avgTtftSec: 2.1, lastUpdatedMs: now - 3000 },
+        Opus: { model: 'Opus', avgSpeed: 72.4, avgTtftSec: 8.2, lastUpdatedMs: now - 4000 },
+      },
+      childModelSpeeds: [
+        { model: 'Hydro', speed: 260.9 },
+        { model: 'Flash', speed: 320.1 },
+        { model: 'Opus', speed: 72.4 },
+      ],
+      costTotals: { todayUsd: 3.45, weekUsd: 18.9 },
+    };
+
+    for (const width of [80, 100, 120]) {
+      const agyData = {
+        terminal_width: width,
+        model: { display_name: 'Gemini 4 Carbon (High)', id: 'gemini-4-carbon-high' },
+        plan_tier: 'Google AI Ultra',
+        cost: { total_usd: 1.23 },
+        context_window: {
+          total_input_tokens: 150000,
+          total_output_tokens: 25000,
+          used_percentage: 30,
+          context_window_size: 512000,
+        },
+      };
+      const output = renderStatusLine(
+        state,
+        agyData,
+        {
+          language: 'zh',
+          display: {
+            unicode: true,
+            useNerdFonts: false,
+            showUsername: true,
+            showCost: true,
+            showDailyCost: true,
+            showWeeklyCost: true,
+            showSpeed: true,
+            quotaStyle: 'none',
+          },
+        },
+        [],
+        null,
+        { updateAvailable: true, latestVersion: '1.2.3' }
+      );
+      const lines = output.split('\n');
+      for (const line of lines) {
+        assert.ok(
+          getAnsiDisplayWidth(line) <= width,
+          `width=${width} exceeded: ${getAnsiDisplayWidth(line)} -> ${line}`
+        );
+      }
+      assert.match(lines[0], /Gemini 4 Carbon\(H\)/);
+    }
   });
 });

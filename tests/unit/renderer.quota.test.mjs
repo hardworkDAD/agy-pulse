@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert';
-import { renderHUD } from '../../runtime/renderer.js';
+import { renderStatusLine } from '../../runtime/renderer.js';
+import { getAnsiDisplayWidth } from '../../runtime/renderer/format.js';
 
 describe('renderer / quota lines', () => {
   describe('table mode', () => {
@@ -36,7 +37,7 @@ describe('renderer / quota lines', () => {
       ];
 
       const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
-      const clean = stripAnsi(renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } }, quotaData));
+      const clean = stripAnsi(renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } }, quotaData));
 
       // Verify grid and rows
       assert.match(clean, /───/);
@@ -75,7 +76,7 @@ describe('renderer / quota lines', () => {
         },
       };
 
-      const clean = renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } }, quotaData)
+      const clean = renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } }, quotaData)
         .replace(/\x1b\[[0-9;]*m/g, '');
       const googleFiveHour = clean.split('\n').find(line => line.includes('Google 5h')) || '';
       const googleWeekly = clean.split('\n').find(line => line.includes('Google week')) || '';
@@ -104,7 +105,7 @@ describe('renderer / quota lines', () => {
       };
 
       const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
-      const clean = stripAnsi(renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } }, quotaData));
+      const clean = stripAnsi(renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } }, quotaData));
 
       assert.doesNotMatch(clean, /Quota loading/);
       assert.match(clean, /Google 5h\s+\[[█░]+\]\s+95%/);
@@ -134,7 +135,7 @@ describe('renderer / quota lines', () => {
       };
 
       const stripAnsi = s => s.replace(/\x1b\[[0-9;]*m/g, '');
-      const clean = stripAnsi(renderHUD(state, agyData, { display: { useNerdFonts: false, unicode: true } }, quotaData));
+      const clean = stripAnsi(renderStatusLine(state, agyData, { display: { useNerdFonts: false, unicode: true } }, quotaData));
 
       assert.match(clean, /Google 5h\s+\[[█░]+\]\s+95%/);
       assert.match(clean, /Google week\s+\[[█░]+\]\s+82%/);
@@ -153,7 +154,7 @@ describe('renderer / quota lines', () => {
         { displayName: 'GPT-OSS 120B (Medium)', remainingFraction: 1.0 }
       ];
 
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'models', useNerdFonts: false, unicode: true } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'models', useNerdFonts: false, unicode: true } }, quotaData);
       const lines = output.split('\n');
       const gptLine = lines.find(l => l.includes('GPT-OSS'));
       assert.ok(gptLine, 'GPT-OSS line must exist');
@@ -185,7 +186,7 @@ describe('renderer / quota lines', () => {
           unicode: true
         }
       };
-      const output = renderHUD(state, agyData, config, quotaData);
+      const output = renderStatusLine(state, agyData, config, quotaData);
       assert.match(output, /─{91}/);
       assert.match(output, /Gemini 3\.5 Flash\(H\) {5}/);
     });
@@ -201,7 +202,7 @@ describe('renderer / quota lines', () => {
         remainingFraction: 0.08, // 8%, which is <= 10% critical threshold
         resetTime: null
       }];
-      const output = renderHUD(state, agyData, { display: { unicode: true, useNerdFonts: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { unicode: true, useNerdFonts: false } }, quotaData);
       assert.match(output, /\x1b\[31m\[/);
     });
   });
@@ -218,7 +219,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3-flash-agent', displayName: 'Gemini 3.5 Flash (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 1, resetTime: new Date(Date.now() + 3600000).toISOString() },
       ];
       const config = { display: { quotaStyle: 'compact', unicode: false } };
-      const output = renderHUD(state, agyData, config, quotaData);
+      const output = renderStatusLine(state, agyData, config, quotaData);
 
       // Single 'Quota:' label, no window suffix — renderer displays only
       // the top-level binding quota.
@@ -241,7 +242,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3-flash-agent', displayName: 'Gemini 3.5 Flash (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.5, resetTime: null },
       ];
 
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
 
       assert.match(output, /Quota: 50%/);
     });
@@ -270,7 +271,7 @@ describe('renderer / quota lines', () => {
         },
       ];
 
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
 
       // Must pick the binding weekly window (82%), not top-level 100%
       assert.match(output, /Quota: 82%/);
@@ -294,7 +295,7 @@ describe('renderer / quota lines', () => {
         },
       ];
 
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
 
       assert.match(output, /Quota: 100%.*~4h/);
     });
@@ -312,11 +313,11 @@ describe('renderer / quota lines', () => {
         { id: 'gpt-oss-120b-medium', displayName: 'GPT-OSS 120B (Medium)', modelProvider: 'MODEL_PROVIDER_OPENAI', remainingFraction: 0.8, resetTime: null },
       ];
       const config = { display: { quotaStyle: 'compact', unicode: true } };
-      const output = renderHUD(state, agyData, config, quotaData);
+      const output = renderStatusLine(state, agyData, config, quotaData);
 
       assert.match(output, /Google:.*Flash.*Pro/);
-      assert.match(output, /Anthropic:.*Sonnet/);
-      assert.match(output, /OpenAI:.*GPT/);
+      assert.match(output, /Anthropic:.*Sonnet.*GPT/);
+      assert.doesNotMatch(output, /OpenAI:/);
     });
 
     test('deduplicates models by family in compact mini bars', () => {
@@ -331,7 +332,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3.6-flash-medium', displayName: 'Gemini 3.6 Flash (Medium)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.9 },
         { id: 'gemini-3.1-pro-high', displayName: 'Gemini 3.1 Pro (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.7 },
       ];
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData)
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData)
         .replace(/\x1b\[[0-9;]*m/g, '');
       const googleLine = output.split('\n').find(line => line.includes('Google:')) || '';
 
@@ -350,7 +351,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3.6-flash-high', displayName: 'Gemini 3.6 Flash (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.9 },
         { id: 'gemini-3.5-flash-low', displayName: 'Gemini 3.5 Flash (Low)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.2 },
       ];
-      const output1 = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData1)
+      const output1 = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData1)
         .replace(/\x1b\[[0-9;]*m/g, '');
       const googleLine1 = output1.split('\n').find(line => line.includes('Google:')) || '';
       // 0.2 -> 20% -> 1 filled (█), 2 empty (░░)
@@ -361,7 +362,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3.5-flash-low', displayName: 'Gemini 3.5 Flash (Low)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.2 },
         { id: 'gemini-3.6-flash-high', displayName: 'Gemini 3.6 Flash (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.9 },
       ];
-      const output2 = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData2)
+      const output2 = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData2)
         .replace(/\x1b\[[0-9;]*m/g, '');
       const googleLine2 = output2.split('\n').find(line => line.includes('Google:')) || '';
       assert.match(googleLine2, /Flash█░░/);
@@ -393,7 +394,7 @@ describe('renderer / quota lines', () => {
           remainingFraction: 0.8,
         },
       ];
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData)
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData)
         .replace(/\x1b\[[0-9;]*m/g, '');
       const googleLine = output.split('\n').find(line => line.includes('Google:')) || '';
       // The 0% critical window should make Flash 0% (0 filled, 3 empty ░░░)
@@ -410,7 +411,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3.6-flash-high', displayName: 'Gemini 3.6 Flash (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.8 },
         { id: 'gemini-3.1-flash-image', displayName: 'Gemini 3.1 Flash Image', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.5 },
       ];
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData)
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData)
         .replace(/\x1b\[[0-9;]*m/g, '');
       const googleLine = output.split('\n').find(line => line.includes('Google:')) || '';
       assert.match(googleLine, /Flash/);
@@ -430,7 +431,7 @@ describe('renderer / quota lines', () => {
         remainingFraction: 0.74,
         resetTime: new Date(Date.now() + 2 * 3600 * 1000).toISOString(),
       }];
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
 
       assert.match(output, /Quota: 74%/);
     });
@@ -448,7 +449,7 @@ describe('renderer / quota lines', () => {
         remainingFraction: 0.65,
         resetTime: new Date(Date.now() + 5 * 86400 * 1000).toISOString(),
       }];
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData);
 
       assert.match(output, /Quota: 65%/);
       assert.match(output, /~5d/);
@@ -465,7 +466,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3.1-pro-low', displayName: 'Gemini 3.1 Pro (Low)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.7 },
         { id: 'gemini-4-argon', displayName: 'Gemini 4 Argon (Medium)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.5 },
       ];
-      const output = renderHUD(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData)
+      const output = renderStatusLine(state, agyData, { display: { quotaStyle: 'compact', unicode: true } }, quotaData)
         .replace(/\x1b\[[0-9;]*m/g, '');
       const googleLine = output.split('\n').find(line => line.includes('Google:')) || '';
 
@@ -488,7 +489,7 @@ describe('renderer / quota lines', () => {
         enumerable: false
       });
 
-      const output = renderHUD(state, agyData, { language: 'en', display: { useNerdFonts: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { language: 'en', display: { useNerdFonts: false } }, quotaData);
 
       assert.match(output, /Quota unavailable/);
       assert.match(output, /not logged into Antigravity/);
@@ -516,15 +517,15 @@ describe('renderer / quota lines', () => {
       });
 
       assert.match(
-        renderHUD(state, agyData, { language: 'en', display: { useNerdFonts: false } }, expiredToken),
+        renderStatusLine(state, agyData, { language: 'en', display: { useNerdFonts: false } }, expiredToken),
         /Antigravity token expired/
       );
       assert.match(
-        renderHUD(state, agyData, { language: 'en', display: { useNerdFonts: false } }, authFailed),
+        renderStatusLine(state, agyData, { language: 'en', display: { useNerdFonts: false } }, authFailed),
         /Antigravity auth failed/
       );
       assert.match(
-        renderHUD(state, agyData, { language: 'en', display: { useNerdFonts: false } }, fetchFailed),
+        renderStatusLine(state, agyData, { language: 'en', display: { useNerdFonts: false } }, fetchFailed),
         /quota fetch failed/
       );
     });
@@ -540,7 +541,7 @@ describe('renderer / quota lines', () => {
         enumerable: false
       });
 
-      const output = renderHUD(state, agyData, { language: 'zh', display: { useNerdFonts: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { language: 'zh', display: { useNerdFonts: false } }, quotaData);
 
       assert.match(output, /额度不可用/);
       assert.match(output, /未登录 Antigravity/);
@@ -552,11 +553,11 @@ describe('renderer / quota lines', () => {
         context_window: { total_input_tokens: 1000, total_output_tokens: 200, used_percentage: 5 }
       };
 
-      const outputUnicode = renderHUD(state, agyData, { language: 'en', display: { unicode: true } }, []);
+      const outputUnicode = renderStatusLine(state, agyData, { language: 'en', display: { unicode: true } }, []);
       assert.match(outputUnicode, /Quota loading…/);
       assert.match(outputUnicode, /─+/);
 
-      const outputAscii = renderHUD(state, agyData, { language: 'en', display: { unicode: false } }, []);
+      const outputAscii = renderStatusLine(state, agyData, { language: 'en', display: { unicode: false } }, []);
       assert.match(outputAscii, /Quota loading\.\.\./);
     });
 
@@ -566,11 +567,11 @@ describe('renderer / quota lines', () => {
         context_window: { total_input_tokens: 1000, total_output_tokens: 200, used_percentage: 5 }
       };
 
-      const output = renderHUD(state, agyData, { display: { unicode: true } }, null);
+      const output = renderStatusLine(state, agyData, { display: { unicode: true } }, null);
       assert.doesNotMatch(output, /Quota loading/);
       assert.doesNotMatch(output, /Quota unavailable/);
 
-      const output2 = renderHUD(state, agyData, { display: { unicode: true } });
+      const output2 = renderStatusLine(state, agyData, { display: { unicode: true } });
       assert.doesNotMatch(output2, /Quota loading/);
     });
   });
@@ -590,7 +591,7 @@ describe('renderer / quota lines', () => {
         }
       ];
 
-      const output = renderHUD(state, agyData, { display: { unicode: true, useNerdFonts: false, showImageQuota: true } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { unicode: true, useNerdFonts: false, showImageQuota: true } }, quotaData);
       assert.match(output, /Image Quota:/);
       assert.match(output, /90%/);
       assert.match(output, /~3h49m/);
@@ -610,7 +611,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3.1-flash-image', displayName: 'Gemini 3.1 Flash Image', remainingFraction: 0.0 }
       ];
 
-      const output = renderHUD(state, agyData, { display: { unicode: true, useNerdFonts: false } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { unicode: true, useNerdFonts: false } }, quotaData);
       assert.match(output, /Image Quota Exhausted/);
       assert.match(output, /03h14m/);
     });
@@ -625,7 +626,7 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-3.1-flash-image', displayName: 'Gemini 3.1 Flash Image', remainingFraction: 0.9 }
       ];
 
-      const output = renderHUD(state, agyData, { display: { unicode: true, useNerdFonts: false, quotaStyle: 'table' } }, quotaData);
+      const output = renderStatusLine(state, agyData, { display: { unicode: true, useNerdFonts: false, quotaStyle: 'table' } }, quotaData);
       // Image model must NOT appear as a separate table column row
       assert.doesNotMatch(output, /Gemini 3\.1 Flash I/);
     });
@@ -642,7 +643,7 @@ describe('renderer / quota lines', () => {
           fiveHour: { remainingFraction: 0.72, resetTime: new Date(now + 2 * 3600 * 1000).toISOString(), observedAt: now },
         },
       }];
-      const clean = renderHUD({ steps: 1, branch: 'main' }, { context_window: {} }, { display: { unicode: true } }, quotaData)
+      const clean = renderStatusLine({ steps: 1, branch: 'main' }, { context_window: {} }, { display: { unicode: true } }, quotaData)
         .replace(/\x1b\[[0-9;]*m/g, '');
 
       assert.match(clean, /Google 5h\s+\[[█░]+\]\s+72%/);
@@ -656,21 +657,276 @@ describe('renderer / quota lines', () => {
         { id: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.9, resetTime: new Date(now + 3600000).toISOString() },
         { id: 'gemini-4-hydrogen-high', displayName: 'Gemini 4 Hydrogen (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.8, resetTime: new Date(now + 3600000).toISOString() },
         { id: 'gemini-4-hydrogen-xhigh', displayName: 'Gemini 4 Hydrogen (XHigh)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.4, resetTime: new Date(now + 3600000).toISOString() },
+        { id: 'gemini-4-neon-high', displayName: 'Gemini 4 Neon (High)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.6, resetTime: new Date(now + 3600000).toISOString() },
         { id: 'gemini-pro-orchestrator', displayName: 'Orchestrator (Carbon)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.7, resetTime: new Date(now + 3600000).toISOString() },
         { id: 'gemini-pro-orchestrator-argon', displayName: 'Orchestrator (Argon)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.5, resetTime: new Date(now + 3600000).toISOString() },
+        { id: 'gemini-pro-orchestrator-neon', displayName: 'Orchestrator (Neon)', modelProvider: 'MODEL_PROVIDER_GOOGLE', remainingFraction: 0.3, resetTime: new Date(now + 3600000).toISOString() },
       ];
       const agyData = {
         context_window: {},
         model: { display_name: 'Gemini 4 Hydrogen (XHigh)' },
       };
-      const clean = renderHUD({ steps: 1, branch: 'main' }, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData)
+      const clean = renderStatusLine({ steps: 1, branch: 'main' }, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData)
         .replace(/\x1b\[[0-9;]*m/g, '');
 
       assert.match(clean, /Quota: 40%/);
       assert.match(clean, /Carbon/);
       assert.match(clean, /Hydro/);
+      assert.match(clean, /Neon/);
       assert.match(clean, /Orch-C/);
       assert.match(clean, /Orch-A/);
+      assert.match(clean, /Orch-N/);
+    });
+
+    test('matches Neon family/tier and renders Gemini 4 Neon & Orchestrator (Neon) across table, models, and compact modes', () => {
+      const now = Date.now();
+      const quotaData = [
+        {
+          id: 'gemini-4-neon-high',
+          displayName: 'Gemini 4 Neon (High)',
+          remainingFraction: 0.62,
+          resetTime: new Date(now + 3 * 3600 * 1000).toISOString(),
+        },
+        {
+          id: 'gemini-pro-orchestrator-neon',
+          displayName: 'Orchestrator (Neon)',
+          remainingFraction: 0.85,
+          resetTime: new Date(now + 3 * 3600 * 1000).toISOString(),
+        },
+      ];
+
+      const compactClean = renderStatusLine(
+        { steps: 1, branch: 'main' },
+        { context_window: {}, model: { display_name: 'Gemini 4 Neon (High) Preview', id: 'gemini-4-neon-high' } },
+        { display: { quotaStyle: 'compact', unicode: false } },
+        quotaData
+      ).replace(/\x1b\[[0-9;]*m/g, '');
+      assert.match(compactClean, /Quota: 62%/);
+      assert.match(compactClean, /Google:.*Neon.*Orch-N/);
+
+      const tableClean = renderStatusLine(
+        { steps: 1, branch: 'main' },
+        { context_window: {} },
+        { display: { quotaStyle: 'table', unicode: false } },
+        quotaData
+      ).replace(/\x1b\[[0-9;]*m/g, '');
+      assert.match(tableClean, /Google 5h\s+\[[#-]+\]\s+62%/);
+
+      const modelsClean = renderStatusLine(
+        { steps: 1, branch: 'main' },
+        { context_window: {} },
+        { display: { quotaStyle: 'models', columnWidth: 44, unicode: false } },
+        quotaData
+      ).replace(/\x1b\[[0-9;]*m/g, '');
+      assert.match(modelsClean, /Gemini 4 Neon\(H\)/);
+      assert.match(modelsClean, /Orch \(Neon\)/);
+    });
+
+    test('renders providerQuota summary in compact and models modes when models array is empty', () => {
+      const now = Date.now();
+      const quotaData = [];
+      quotaData.providerQuota = {
+        google: {
+          fiveHour: { remainingFraction: 0.95, resetTime: new Date(now + 4 * 3600 * 1000).toISOString() },
+        },
+        claude: {
+          weekly: { remainingFraction: 1.0, resetTime: new Date(now + 6 * 86400 * 1000).toISOString() },
+        },
+      };
+      const agyData = { context_window: { total_input_tokens: 100, total_output_tokens: 20, used_percentage: 5 } };
+
+      const compactClean = renderStatusLine({ steps: 1, branch: 'main' }, agyData, { display: { quotaStyle: 'compact', unicode: false } }, quotaData)
+        .replace(/\x1b\[[0-9;]*m/g, '');
+      assert.doesNotMatch(compactClean, /Quota loading/);
+      assert.match(compactClean, /Google: 95%/);
+      assert.match(compactClean, /Claude: 100%/);
+
+      const modelsClean = renderStatusLine({ steps: 1, branch: 'main' }, agyData, { display: { quotaStyle: 'models', unicode: false } }, quotaData)
+        .replace(/\x1b\[[0-9;]*m/g, '');
+      assert.doesNotMatch(modelsClean, /Quota loading/);
+      assert.match(modelsClean, /Google 5h\s+\[[#-]+\]\s+95%/);
+      assert.match(modelsClean, /Claude week\s+\[[#-]+\]\s+100%/);
+    });
+
+    test('renders unavailableReason instead of Quota loading in compact and models modes', () => {
+      const quotaData = [];
+      quotaData.providerQuota = {};
+      Object.defineProperty(quotaData, 'unavailableReason', {
+        value: 'quota_fetch_failed',
+        enumerable: false,
+      });
+      const agyData = { context_window: { total_input_tokens: 100, total_output_tokens: 20, used_percentage: 5 } };
+
+      for (const quotaStyle of ['compact', 'models']) {
+        const clean = renderStatusLine({ steps: 1, branch: 'main' }, agyData, { language: 'en', display: { quotaStyle, unicode: false } }, quotaData)
+          .replace(/\x1b\[[0-9;]*m/g, '');
+        assert.doesNotMatch(clean, /Quota loading/);
+        assert.match(clean, /Quota unavailable: quota fetch failed/);
+      }
+    });
+
+    test('infers provider labels in compact mode when modelProvider is missing', () => {
+      const quotaData = [
+        { id: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High)', remainingFraction: 0.9 },
+        { id: 'claude-4-6-sonnet', displayName: 'Claude 4.6 Sonnet', remainingFraction: 0.7 },
+        { id: 'gpt-oss-120b', displayName: 'GPT-OSS 120B', remainingFraction: 0.8 },
+      ];
+      const clean = renderStatusLine(
+        { steps: 1, branch: 'main' },
+        { context_window: {} },
+        { display: { quotaStyle: 'compact', unicode: false } },
+        quotaData
+      ).replace(/\x1b\[[0-9;]*m/g, '');
+
+      assert.match(clean, /Google:.*Carbon/);
+      assert.match(clean, /Claude:.*Sonnet.*GPT/);
+      assert.doesNotMatch(clean, /OpenAI:/);
+    });
+
+    test('aligns provider quota table horizontal divider width with actual two-column row width', () => {
+      const now = Date.now();
+      const quotaData = [];
+      quotaData.providerQuota = {
+        google: {
+          fiveHour: { remainingFraction: 0.95, resetTime: new Date(now + 4 * 3600 * 1000).toISOString() },
+          weekly: { remainingFraction: 0.82, resetTime: new Date(now + 6 * 86400 * 1000).toISOString() },
+        },
+        claude: {
+          fiveHour: { remainingFraction: 1.0, resetTime: new Date(now + 4 * 3600 * 1000).toISOString() },
+          weekly: { remainingFraction: 1.0, resetTime: new Date(now + 6 * 86400 * 1000).toISOString() },
+        },
+      };
+
+      const clean = renderStatusLine({ steps: 1, branch: 'main' }, { context_window: {} }, { display: { unicode: true } }, quotaData)
+        .replace(/\x1b\[[0-9;]*m/g, '');
+      const lines = clean.split('\n');
+      const dividerLine = lines.find(l => l.includes('───'));
+      const g5Line = lines.find(l => l.includes('Google 5h'));
+      assert.ok(dividerLine && g5Line);
+      assert.equal(dividerLine.length, g5Line.length);
+    });
+
+    test('quotaStyle none suppresses all quota panels including loading and unavailable', () => {
+      const agyData = { context_window: { total_input_tokens: 100, total_output_tokens: 20, used_percentage: 5 } };
+      const withModels = renderStatusLine(
+        { branch: 'main' },
+        agyData,
+        { display: { quotaStyle: 'none', unicode: false } },
+        [{ id: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High)', remainingFraction: 0.8 }]
+      );
+      assert.doesNotMatch(withModels, /Google/);
+      assert.doesNotMatch(withModels, /Carbon/);
+
+      const unavailable = [];
+      Object.defineProperty(unavailable, 'unavailableReason', { value: 'not_logged_in', enumerable: false });
+      const withReason = renderStatusLine({ branch: 'main' }, agyData, { display: { quotaStyle: 'none', unicode: false } }, unavailable);
+      assert.doesNotMatch(withReason, /Quota unavailable/);
+
+      const withLoading = renderStatusLine({ branch: 'main' }, agyData, { display: { quotaStyle: 'none', unicode: false } }, []);
+      assert.doesNotMatch(withLoading, /Quota loading/);
+    });
+
+    test('never renders OpenAI 5h/week rows for gpt-oss-120b-medium or providerQuota.openai while keeping dynamic providers like deepseek', () => {
+      const now = Date.now();
+      const quotaData = [
+        {
+          id: 'gpt-oss-120b-medium',
+          displayName: 'GPT-OSS 120B (Medium)',
+          modelProvider: 'MODEL_PROVIDER_OPENAI',
+          remainingFraction: 0.89,
+          windows: {
+            fiveHour: { remainingFraction: 0.89, resetTime: new Date(now + 3 * 3600 * 1000).toISOString(), observedAt: now },
+            weekly: { remainingFraction: 0.58, resetTime: new Date(now + 5 * 86400 * 1000).toISOString(), observedAt: now },
+          },
+        },
+      ];
+      quotaData.providerQuota = {
+        google: {
+          fiveHour: { remainingFraction: 0.9, resetTime: new Date(now + 3600 * 1000).toISOString() },
+        },
+        openai: {
+          fiveHour: { remainingFraction: 0.75, resetTime: new Date(now + 2 * 3600 * 1000).toISOString() },
+          weekly: { remainingFraction: 0.6, resetTime: new Date(now + 4 * 86400 * 1000).toISOString() },
+        },
+        deepseek: {
+          weekly: { remainingFraction: 0.5, resetTime: new Date(now + 5 * 86400 * 1000).toISOString() },
+        },
+      };
+
+      const tableClean = renderStatusLine({ branch: 'main' }, { context_window: {} }, { display: { quotaStyle: 'table', unicode: true } }, quotaData)
+        .replace(/\x1b\[[0-9;]*m/g, '');
+      assert.doesNotMatch(tableClean, /OpenAI 5h|OpenAI week|OpenAI/i);
+      assert.match(tableClean, /Claude 5h\s+\[[█░]+\]\s+89%/);
+      assert.match(tableClean, /Claude week\s+\[[█░]+\]\s+57%/);
+      assert.match(tableClean, /Deepseek 7d\s+\[[█░]+\]\s+50%/);
+
+      const compactFromPQ = [];
+      compactFromPQ.providerQuota = quotaData.providerQuota;
+      const compactClean = renderStatusLine({ branch: 'main' }, { context_window: {} }, { display: { quotaStyle: 'compact', unicode: false } }, compactFromPQ)
+        .replace(/\x1b\[[0-9;]*m/g, '');
+      assert.doesNotMatch(compactClean, /OpenAI/i);
+      assert.match(compactClean, /Deepseek: 50%/);
+    });
+
+    test('adapts models and table quota layouts to explicit narrow terminal widths (50/60/80/100/120)', () => {
+      const now = Date.now();
+      const quotaData = [
+        { id: 'gemini-3.5-flash-high', displayName: 'Gemini 3.5 Flash (High)', remainingFraction: 0.8, resetTime: new Date(now + 600_000).toISOString() },
+        { id: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6 (Thinking)', remainingFraction: 0.6, resetTime: new Date(now + 1200_000).toISOString() },
+        { id: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High)', remainingFraction: 0.9, resetTime: new Date(now + 1800_000).toISOString() },
+      ];
+
+      for (const width of [80, 100, 120]) {
+        const out = renderStatusLine(
+          { branch: 'main' },
+          { terminal_width: width, context_window: { total_input_tokens: 100, total_output_tokens: 50, used_percentage: 5 } },
+          { display: { quotaStyle: 'models', unicode: true } },
+          quotaData
+        );
+        for (const line of out.split('\n')) {
+          assert.ok(getAnsiDisplayWidth(line) <= width, `models width=${width} line width=${getAnsiDisplayWidth(line)}`);
+        }
+      }
+
+      const singleColOut = renderStatusLine(
+        { branch: 'main' },
+        { terminal_width: 50, context_window: { total_input_tokens: 100, total_output_tokens: 50, used_percentage: 5 } },
+        { display: { quotaStyle: 'models', unicode: true } },
+        quotaData
+      );
+      const quotaRows = singleColOut.split('\n').filter(l => l.includes('Flash') || l.includes('Sonnet'));
+      assert.equal(quotaRows.length, 2, 'single-column mode puts each model on its own row when width < 56');
+      for (const line of singleColOut.split('\n')) {
+        assert.ok(getAnsiDisplayWidth(line) <= 50, `singleCol width=${getAnsiDisplayWidth(line)}`);
+      }
+
+      const narrowTableOut = renderStatusLine(
+        { branch: 'main' },
+        { terminal_width: 60, context_window: { total_input_tokens: 100, total_output_tokens: 50, used_percentage: 5 } },
+        { display: { quotaStyle: 'table', unicode: true } },
+        quotaData
+      );
+      for (const line of narrowTableOut.split('\n')) {
+        assert.ok(getAnsiDisplayWidth(line) <= 60, `narrow table width=${getAnsiDisplayWidth(line)}`);
+      }
+    });
+
+    test('beautifies cached quota item when displayName equals raw model id', () => {
+      const quotaData = [
+        {
+          id: 'gemini-3.8-flash-tiered',
+          displayName: 'gemini-3.8-flash-tiered',
+          remainingFraction: 0.7,
+        },
+      ];
+      const clean = renderStatusLine(
+        { branch: 'main' },
+        { context_window: { total_input_tokens: 100, total_output_tokens: 50, used_percentage: 5 } },
+        { display: { quotaStyle: 'models', columnWidth: 48, unicode: false } },
+        quotaData
+      ).replace(/\x1b\[[0-9;]*m/g, '');
+      assert.match(clean, /Gemini 3\.8 Flash\(T\)/);
+      assert.doesNotMatch(clean, /gemini-3\.8-flash/);
     });
   });
 });

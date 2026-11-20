@@ -250,6 +250,12 @@ describe('quota / models', () => {
         ['gemini-4-hydrogen-high', 'Gemini 4 Hydrogen (High)'],
         ['gemini-4-hydrogen-medium', 'Gemini 4 Hydrogen (Medium)'],
         ['gemini-4-hydrogen-low', 'Gemini 4 Hydrogen (Low)'],
+        ['gemini-4-hydrogen-sonar', 'Gemini 4 Hydrogen (Sonar)'],
+        ['gemini-4-neon', 'Gemini 4 Neon'],
+        ['gemini-4-neon-xhigh', 'Gemini 4 Neon (XHigh)'],
+        ['gemini-4-neon-high', 'Gemini 4 Neon (High)'],
+        ['gemini-4-neon-medium', 'Gemini 4 Neon (Medium)'],
+        ['gemini-4-neon-low', 'Gemini 4 Neon (Low)'],
         ['gemini-4-argon-high', 'Gemini 4 Argon (High)'],
         ['gemini-4-argon-medium', 'Gemini 4 Argon (Medium)'],
         ['gemini-4-argon-low', 'Gemini 4 Argon (Low)'],
@@ -258,6 +264,7 @@ describe('quota / models', () => {
         ['gemini-3.8-flash-low', 'Gemini 3.8 Flash (Low)'],
         ['gemini-pro-orchestrator', 'Orchestrator (Carbon)'],
         ['gemini-pro-orchestrator-argon', 'Orchestrator (Argon)'],
+        ['gemini-pro-orchestrator-neon', 'Orchestrator (Neon)'],
         ['claude-opus-4-6-thinking', 'Claude Opus 4.6 (Thinking)'],
         ['claude-sonnet-4-6', 'Claude Sonnet 4.6 (Thinking)'],
         ['gpt-oss-120b-medium', 'GPT-OSS 120B (Medium)'],
@@ -274,6 +281,64 @@ describe('quota / models', () => {
       assert.deepEqual(
         normalized.map(m => [m.id, m.displayName]),
         expectedPairs
+      );
+    });
+
+    test('resolves all fallback legacy and argon model display names when displayName is omitted', () => {
+      const { MODEL_DISPLAY_NAMES } = quotaModule;
+      const expectedPairs = [
+        ['gemini-4-argon', 'Gemini 4 Argon (Medium)'],
+        ['gemini-3-flash-agent', 'Gemini 3.5 Flash (High)'],
+        ['gemini-3.5-flash-low', 'Gemini 3.5 Flash (Medium)'],
+        ['gemini-3.5-flash-extra-low', 'Gemini 3.5 Flash (Low)'],
+        ['gemini-pro-agent', 'Gemini 3.1 Pro (High)'],
+        ['gemini-3.1-pro-low', 'Gemini 3.1 Pro (Low)'],
+      ];
+
+      const models = {};
+      for (const [id, name] of expectedPairs) {
+        assert.equal(MODEL_DISPLAY_NAMES[id], name);
+        models[id] = { quotaInfo: { remainingFraction: 0.5 } };
+      }
+
+      const normalized = normalizeQuotaModels(models, expectedPairs.map(([id]) => id));
+      assert.deepEqual(
+        normalized.map(m => [m.id, m.displayName]),
+        expectedPairs
+      );
+    });
+
+    test('resolves new 2026 Flash, Image, and Claude 5.5 display names when displayName is omitted', () => {
+      const { FALLBACK_AGENT_MODEL_IDS, MODEL_DISPLAY_NAMES } = quotaModule;
+      const expectedPairs = [
+        ['gemini-3.8-flash-tiered', 'Gemini 3.8 Flash (Tiered)'],
+        ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite'],
+        ['gemini-3.1-flash-image', 'Gemini 3.1 Flash Image'],
+        ['claude-opus-5-5', 'Claude Opus 5.5'],
+        ['claude-opus-5-5-thinking', 'Claude Opus 5.5 (Thinking)'],
+        ['claude-sonnet-5-5', 'Claude Sonnet 5.5'],
+        ['claude-sonnet-5-5-thinking', 'Claude Sonnet 5.5 (Thinking)'],
+      ];
+
+      const models = {};
+      for (const [id, name] of expectedPairs) {
+        assert.ok(FALLBACK_AGENT_MODEL_IDS.includes(id), `${id} should be in FALLBACK_AGENT_MODEL_IDS`);
+        assert.equal(MODEL_DISPLAY_NAMES[id], name);
+        models[id] = { quotaInfo: { remainingFraction: 0.8 } };
+      }
+
+      const normalized = normalizeQuotaModels(models, expectedPairs.map(([id]) => id));
+      assert.deepEqual(
+        normalized.map(m => [m.id, m.displayName]),
+        expectedPairs
+      );
+      assert.equal(
+        quotaModule.resolveModelDisplayName('gemini-3.8-flash-tiered', 'gemini-3.8-flash-tiered'),
+        'Gemini 3.8 Flash (Tiered)'
+      );
+      assert.equal(
+        quotaModule.resolveModelDisplayName('gemini-3.8-flash-tiered', 'Custom Override'),
+        'Custom Override'
       );
     });
   });

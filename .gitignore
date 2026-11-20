@@ -3,7 +3,6 @@ node_modules/
 .env*
 /dist/
 *.log
-/agy-hud.zip
 /agy-pulse.zip
 /agy-pulse.config.json
 /release_tmp/

@@ -1,11 +1,9 @@
 'use strict';
 
 const BRAND_NAME = 'agy-pulse';
-const LEGACY_BRAND_NAME = 'agy-hud';
 const PACKAGE_VERSION = '1.0.0';
-const CONFIG_FILENAMES = ['agy-pulse.config.json', 'agy-hud.config.json'];
+const CONFIG_FILENAMES = ['agy-pulse.config.json'];
 const RUNTIME_DIR_NAME = 'agy-pulse-runtime';
-const LEGACY_RUNTIME_DIR_NAME = 'agy-hud-runtime';
 
 function extractRepoSlug(rawValue) {
   if (!rawValue) return null;
@@ -33,7 +31,7 @@ function extractRepoSlug(rawValue) {
 
 /**
  * Resolve the configured GitHub `owner/repo` slug without falling back to the
- * original upstream `icebear0828/agy-hud` repository.
+ * original upstream repository.
  *
  * @param {object|null|undefined} config
  * @param {NodeJS.ProcessEnv} [env]
@@ -41,7 +39,7 @@ function extractRepoSlug(rawValue) {
  */
 function resolveRepoSlug(config, env = process.env) {
   const safeEnv = env || process.env;
-  const envCandidate = safeEnv.AGY_PULSE_REPO || safeEnv.AGY_HUD_REPO || '';
+  const envCandidate = safeEnv.AGY_PULSE_REPO || '';
   const fromEnv = extractRepoSlug(envCandidate);
   if (fromEnv) return fromEnv;
 
@@ -69,11 +67,9 @@ function getRawGitHubUrl(repoSlug, branch = 'main', filePath = 'package.json') {
 
 module.exports = {
   BRAND_NAME,
-  LEGACY_BRAND_NAME,
   PACKAGE_VERSION,
   CONFIG_FILENAMES,
   RUNTIME_DIR_NAME,
-  LEGACY_RUNTIME_DIR_NAME,
   resolveRepoSlug,
   getRawGitHubUrl,
 };

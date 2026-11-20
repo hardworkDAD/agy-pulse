@@ -456,7 +456,7 @@ describe('quota / cache', () => {
         const sample = [{ id: 'gemini-4-carbon-high', remainingFraction: 0.7, resetTime: null }];
         writeCache(sample, 'dynamic-tok');
 
-        const dynamicFile = path.join(tmp, 'agy-hud-quota-cache.json');
+        const dynamicFile = path.join(tmp, 'agy-pulse-quota-cache.json');
         assert.equal(fs.existsSync(dynamicFile), true);
         assert.equal(readCache('dynamic-tok')?.[0]?.id, 'gemini-4-carbon-high');
 
@@ -500,6 +500,108 @@ describe('quota / cache', () => {
       } finally {
         if (previousCache === null) fs.rmSync(CACHE_PATH, { force: true });
         else fs.writeFileSync(CACHE_PATH, previousCache);
+      }
+    });
+
+    test('detects email switch from token.email and refuses to inherit tier/email on shared keyring token change without email', () => {
+      const { readCachePayload } = quotaModule;
+      const previousCache = fs.existsSync(CACHE_PATH) ? fs.readFileSync(CACHE_PATH, 'utf8') : null;
+      try {
+        fs.rmSync(CACHE_PATH, { force: true });
+        const tokA = { accessToken: 'kr-tok-A', sourceFormat: 'linux-keyring', email: 'a@example.com' };
+        writeCache([{ id: 'm', remainingFraction: 0.9, resetTime: null }], tokA, 'Google AI Pro', null);
+        assert.equal(readCachePayload(tokA)?.accountEmail, 'a@example.com');
+
+        // Token changed on shared keyring, but incoming email is unknown (null) -> must NOT inherit a@example.com or tier
+        const tokBNoEmail = { accessToken: 'kr-tok-B', sourceFormat: 'linux-keyring' };
+        writeCache([{ id: 'm', remainingFraction: 0.4, resetTime: null }], tokBNoEmail, null, null);
+        const payloadB = readCachePayload(tokBNoEmail);
+        assert.equal(payloadB.accountEmail, null);
+        assert.equal(payloadB.tier, null);
+
+        // Explicit switch detected via token.email even when accountEmail parameter is null
+        const tokC = { accessToken: 'kr-tok-C', sourceFormat: 'linux-keyring', email: 'c@example.com' };
+        writeCache([{ id: 'm', remainingFraction: 0.8, resetTime: null }], tokC, 'Enterprise', null);
+        const tokD = { accessToken: 'kr-tok-D', sourceFormat: 'linux-keyring', email: 'd@example.com' };
+        writeCache([{ id: 'm', remainingFraction: 0.3, resetTime: null }], tokD, null, null);
+        const payloadD = readCachePayload(tokD);
+        assert.equal(payloadD.accountEmail, 'd@example.com');
+        assert.equal(payloadD.tier, null);
+      } finally {
+        if (previousCache === null) fs.rmSync(CACHE_PATH, { force: true });
+        else fs.writeFileSync(CACHE_PATH, previousCache);
+      }
+    });
+
+    test('deep-merges providerQuota windows per provider and caps expiresAt to providerQuota fiveHour resetTime', () => {
+      const { readCachePayload } = quotaModule;
+      const previousCache = fs.existsSync(CACHE_PATH) ? fs.readFileSync(CACHE_PATH, 'utf8') : null;
+      try {
+        fs.rmSync(CACHE_PATH, { force: true });
+        const fiveHourReset = new Date(Date.now() + 30 * 1000).toISOString();
+        const weeklyReset = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+        const data = [{ id: 'm', remainingFraction: 0.8, resetTime: weeklyReset }];
+
+        writeCache(data, 'tok', null, null, {
+          google: { weekly: { remainingFraction: 0.9, resetTime: weeklyReset } },
+        });
+        writeCache(data, 'tok', null, null, {
+          google: { fiveHour: { remainingFraction: 0.5, resetTime: fiveHourReset } },
+        });
+
+        const payload = readCachePayload('tok');
+        assert.equal(payload.providerQuota.google.weekly.remainingFraction, 0.9, 'weekly window must survive 5h-only update');
+        assert.equal(payload.providerQuota.google.fiveHour.remainingFraction, 0.5);
+        assert.ok(
+          payload.expiresAt <= Date.parse(fiveHourReset) + 1000,
+          'expiresAt must be capped by providerQuota.google.fiveHour.resetTime'
+        );
+      } finally {
+        if (previousCache === null) fs.rmSync(CACHE_PATH, { force: true });
+        else fs.writeFileSync(CACHE_PATH, previousCache);
+      }
+    });
+
+    test('unlinks symlinked cache target before atomic rename to prevent symlink overwrite', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-cache-symlink-'));
+      try {
+        const rootDir = path.join(tmp, 'root');
+        fs.mkdirSync(rootDir, { recursive: true });
+        const targetFile = path.join(tmp, 'sensitive-target.txt');
+        fs.writeFileSync(targetFile, 'DO_NOT_OVERWRITE');
+        const cacheFile = path.join(rootDir, 'agy-pulse-quota-cache.json');
+        fs.symlinkSync(targetFile, cacheFile);
+
+        writeCache([{ id: 'm', remainingFraction: 0.9, resetTime: null }], 'tok', null, null, null, {
+          roots: [rootDir],
+        });
+
+        assert.equal(fs.readFileSync(targetFile, 'utf8'), 'DO_NOT_OVERWRITE');
+        assert.equal(fs.lstatSync(cacheFile).isSymbolicLink(), false);
+        assert.equal(readCache('tok', { roots: [rootDir] })?.[0]?.id, 'm');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('readAnyCachePayload returns non-empty v3 cache and skips empty attempt markers', () => {
+      const { readAnyCachePayload, markCacheRefreshAttempt } = quotaModule;
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-cache-any-'));
+      try {
+        const rootDir = path.join(tmp, 'root');
+        fs.mkdirSync(rootDir, { recursive: true });
+
+        markCacheRefreshAttempt('tok-empty', { roots: [rootDir] });
+        assert.equal(readAnyCachePayload({ roots: [rootDir], strictRoots: true }), null);
+
+        writeCache([{ id: 'gemini-4-carbon-high', remainingFraction: 0.65, resetTime: null }], 'tok-valid', 'Pro', 'u@example.com', null, {
+          roots: [rootDir],
+        });
+        const anyPayload = readAnyCachePayload({ roots: [rootDir], strictRoots: true });
+        assert.equal(anyPayload?.data?.length, 1);
+        assert.equal(anyPayload?.data?.[0]?.id, 'gemini-4-carbon-high');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
       }
     });
   });

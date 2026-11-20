@@ -127,7 +127,7 @@ describe('quota / cloud', () => {
       }
     });
 
-    test('respects AGY_HUD_ENDPOINTS and AGY_HUD_INTERESTING_MODELS env overrides', async () => {
+    test('respects AGY_PULSE_ENDPOINTS and AGY_PULSE_INTERESTING_MODELS env overrides', async () => {
       const originalFetch = globalThis.fetch;
       const requestedUrls = [];
       globalThis.fetch = async (url) => {
@@ -150,8 +150,8 @@ describe('quota / cloud', () => {
         };
       };
 
-      process.env.AGY_HUD_ENDPOINTS = 'https://custom-endpoint.com,https://another-endpoint.com';
-      process.env.AGY_HUD_INTERESTING_MODELS = 'custom-model-id-1';
+      process.env.AGY_PULSE_ENDPOINTS = 'https://custom-endpoint.com,https://another-endpoint.com';
+      process.env.AGY_PULSE_INTERESTING_MODELS = 'custom-model-id-1';
 
       try {
         const quotas = await fetchQuotaFromCloud('token');
@@ -164,8 +164,8 @@ describe('quota / cloud', () => {
         assert.equal(quotas[0].remainingFraction, 0.8);
       } finally {
         globalThis.fetch = originalFetch;
-        delete process.env.AGY_HUD_ENDPOINTS;
-        delete process.env.AGY_HUD_INTERESTING_MODELS;
+        delete process.env.AGY_PULSE_ENDPOINTS;
+        delete process.env.AGY_PULSE_INTERESTING_MODELS;
       }
     });
 
@@ -262,7 +262,7 @@ describe('quota / cloud', () => {
         return { ok: false, status: 500 };
       };
       try {
-        const tier = await withEnv({ AGY_HUD_ENDPOINTS: 'https://mock.test' }, () =>
+        const tier = await withEnv({ AGY_PULSE_ENDPOINTS: 'https://mock.test' }, () =>
           fetchTierFromCloud('test-token')
         );
         assert.equal(tier, 'Google AI Pro');
@@ -275,7 +275,7 @@ describe('quota / cloud', () => {
       const originalFetch = globalThis.fetch;
       globalThis.fetch = async () => { throw new Error('network down'); };
       try {
-        const tier = await withEnv({ AGY_HUD_ENDPOINTS: 'https://mock.test' }, () =>
+        const tier = await withEnv({ AGY_PULSE_ENDPOINTS: 'https://mock.test' }, () =>
           fetchTierFromCloud('test-token')
         );
         assert.equal(tier, null);
@@ -293,7 +293,7 @@ describe('quota / cloud', () => {
       };
 
       try {
-        await withEnv({ AGY_HUD_ENDPOINTS: 'https://mock.test' }, () =>
+        await withEnv({ AGY_PULSE_ENDPOINTS: 'https://mock.test' }, () =>
           fetchTierFromCloud('test-token')
         );
         assert.ok(signalPassed, 'AbortSignal must be passed to fetch');
@@ -312,7 +312,7 @@ describe('quota / cloud', () => {
         return { ok: false, status: 500 };
       };
       try {
-        const tier = await withEnv({ AGY_HUD_ENDPOINTS: 'https://mock.test' }, () =>
+        const tier = await withEnv({ AGY_PULSE_ENDPOINTS: 'https://mock.test' }, () =>
           fetchTierFromCloud('test-token')
         );
         assert.equal(tier, null);
@@ -424,7 +424,7 @@ describe('quota / cloud', () => {
       assert.equal(parsed.argon.fiveHour, undefined);
     });
 
-    test('parses carbon, hydrogen, orchestrator, gpt-oss, and custom buckets without dropping them', () => {
+    test('parses carbon, hydrogen, neon, orchestrator, gpt-oss, and custom buckets without dropping them', () => {
       const resetTime = '2026-10-31T12:00:00Z';
       const parsed = parseQuotaSummary({
         groups: [
@@ -433,6 +433,12 @@ describe('quota / cloud', () => {
             buckets: [
               { bucketId: 'carbon-weekly', window: 'weekly', remainingFraction: 0.80, resetTime },
               { bucketId: 'hydrogen-5h', window: '5h', remainingFraction: 0.50, resetTime },
+            ],
+          },
+          {
+            displayName: 'Gemini 4 Neon',
+            buckets: [
+              { bucketId: 'neon-5h', window: '5h', remainingFraction: 0.35, resetTime },
             ],
           },
           {
@@ -457,9 +463,28 @@ describe('quota / cloud', () => {
       });
 
       assert.equal(parsed.google.weekly.remainingFraction, 0.70);
-      assert.equal(parsed.google.fiveHour.remainingFraction, 0.50);
+      assert.equal(parsed.google.fiveHour.remainingFraction, 0.35);
       assert.equal(parsed.claude.fiveHour.remainingFraction, 0.60);
       assert.equal(parsed.deepseek.weekly.remainingFraction, 0.45);
+    });
+
+    test('classifies mixed group buckets individually so argon does not hijack gemini buckets', () => {
+      const resetTime = '2026-12-01T12:00:00Z';
+      const parsed = parseQuotaSummary({
+        groups: [{
+          displayName: 'All Gemini Tiers',
+          buckets: [
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.90, resetTime },
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.80, resetTime },
+            { bucketId: 'argon-weekly', window: 'weekly', remainingFraction: 0.25, resetTime },
+          ],
+        }],
+      });
+
+      assert.equal(parsed.google.weekly.remainingFraction, 0.90);
+      assert.equal(parsed.google.fiveHour.remainingFraction, 0.80);
+      assert.equal(parsed.argon.weekly.remainingFraction, 0.25);
+      assert.equal(parsed.argon.fiveHour, undefined);
     });
   });
 
@@ -501,11 +526,13 @@ describe('quota / cloud', () => {
       assert.equal(enrichModelsWithQuotaSummary(models, null), models);
     });
 
-    test('enriches 2026 carbon, hydrogen, orchestrator, and gpt-oss models', () => {
+    test('enriches 2026 carbon, hydrogen, neon, orchestrator, and gpt-oss models', () => {
       const models = [
         { id: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High)', windows: {} },
         { id: 'gemini-4-hydrogen-xhigh', displayName: 'Gemini 4 Hydrogen (XHigh)', windows: {} },
+        { id: 'gemini-4-neon-high', displayName: 'Gemini 4 Neon (High)', windows: {} },
         { id: 'gemini-pro-orchestrator', displayName: 'Orchestrator (Carbon)', windows: {} },
+        { id: 'gemini-pro-orchestrator-neon', displayName: 'Orchestrator (Neon)', windows: {} },
         { id: 'gemini-pro-orchestrator-argon', displayName: 'Orchestrator (Argon)', windows: {} },
         { id: 'gpt-oss-120b-medium', displayName: 'GPT-OSS 120B (Medium)', windows: {} },
       ];
@@ -518,8 +545,45 @@ describe('quota / cloud', () => {
       assert.equal(enriched[0].windows.weekly.remainingFraction, 0.88);
       assert.equal(enriched[1].windows.weekly.remainingFraction, 0.88);
       assert.equal(enriched[2].windows.weekly.remainingFraction, 0.88);
-      assert.equal(enriched[3].windows.weekly.remainingFraction, 0.66);
-      assert.equal(enriched[4].windows.fiveHour.remainingFraction, 0.44);
+      assert.equal(enriched[3].windows.weekly.remainingFraction, 0.88);
+      assert.equal(enriched[4].windows.weekly.remainingFraction, 0.88);
+      assert.equal(enriched[5].windows.weekly.remainingFraction, 0.66);
+      assert.equal(enriched[6].windows.fiveHour.remainingFraction, 0.44);
+    });
+
+    test('preserves unavailableReason on empty models array', () => {
+      const emptyWithReason = quotaModule.createUnavailableQuotaResult('auth_failed');
+      const summary = {
+        google: { weekly: { remainingFraction: 0.9, resetTime: '2026-12-01T00:00:00Z' } },
+      };
+      const enriched = enrichModelsWithQuotaSummary(emptyWithReason, summary, 1000);
+      assert.equal(enriched.length, 0);
+      assert.equal(enriched.unavailableReason, 'auth_failed');
+    });
+
+    test('fetchQuotaFromCloud discovers imagen models in addition to image models', async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (url) => {
+        if (String(url).includes('fetchAvailableModels')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              models: {
+                'gemini-4-carbon-high': { quotaInfo: { remainingFraction: 0.9 } },
+                'imagen-3.0-generate-002': { displayName: 'Imagen 3', quotaInfo: { remainingFraction: 0.6 } },
+              },
+            }),
+          };
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      };
+      try {
+        const quotas = await fetchQuotaFromCloud('tok');
+        assert.ok(quotas.some(q => q.id === 'imagen-3.0-generate-002' && q.remainingFraction === 0.6));
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     });
   });
 

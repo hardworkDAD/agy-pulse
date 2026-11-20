@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { getOutputSpeed, formatSpeed, getSpeedCachePath } from '../../runtime/speed.js';
+import { getOutputSpeed, formatSpeed, formatTtft, formatChildModelSpeeds, getSpeedCachePath } from '../../runtime/speed.js';
 
 let tempDir;
 
@@ -234,5 +234,326 @@ test('allows 5% (min 5 tokens) alignment tolerance and supports first-turn speed
     lastPlannerResponse: { startMs: 10000, endMs: 14000, outputTokens: 600 },
   }, 14500);
   assert.equal(cumSpeed, 150); // 600 / 4s
+});
+
+test('Path A recovers from < 500ms pending state and updates speed when unclosed turn closes', () => {
+  const transcriptPath = path.join(tempDir, 'pending-recovery.jsonl');
+  const agy = {
+    transcript_path: transcriptPath,
+    context_window: {
+      total_output_tokens: 500,
+      current_usage: {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  };
+
+  // 1. First render at 300ms (< 500ms) -> returns null and marks pending
+  assert.equal(getOutputSpeed(agy, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
+  }, 10300), null);
+
+  // 2. Second render at 2000ms (still open, same usageKey & startMs) -> recovers and computes 250 tok/s
+  assert.equal(getOutputSpeed(agy, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
+  }, 12000), 250);
+
+  // 3. Turn closes at 15000ms (5000ms duration, same usageKey & startMs) -> recalculates to 100 tok/s
+  assert.equal(getOutputSpeed(agy, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 15000, outputTokens: 500 },
+  }, 15500), 100);
+
+  // 4. Subsequent render on closed turn holds 100 tok/s
+  assert.equal(getOutputSpeed(agy, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 15000, outputTokens: 500 },
+  }, 20000), 100);
+});
+
+test('prunes speed-cache directory to at most 32 files', () => {
+  for (let i = 0; i < 36; i += 1) {
+    getOutputSpeed({
+      transcript_path: path.join(tempDir, `sess-${i}.jsonl`),
+      context_window: { current_usage: { input_tokens: 100, output_tokens: 200 } },
+      cost: { total_api_duration_ms: 1000 },
+    }, tempDir);
+  }
+  const cacheDir = path.join(tempDir, 'speed-cache');
+  const files = fs.readdirSync(cacheDir).filter(f => f.endsWith('.json'));
+  assert.ok(files.length <= 32, `expected <= 32 speed cache files, got ${files.length}`);
+});
+
+test('non-first-turn open turn > 120s or interrupted holds previous speed instead of using now - startMs', () => {
+  const transcriptPath = path.join(tempDir, 'open-turn-guard.jsonl');
+  const makeAgy = (input, output, totalOutput) => ({
+    transcript_path: transcriptPath,
+    context_window: {
+      total_output_tokens: totalOutput,
+      current_usage: {
+        input_tokens: input,
+        output_tokens: output,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  });
+
+  // Turn 1 closes cleanly at 100 tok/s (500 tokens / 5s)
+  const turn1Speed = getOutputSpeed(makeAgy(1000, 500, 500), tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 15000, outputTokens: 500 },
+  }, 15500);
+  assert.equal(turn1Speed, 100);
+
+  // Turn 2 has endMs: null and now - startMs > 120s (e.g. user idle/reconnect): must hold 100, NOT 600 / 200 = 3.0!
+  const staleTurn2Speed = getOutputSpeed(makeAgy(1500, 600, 1100), tempDir, {
+    lastPlannerResponse: { startMs: 20000, endMs: null, outputTokens: 600 },
+  }, 220000);
+  assert.equal(staleTurn2Speed, 100);
+
+  const cacheStateAfterStale = JSON.parse(fs.readFileSync(getSpeedCachePath(tempDir, transcriptPath), 'utf8'));
+  assert.equal(cacheStateAfterStale.pending, false);
+
+  // Turn 3 has endMs: null and interrupted: true within 120s: must hold 100, NOT 400 / 10 = 40!
+  const interruptedSpeed = getOutputSpeed(makeAgy(2000, 400, 1500), tempDir, {
+    lastPlannerResponse: { startMs: 230000, endMs: null, outputTokens: 400, interrupted: true },
+  }, 240000);
+  assert.equal(interruptedSpeed, 100);
+
+  const cacheStateAfterInterrupt = JSON.parse(fs.readFileSync(getSpeedCachePath(tempDir, transcriptPath), 'utf8'));
+  assert.equal(cacheStateAfterInterrupt.pending, false);
+
+  // Fresh session with interrupted open turn returns null and sets pending: false
+  const freshInterruptedPath = path.join(tempDir, 'fresh-interrupted.jsonl');
+  const freshSpeed = getOutputSpeed({ ...makeAgy(1000, 300, 300), transcript_path: freshInterruptedPath }, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 300, interrupted: true },
+  }, 15000);
+  assert.equal(freshSpeed, null);
+  const freshCache = JSON.parse(fs.readFileSync(getSpeedCachePath(tempDir, freshInterruptedPath), 'utf8'));
+  assert.equal(freshCache.pending, false);
+});
+
+test('cumulative-only total_output_tokens preserves turnBaselineOutput across <500ms pending and open->closed recalculation', () => {
+  const transcriptPath = path.join(tempDir, 'cumulative-baseline.jsonl');
+  const cumAgy = (input, totalOutput) => ({
+    transcript_path: transcriptPath,
+    context_window: {
+      total_output_tokens: totalOutput,
+      current_usage: {
+        input_tokens: input,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  });
+
+  // Scenario 1: Turn 1 with only total_output_tokens: 500
+  // t = 200ms -> null (pending: true)
+  assert.equal(getOutputSpeed(cumAgy(1000, 500), tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
+  }, 10200), null);
+
+  // t = 2200ms -> recovers 500 / 2.2s
+  const openSpeed = getOutputSpeed(cumAgy(1000, 500), tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
+  }, 12200);
+  assert.equal(openSpeed?.toFixed(2), (500 / 2.2).toFixed(2));
+
+  // t = 5000ms closed -> recalculates cleanly to 500 / 5s = 100 tok/s (not 0!)
+  assert.equal(getOutputSpeed(cumAgy(1000, 500), tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 15000, outputTokens: 500 },
+  }, 15500), 100);
+
+  // Scenario 2: Turn 2 with total_output_tokens: 1100 (baseline from Turn 1 = 500)
+  // First check < 500ms (pending: true, holds 100)
+  assert.equal(getOutputSpeed(cumAgy(2000, 1100), tempDir, {
+    lastPlannerResponse: { startMs: 20000, endMs: null, outputTokens: 600 },
+  }, 20200), 100);
+
+  // Closes with 3000ms duration -> uses 1100 - 500 = 600 => 200 tok/s
+  assert.equal(getOutputSpeed(cumAgy(2000, 1100), tempDir, {
+    lastPlannerResponse: { startMs: 20000, endMs: 23000, outputTokens: 600 },
+  }, 23500), 200);
+});
+
+test('formatChildModelSpeeds formats unicode, Nerd Font, and ASCII outputs cleanly', () => {
+  assert.equal(formatChildModelSpeeds([]), null);
+  assert.equal(formatChildModelSpeeds(null), null);
+  assert.equal(formatChildModelSpeeds([{ model: 'Hydro', speed: 0 }]), null);
+
+  assert.equal(
+    formatChildModelSpeeds([{ model: 'Hydro', speed: 215.44 }], { unicode: true, useNerd: false }),
+    '⚡ Hydro: 215.4 tok/s'
+  );
+  assert.equal(
+    formatChildModelSpeeds(
+      [{ model: 'Hydro', speed: 215.4 }, { model: 'Flash', speed: 310.2 }],
+      { unicode: true, useNerd: false }
+    ),
+    '⚡ Hydro: 215.4 tok/s · Flash: 310.2 tok/s'
+  );
+  assert.equal(
+    formatChildModelSpeeds([{ model: 'Hydro', speed: 215.4 }], { unicode: false, useNerd: true }),
+    '\uf0e7 Hydro: 215.4 tok/s'
+  );
+  assert.equal(
+    formatChildModelSpeeds(
+      [{ model: 'Hydro', speed: 215.4 }, { model: 'Flash', speed: 310.2 }],
+      { unicode: false, useNerd: false }
+    ),
+    '[sub] Hydro: 215.4 tok/s / Flash: 310.2 tok/s'
+  );
+});
+
+test('formatTtft formats sub-second ms and >=1s seconds in en and zh, and handles invalid inputs', () => {
+  assert.equal(formatTtft(null), null);
+  assert.equal(formatTtft(undefined), null);
+  assert.equal(formatTtft(-0.5), null);
+  assert.equal(formatTtft(Number.NaN), null);
+
+  assert.equal(formatTtft(0.42, 'en'), 'ttft 420ms');
+  assert.equal(formatTtft(0.42, 'zh'), '首字 420ms');
+  assert.equal(formatTtft(0, 'en'), 'ttft 0ms');
+  assert.equal(formatTtft(10.82, 'en'), 'ttft 10.8s');
+  assert.equal(formatTtft(10.82, 'zh'), '首字 10.8s');
+});
+
+test('formatChildModelSpeeds enriches with modelPerf avgSpeed + avgTtftSec and falls back cleanly', () => {
+  const modelPerf = {
+    Hydro: { model: 'Hydro', avgSpeed: 260.9, avgTtftSec: 5.528 },
+    Flash: { model: 'Flash', avgSpeed: 340.1, avgTtftSec: 0.42 },
+  };
+
+  assert.equal(
+    formatChildModelSpeeds(
+      [{ model: 'Hydro', speed: 180.0 }, { model: 'Flash', speed: 300.0 }],
+      { unicode: true, useNerd: false, modelPerf, lang: 'zh' }
+    ),
+    '⚡ Hydro: 260.9 tok/s (首字 5.5s) · Flash: 340.1 tok/s (首字 420ms)'
+  );
+
+  assert.equal(
+    formatChildModelSpeeds(
+      [{ model: 'Hydro', speed: 180.0 }, { model: 'Opus', speed: 95.2 }],
+      { unicode: false, useNerd: false, modelPerf, lang: 'en' }
+    ),
+    '[sub] Hydro: 260.9 tok/s (ttft 5.5s) / Opus: 95.2 tok/s'
+  );
+
+  // Even when child instantaneous speed is 0 (newly started), modelPerf avgSpeed surfaces it
+  assert.equal(
+    formatChildModelSpeeds(
+      [{ model: 'Hydro', speed: 0 }],
+      { unicode: true, useNerd: true, modelPerf, lang: 'en' }
+    ),
+    '\uf0e7 Hydro: 260.9 tok/s (ttft 5.5s)'
+  );
+
+  // includeTtft: false omits TTFT suffix for narrow-terminal degradation
+  assert.equal(
+    formatChildModelSpeeds(
+      [{ model: 'Hydro', speed: 180.0 }, { model: 'Flash', speed: 300.0 }],
+      { unicode: true, useNerd: false, modelPerf, lang: 'zh', includeTtft: false }
+    ),
+    '⚡ Hydro: 260.9 tok/s · Flash: 340.1 tok/s'
+  );
+
+  // Filters dirty child speeds > 5000 tok/s
+  assert.equal(
+    formatChildModelSpeeds(
+      [{ model: 'Hydro', speed: 18000 }, { model: 'Flash', speed: 300.0 }],
+      { unicode: true, useNerd: false }
+    ),
+    '⚡ Flash: 300.0 tok/s'
+  );
+});
+
+test('getOutputSpeed invalidates stale speed on model switch, rejects >5000 dirty cache, and skips steady-state disk writes', () => {
+  const transcriptPath = path.join(tempDir, 'model-switch.jsonl');
+  const makeFrame = (model, input, output, totalOut) => ({
+    transcript_path: transcriptPath,
+    model: { display_name: model },
+    context_window: {
+      total_output_tokens: totalOut,
+      current_usage: { input_tokens: input, output_tokens: output },
+    },
+  });
+
+  // Seed dirty > 5000 cache entry -> rejected and recomputed cleanly
+  const cacheFile = getSpeedCachePath(tempDir, transcriptPath);
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  fs.writeFileSync(cacheFile, JSON.stringify({
+    apiDurationMs: 1000,
+    usageKey: '1000:500:0:0:500',
+    modelKey: 'Carbon',
+    speed: 25000,
+    plannerStartMs: 10000,
+    plannerEndMs: 10020,
+    pending: false,
+  }));
+
+  const s1 = getOutputSpeed(makeFrame('Gemini 4 Carbon (High)', 1000, 500, 500), tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 15000, outputTokens: 500 },
+  }, 15500);
+  assert.equal(s1, 100);
+
+  // Switching to Opus on an interrupted/open turn must NOT reuse Carbon's 100 tok/s
+  const sSwitch = getOutputSpeed(makeFrame('Claude Opus 4.6', 1200, 200, 700), tempDir, {
+    lastPlannerResponse: { startMs: 20000, endMs: null, outputTokens: 200, interrupted: true },
+  }, 25000);
+  assert.equal(sSwitch, null);
+
+  // Steady-state > 120s open turn writes once then skips writeState on repeated identical renders
+  const stalePath = path.join(tempDir, 'steady-120s.jsonl');
+  const staleAgy = {
+    transcript_path: stalePath,
+    model: { display_name: 'Gemini 4 Carbon (High)' },
+    context_window: { total_output_tokens: 400, current_usage: { input_tokens: 500, output_tokens: 400 } },
+  };
+  getOutputSpeed(staleAgy, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 14000, outputTokens: 400 },
+  }, 14500);
+  // First >120s open turn transitions pending: false and writes
+  assert.equal(getOutputSpeed({
+    ...staleAgy,
+    context_window: { total_output_tokens: 700, current_usage: { input_tokens: 800, output_tokens: 300 } },
+  }, tempDir, {
+    lastPlannerResponse: { startMs: 20000, endMs: null, outputTokens: 300 },
+  }, 200000), 100);
+  const staleCacheFile = getSpeedCachePath(tempDir, stalePath);
+  const tOld = new Date(Date.now() - 60000);
+  fs.utimesSync(staleCacheFile, tOld, tOld);
+  const oldMtime = fs.statSync(staleCacheFile).mtimeMs;
+
+  // Repeated idle render with same usageKey and pending === false must skip writeState
+  assert.equal(getOutputSpeed({
+    ...staleAgy,
+    context_window: { total_output_tokens: 700, current_usage: { input_tokens: 800, output_tokens: 300 } },
+  }, tempDir, {
+    lastPlannerResponse: { startMs: 20000, endMs: null, outputTokens: 300 },
+  }, 250000), 100);
+  assert.equal(fs.statSync(staleCacheFile).mtimeMs, oldMtime);
+
+  // Path B model switch clears previous model's speed when apiDurationMs hasn't advanced
+  const pathBFile = path.join(tempDir, 'pathb-switch.jsonl');
+  getOutputSpeed({
+    transcript_path: pathBFile,
+    model: { id: 'gemini-4-carbon-high' },
+    context_window: { current_usage: { input_tokens: 100, output_tokens: 0 } },
+    cost: { total_api_duration_ms: 1000 },
+  }, tempDir);
+  assert.equal(getOutputSpeed({
+    transcript_path: pathBFile,
+    model: { id: 'gemini-4-carbon-high' },
+    context_window: { current_usage: { input_tokens: 100, output_tokens: 400 } },
+    cost: { total_api_duration_ms: 5000 },
+  }, tempDir), 100);
+  assert.equal(getOutputSpeed({
+    transcript_path: pathBFile,
+    model: { id: 'claude-opus-4-6' },
+    context_window: { current_usage: { input_tokens: 100, output_tokens: 400 } },
+    cost: { total_api_duration_ms: 5000 },
+  }, tempDir), null);
 });
 

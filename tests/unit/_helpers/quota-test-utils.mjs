@@ -3,8 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
-const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-test-data-'));
-process.env.AGY_HUD_DATA_DIR = testDataDir;
+const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-test-data-'));
+process.env.AGY_PULSE_DATA_DIR = testDataDir;
 
 const require = createRequire(import.meta.url);
 delete require.cache[require.resolve('../../../runtime/quota.js')];
@@ -25,7 +25,7 @@ try {
 
 export function withEnv(overrides, fn) {
   const fullOverrides = {
-    AGY_HUD_DATA_DIR: undefined,
+    AGY_PULSE_DATA_DIR: undefined,
     ...overrides,
   };
   const snapshot = {};

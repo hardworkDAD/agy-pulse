@@ -161,13 +161,13 @@ function normalizeKeyringTokenResult(token) {
 function resolveTokenTempPath(roots = getAntigravityRoots()) {
   const candidates = (Array.isArray(roots) ? roots : [])
     .filter(Boolean)
-    .map(root => path.join(root, 'agy-hud-token.json'));
+    .map(root => path.join(root, 'agy-pulse-token.json'));
 
   // Always use the first candidate as the canonical path so that read and
   // write operations always target the same file, regardless of whether it
   // already exists.
   if (candidates.length > 0) return candidates[0];
-  return resolveAntigravityPath('agy-hud-token.json');
+  return resolveAntigravityPath('agy-pulse-token.json');
 }
 
 function normalizeExpiryDate(value) {
@@ -214,15 +214,31 @@ function parseTokenPayload(raw) {
   return null;
 }
 
+function parseKeyringSecret(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const parsed = decodeKeyringRaw(trimmed);
+  if (!parsed) return null;
+  return typeof parsed === 'string'
+    ? (!/\s/.test(parsed) ? { accessToken: parsed } : null)
+    : parseTokenPayload(parsed);
+}
+
 function writeWindowsTokenTemp(tokens, roots = getAntigravityRoots()) {
   if (!Array.isArray(tokens) || tokens.length === 0) return;
   const tmp = resolveTokenTempPath(roots);
-  const staging = `${tmp}.tmp.${process.pid}`;
+  const staging = `${tmp}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
   try {
-    fs.mkdirSync(path.dirname(tmp), { recursive: true });
+    fs.mkdirSync(path.dirname(tmp), { recursive: true, mode: 0o700 });
     // mode 0o600 — the file holds OAuth access tokens, so keep permissions
     // narrow even though this is only a short-lived mirror.
-    fs.writeFileSync(staging, JSON.stringify({ tokens, writtenAt: Date.now() }), { mode: 0o600 });
+    fs.writeFileSync(staging, JSON.stringify({ tokens, writtenAt: Date.now() }), { mode: 0o600, flag: 'wx' });
+    try {
+      if (fs.lstatSync(tmp).isSymbolicLink()) {
+        fs.unlinkSync(tmp);
+      }
+    } catch { /* target does not exist */ }
     fs.renameSync(staging, tmp);
   } catch {
     try { fs.unlinkSync(staging); } catch {}
@@ -272,7 +288,8 @@ function readDiskCandidateTokens(roots = getAntigravityRoots(), prioritizeAfterM
  * Checks the short-lived JSON token mirror against on-disk credential files and
  * google_accounts.json so account switches on disk are never masked by a stale mirror.
  */
-function readFreshMirrorOrDiskToken(roots, defaultSourceFormat) {
+function readFreshMirrorOrDiskToken(roots, defaultSourceFormat, options = {}) {
+  const { noWriteMirror = false } = options;
   const tmp = resolveTokenTempPath(roots);
   let raw;
   let mirrorStat;
@@ -298,7 +315,8 @@ function readFreshMirrorOrDiskToken(roots, defaultSourceFormat) {
   const accountsNewer = Boolean(accountsState && accountsState.mtimeMs > mirrorTime);
 
   const diskTokens = readDiskCandidateTokens(roots, mirrorTime);
-  const diskNewer = diskTokens.some(t => t.mtimeMs > mirrorTime);
+  const usableDiskTokens = diskTokens.filter(t => !isTokenExpired(t));
+  const diskNewer = usableDiskTokens.some(t => t.mtimeMs > mirrorTime);
 
   if (!accountMismatch && !accountsNewer && !diskNewer) {
     return {
@@ -308,24 +326,38 @@ function readFreshMirrorOrDiskToken(roots, defaultSourceFormat) {
   }
 
   // Mirror is stale or shadowed by an account switch / newer disk credential.
-  const matchingDisk = diskTokens.find(t => {
-    if (!accountsState?.activeEmail || !t.email) return true;
-    return t.email.toLowerCase() === accountsState.activeEmail.toLowerCase();
+  // Only allow non-expired disk tokens that are strictly newer than the mirror
+  // OR explicitly match the active account email, preventing stale email-less
+  // oauth_creds.json files from masking the system keyring.
+  const activeEmailLower = accountsState?.activeEmail ? accountsState.activeEmail.toLowerCase() : null;
+  const matchingDisk = usableDiskTokens.find(t => {
+    const isNewerThanMirror = t.mtimeMs > mirrorTime;
+    const tokenEmailLower = t.email ? t.email.toLowerCase() : null;
+    const matchesActiveEmail = Boolean(activeEmailLower && tokenEmailLower && tokenEmailLower === activeEmailLower);
+    if (!isNewerThanMirror && !matchesActiveEmail) return false;
+    if (activeEmailLower && tokenEmailLower) {
+      return tokenEmailLower === activeEmailLower;
+    }
+    return true;
   });
 
   if (matchingDisk) {
     const { mtimeMs: _mtimeMs, ...cleanToken } = matchingDisk;
-    const mirrorEntry = {
-      accessToken: cleanToken.accessToken,
-      expiry: cleanToken.expiry,
-      sourceFormat: cleanToken.sourceFormat,
-      ...(cleanToken.email ? { email: cleanToken.email } : {}),
-    };
-    writeWindowsTokenTemp([mirrorEntry], roots);
+    if (!noWriteMirror) {
+      const mirrorEntry = {
+        accessToken: cleanToken.accessToken,
+        expiry: cleanToken.expiry,
+        sourceFormat: cleanToken.sourceFormat,
+        ...(cleanToken.email ? { email: cleanToken.email } : {}),
+      };
+      writeWindowsTokenTemp([mirrorEntry], roots);
+    }
     return { hit: true, token: cleanToken };
   }
 
-  clearTokenTemp(roots);
+  if (!noWriteMirror) {
+    clearTokenTemp(roots);
+  }
   return { hit: false, token: null };
 }
 
@@ -350,6 +382,18 @@ function buildWindowsCredentialScript() {
     '"@',
     `$targets=@(${targets})`,
     '$tokens=@()',
+    'function Get-JwtEmail($jwt){',
+    '  if(-not $jwt -or ($jwt -isnot [string])){ return $null }',
+    '  $parts=$jwt.Split(".")',
+    '  if($parts.Length -ne 3){ return $null }',
+    '  try {',
+    '    $p=$parts[1].Replace("-","+").Replace("_","/")',
+    '    switch($p.Length % 4){ 2 { $p+="==" } 3 { $p+="=" } }',
+    '    $json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json',
+    '    if($json.email -and $json.email.Contains("@")){ return $json.email }',
+    '  } catch {}',
+    '  return $null',
+    '}',
     'foreach($target in $targets){',
     '  $p=[IntPtr]::Zero',
     '  if([WC]::CredRead($target,1,0,[ref]$p)){',
@@ -360,13 +404,31 @@ function buildWindowsCredentialScript() {
     '        [Runtime.InteropServices.Marshal]::Copy($c.Blob,$bytes,0,$c.BlobSize)',
     '        foreach($enc in @([Text.Encoding]::UTF8,[Text.Encoding]::Unicode)){',
     '          try {',
-    '            $o=$enc.GetString($bytes)|ConvertFrom-Json',
+    '            $rawText=$enc.GetString($bytes).Trim()',
+    '            if($rawText.StartsWith("go-keyring-base64:")){',
+    '              $rawText=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($rawText.Substring(18)))',
+    '            }',
+    '            $o=$rawText|ConvertFrom-Json',
     '            $tok=$o.token',
+    '            $email=$null',
+    '            if($o.id_token_email -and $o.id_token_email.Contains("@")){ $email=$o.id_token_email }',
+    '            elseif($o.email -and $o.email.Contains("@")){ $email=$o.email }',
+    '            elseif($tok -and $tok.email -and $tok.email.Contains("@")){ $email=$tok.email }',
+    '            else {',
+    '              $idTok=if($o.id_token){ $o.id_token } elseif($tok -and $tok.id_token){ $tok.id_token } else { $null }',
+    '              $email=Get-JwtEmail $idTok',
+    '            }',
     '            if($tok -and $tok.access_token){',
-    '              $tokens += [pscustomobject]@{ accessToken=$tok.access_token; expiry=$tok.expiry }',
+    '              $exp=if($tok.expiry){ $tok.expiry } elseif($tok.expiry_date){ $tok.expiry_date } elseif($o.expiry){ $o.expiry } else { $o.expiry_date }',
+    '              $entry=[ordered]@{ accessToken=$tok.access_token; expiry=$exp }',
+    '              if($email){ $entry.email=$email }',
+    '              $tokens += [pscustomobject]$entry',
     '              break',
     '            } elseif($o.access_token){',
-    '              $tokens += [pscustomobject]@{ accessToken=$o.access_token; expiry=$o.expiry }',
+    '              $exp=if($o.expiry){ $o.expiry } else { $o.expiry_date }',
+    '              $entry=[ordered]@{ accessToken=$o.access_token; expiry=$exp }',
+    '              if($email){ $entry.email=$email }',
+    '              $tokens += [pscustomobject]$entry',
     '              break',
     '            }',
     '          } catch {}',
@@ -382,7 +444,7 @@ function buildWindowsCredentialScript() {
   ].join('\n');
 }
 
-function readWindowsCredentialTokens(platform = process.platform, roots = getAntigravityRoots()) {
+function readWindowsCredentialTokens(platform = process.platform, roots = getAntigravityRoots(), options = {}) {
   if (platform !== 'win32') return null;
 
   try {
@@ -402,10 +464,21 @@ function readWindowsCredentialTokens(platform = process.platform, roots = getAnt
       stdio: ['ignore', 'pipe', 'ignore'],
     });
     const parsed = JSON.parse(raw.trim() || '{"tokens":[]}');
-    const valid = selectUsableTokens(parsed.tokens, Date.now())
-      .map(token => ({ ...token, sourceFormat: 'windows-credential' }));
+    const normalizedTokens = (Array.isArray(parsed.tokens) ? parsed.tokens : []).map(token => ({
+      ...token,
+      expiry: normalizeExpiryDate(token?.expiry ?? token?.expiry_date),
+    }));
+    const valid = selectUsableTokens(normalizedTokens, Date.now())
+      .map(token => ({
+        accessToken: token.accessToken,
+        expiry: token.expiry,
+        sourceFormat: 'windows-credential',
+        ...(typeof token.email === 'string' && token.email.includes('@') ? { email: token.email } : {}),
+      }));
     if (valid.length === 0) return null;
-    writeWindowsTokenTemp(valid, roots);
+    if (!options.noWriteMirror) {
+      writeWindowsTokenTemp(valid, roots);
+    }
     return { ...tokenResultFromTokens(valid), sourceFormat: 'windows-credential' };
   } catch {
     return null;
@@ -428,14 +501,16 @@ function readWindowsCredentialTokens(platform = process.platform, roots = getAnt
  * @param {string} [platform]
  * @returns {{ accessToken: string, expiry?: string, sourceFormat?: string, all: Array<{ accessToken: string, expiry?: string }> } | null}
  */
-function readLinuxKeyringTokens(platform = process.platform, roots = getAntigravityRoots()) {
-  if (platform !== 'linux') return null;
+const LINUX_SECRET_TOOL_CANDIDATES = [
+  [LINUX_KEYRING_SERVICE, LINUX_KEYRING_USERNAME],
+];
 
+function readLinuxKeyringViaPython(execFn, resolveExe) {
   try {
-    const pythonPath = resolveSafeExecutable('python3') || resolveSafeExecutable('python');
+    const pythonPath = resolveExe('python3') || resolveExe('python');
     if (!pythonPath) return null;
 
-    const raw = execFileSync(pythonPath, [
+    const raw = execFn(pythonPath, [
       '-c',
       `import keyring; print(keyring.get_password(${JSON.stringify(LINUX_KEYRING_SERVICE)}, ${JSON.stringify(LINUX_KEYRING_USERNAME)}) or '')`,
     ], {
@@ -444,33 +519,58 @@ function readLinuxKeyringTokens(platform = process.platform, roots = getAntigrav
       stdio: ['ignore', 'pipe', 'ignore'],
     });
 
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-
-    const parsed = decodeKeyringRaw(trimmed);
-    if (!parsed) return null;
-
-    const token = typeof parsed === 'string'
-      ? (!/\s/.test(parsed) ? { accessToken: parsed } : null)
-      : parseTokenPayload(parsed);
-    if (!token) return null;
-
-    // Mirror into the shared temp cache so subsequent statusline renders
-    // do not need to re-spawn python3 (skip mirroring already-expired tokens).
-    const tokens = [{
-      accessToken: token.accessToken,
-      expiry: token.expiry,
-      sourceFormat: 'linux-keyring',
-      ...(token.email ? { email: token.email } : {}),
-    }];
-    if (!isTokenExpired(token)) {
-      writeWindowsTokenTemp(tokens, roots);
-    }
-
-    return { ...token, sourceFormat: 'linux-keyring', all: tokens };
+    return parseKeyringSecret(raw);
   } catch {
     return null;
   }
+}
+
+function readLinuxKeyringViaSecretTool(execFn, resolveExe) {
+  try {
+    const secretTool = resolveExe('secret-tool');
+    if (!secretTool) return null;
+
+    for (const [svc, acc] of LINUX_SECRET_TOOL_CANDIDATES) {
+      try {
+        const raw = execFn(secretTool, ['lookup', 'service', svc, 'account', acc], {
+          encoding: 'utf8',
+          timeout: 2000,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        const token = parseKeyringSecret(raw);
+        if (token) return token;
+      } catch { /* try next candidate */ }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function readLinuxKeyringTokens(platform = process.platform, roots = getAntigravityRoots(), options = {}) {
+  if (platform !== 'linux') return null;
+
+  const execFn = options._execFileSync || execFileSync;
+  const resolveExe = options._resolveSafeExecutable || resolveSafeExecutable;
+
+  const token =
+    readLinuxKeyringViaPython(execFn, resolveExe) ||
+    readLinuxKeyringViaSecretTool(execFn, resolveExe);
+  if (!token) return null;
+
+  // Mirror into the shared temp cache so subsequent statusline renders
+  // do not need to re-spawn python3/secret-tool (skip mirroring already-expired tokens).
+  const tokens = [{
+    accessToken: token.accessToken,
+    expiry: token.expiry,
+    sourceFormat: 'linux-keyring',
+    ...(token.email ? { email: token.email } : {}),
+  }];
+  if (!options.noWriteMirror && !isTokenExpired(token)) {
+    writeWindowsTokenTemp(tokens, roots);
+  }
+
+  return { ...token, sourceFormat: 'linux-keyring', all: tokens };
 }
 
 /**
@@ -481,14 +581,16 @@ function readLinuxKeyringTokens(platform = process.platform, roots = getAntigrav
  * @param {string[]} [roots]
  * @returns {{ accessToken: string, expiry?: string, sourceFormat?: string, email?: string, all: Array<{ accessToken: string, expiry?: string, email?: string }> } | null}
  */
-function readMacosKeychainTokens(platform = process.platform, roots = getAntigravityRoots()) {
+function readMacosKeychainTokens(platform = process.platform, roots = getAntigravityRoots(), options = {}) {
   if (platform !== 'darwin') return null;
 
   try {
-    const securityPath = resolveSafeExecutable('security') || '/usr/bin/security';
-    if (!fs.existsSync(securityPath)) return null;
+    const execFn = options._execFileSync || execFileSync;
+    const resolveExe = options._resolveSafeExecutable || resolveSafeExecutable;
+    const securityPath = resolveExe('security') || '/usr/bin/security';
+    if (!options._execFileSync && !fs.existsSync(securityPath)) return null;
 
-    const raw = execFileSync(securityPath, [
+    const raw = execFn(securityPath, [
       'find-generic-password',
       '-s',
       KEYCHAIN_SERVICE,
@@ -501,12 +603,7 @@ function readMacosKeychainTokens(platform = process.platform, roots = getAntigra
       stdio: ['ignore', 'pipe', 'ignore'],
     });
 
-    const parsed = decodeKeyringRaw(raw);
-    if (!parsed) return null;
-
-    const token = typeof parsed === 'string'
-      ? (!/\s/.test(parsed) ? { accessToken: parsed } : null)
-      : parseTokenPayload(parsed);
+    const token = parseKeyringSecret(raw);
     if (!token) return null;
 
     const tokens = [{
@@ -515,6 +612,9 @@ function readMacosKeychainTokens(platform = process.platform, roots = getAntigra
       sourceFormat: 'macos-keychain',
       ...(token.email ? { email: token.email } : {}),
     }];
+    if (!options.noWriteMirror && !isTokenExpired(token)) {
+      writeWindowsTokenTemp(tokens, roots);
+    }
 
     return { ...token, sourceFormat: 'macos-keychain', all: tokens };
   } catch {
@@ -548,27 +648,66 @@ function probeMacosKeychainAvailability(platform = process.platform) {
  * @param {string} [platform]
  * @returns {{ available: boolean, reason?: string, python?: string, status?: number, stderr?: string } | null}
  */
-function probeLinuxKeyringAvailability(platform = process.platform) {
+function probeLinuxKeyringAvailability(platform = process.platform, options = {}) {
   if (platform !== 'linux') return null;
 
-  const pythonPath = resolveSafeExecutable('python3') || resolveSafeExecutable('python');
-  if (!pythonPath) return { available: false, reason: 'python-not-found' };
+  const execFn = options._execFileSync || execFileSync;
+  const resolveExe = options._resolveSafeExecutable || resolveSafeExecutable;
+  const pythonPath = resolveExe('python3') || resolveExe('python');
+  let pythonFailure = null;
 
+  if (pythonPath) {
+    try {
+      execFn(pythonPath, ['-c', 'import keyring'], {
+        encoding: 'utf8',
+        timeout: 3000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return { available: true, python: pythonPath };
+    } catch (error) {
+      pythonFailure = {
+        available: false,
+        reason: 'keyring-not-importable',
+        python: pythonPath,
+        status: typeof error.status === 'number' ? error.status : undefined,
+        stderr: error.stderr ? String(error.stderr).trim().slice(0, 200) : undefined,
+      };
+    }
+  } else {
+    pythonFailure = { available: false, reason: 'python-not-found' };
+  }
+
+  const secretToolPath = resolveExe('secret-tool');
+  if (secretToolPath) {
+    try {
+      execFn(secretToolPath, ['--version'], {
+        encoding: 'utf8',
+        timeout: 3000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return {
+        available: true,
+        secretTool: secretToolPath,
+        ...(pythonPath ? { python: pythonPath } : {}),
+      };
+    } catch { /* fall through to failure details */ }
+  }
+
+  return pythonFailure;
+}
+
+function clearStaleMirrorIfMismatched(roots, liveToken, noWriteMirror) {
+  if (noWriteMirror || !liveToken || !liveToken.accessToken) return;
+  const tmp = resolveTokenTempPath(roots);
   try {
-    execFileSync(pythonPath, ['-c', 'import keyring'], {
-      encoding: 'utf8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return { available: true, python: pythonPath };
-  } catch (error) {
-    return {
-      available: false,
-      reason: 'keyring-not-importable',
-      python: pythonPath,
-      status: typeof error.status === 'number' ? error.status : undefined,
-      stderr: error.stderr ? String(error.stderr).trim().slice(0, 200) : undefined,
-    };
+    if (!fs.existsSync(tmp)) return;
+    const raw = JSON.parse(fs.readFileSync(tmp, 'utf8'));
+    const primary = Array.isArray(raw?.tokens) ? raw.tokens[0] : null;
+    if (!primary || primary.accessToken !== liveToken.accessToken) {
+      clearTokenTemp(roots);
+    }
+  } catch {
+    clearTokenTemp(roots);
   }
 }
 
@@ -579,6 +718,8 @@ function readToken(options = {}) {
   const {
     platform = process.platform,
     roots = getAntigravityRoots(),
+    fast = false,
+    noWriteMirror = false,
     skipWindowsCredential = false,
     skipLinuxKeyring = false,
     skipKeychain = false,
@@ -588,50 +729,92 @@ function readToken(options = {}) {
   } = options;
 
   let expiredFallback = null;
+  const hasCustomKeychainReader = Boolean(options.keychainReader);
+  const hasCustomCredentialReader = Boolean(options.credentialReader);
+  const hasCustomKeyringReader = Boolean(options.keyringReader);
 
   // macOS: agy stores its OAuth token in macOS Keychain (login keychain).
-  // Keychain lookups via /usr/bin/security take ~13ms, so query live credentials
-  // directly without a disk cache mirror that would mask account switches.
-  if (platform === 'darwin' && !skipKeychain) {
-    const keychainToken = keychainReader(platform, roots);
-    if (keychainToken) {
-      if (!isTokenExpired(keychainToken)) return keychainToken;
-      expiredFallback = keychainToken;
+  // In fast mode (without an injected keychainReader), check the short-lived
+  // JSON mirror first to avoid spawning /usr/bin/security on every render.
+  if (platform === 'darwin') {
+    if (fast && !hasCustomKeychainReader) {
+      const mirrorResult = readFreshMirrorOrDiskToken(roots, 'macos-keychain', { noWriteMirror });
+      if (mirrorResult.hit) {
+        if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
+        expiredFallback = mirrorResult.token;
+      }
+    }
+
+    if (!skipKeychain) {
+      const keychainToken = keychainReader(platform, roots, { noWriteMirror });
+      if (keychainToken) {
+        if (!isTokenExpired(keychainToken)) return keychainToken;
+        expiredFallback = expiredFallback || keychainToken;
+      }
     }
   }
 
-  // Windows: agy stores its OAuth token in Credential Manager. Keep a short
-  // JSON mirror so normal statusline renders do not spawn PowerShell every time.
+  // Windows: agy stores its OAuth token in Credential Manager. Only check the
+  // short-lived JSON mirror first in fast mode without an injected reader;
+  // non-fast paths (--refresh, --diagnose) read live credentials first.
   if (platform === 'win32') {
-    const mirrorResult = readFreshMirrorOrDiskToken(roots, 'windows-credential');
-    if (mirrorResult.hit) {
-      if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
-      expiredFallback = expiredFallback || mirrorResult.token;
+    if (fast && !hasCustomCredentialReader) {
+      const mirrorResult = readFreshMirrorOrDiskToken(roots, 'windows-credential', { noWriteMirror });
+      if (mirrorResult.hit) {
+        if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
+        expiredFallback = expiredFallback || mirrorResult.token;
+      }
     }
 
     if (!skipWindowsCredential) {
-      const credentialToken = credentialReader(platform, roots);
+      const credentialToken = credentialReader(platform, roots, { noWriteMirror });
       if (credentialToken) {
-        if (!isTokenExpired(credentialToken)) return credentialToken;
+        if (!isTokenExpired(credentialToken)) {
+          clearStaleMirrorIfMismatched(roots, credentialToken, noWriteMirror);
+          return credentialToken;
+        }
         expiredFallback = expiredFallback || credentialToken;
+      }
+    }
+
+    if (!fast || hasCustomCredentialReader) {
+      const mirrorResult = readFreshMirrorOrDiskToken(roots, 'windows-credential', { noWriteMirror });
+      if (mirrorResult.hit) {
+        if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
+        expiredFallback = expiredFallback || mirrorResult.token;
       }
     }
   }
 
   // Linux: agy stores its OAuth token in the system keyring (D-Bus Secret
-  // Service). Check the short-lived JSON cache first; fall back to python3.
+  // Service). Only check the short-lived JSON cache first in fast mode without
+  // an injected reader; non-fast paths read live keyring first so account switches
+  // take effect immediately.
   if (platform === 'linux') {
-    const mirrorResult = readFreshMirrorOrDiskToken(roots, 'linux-keyring');
-    if (mirrorResult.hit) {
-      if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
-      expiredFallback = expiredFallback || mirrorResult.token;
+    if (fast && !hasCustomKeyringReader) {
+      const mirrorResult = readFreshMirrorOrDiskToken(roots, 'linux-keyring', { noWriteMirror });
+      if (mirrorResult.hit) {
+        if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
+        expiredFallback = expiredFallback || mirrorResult.token;
+      }
     }
 
     if (!skipLinuxKeyring) {
-      const keyringToken = normalizeKeyringTokenResult(keyringReader(platform, roots));
+      const keyringToken = normalizeKeyringTokenResult(keyringReader(platform, roots, { noWriteMirror }));
       if (keyringToken) {
-        if (!isTokenExpired(keyringToken)) return keyringToken;
+        if (!isTokenExpired(keyringToken)) {
+          clearStaleMirrorIfMismatched(roots, keyringToken, noWriteMirror);
+          return keyringToken;
+        }
         expiredFallback = expiredFallback || keyringToken;
+      }
+    }
+
+    if (!fast || hasCustomKeyringReader) {
+      const mirrorResult = readFreshMirrorOrDiskToken(roots, 'linux-keyring', { noWriteMirror });
+      if (mirrorResult.hit) {
+        if (!isTokenExpired(mirrorResult.token)) return mirrorResult.token;
+        expiredFallback = expiredFallback || mirrorResult.token;
       }
     }
   }
@@ -654,6 +837,16 @@ function anyTokenFileExists(roots = getAntigravityRoots()) {
   for (const candidate of getTokenCandidates(roots)) {
     try {
       if (fs.existsSync(candidate)) return true;
+    } catch { /* ignore */ }
+  }
+  return false;
+}
+
+function anyTokenMirrorExists(roots = getAntigravityRoots()) {
+  for (const root of (Array.isArray(roots) ? roots : [])) {
+    if (!root) continue;
+    try {
+      if (fs.existsSync(path.join(root, 'agy-pulse-token.json'))) return true;
     } catch { /* ignore */ }
   }
   return false;
@@ -699,4 +892,5 @@ module.exports = {
   probeMacosKeychainAvailability,
   readToken,
   anyTokenFileExists,
+  anyTokenMirrorExists,
 };

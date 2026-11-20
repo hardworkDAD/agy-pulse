@@ -109,7 +109,7 @@ describe('quota / token', () => {
 
   describe('readToken', () => {
     test('only accepts Antigravity token files from configured data roots', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-roots-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-roots-'));
       try {
         const home = path.join(tmp, 'home');
         const xdg = path.join(tmp, 'xdg');
@@ -143,7 +143,7 @@ describe('quota / token', () => {
     });
 
     test('falls back to ~/.gemini/oauth_creds.json when antigravity-cli token is missing', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-oauth-creds-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-oauth-creds-'));
       try {
         const home = path.join(tmp, 'home');
         fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -174,7 +174,7 @@ describe('quota / token', () => {
     });
 
     test('can skip Windows Credential Manager for statusline fast path', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-fast-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-fast-'));
       try {
         const home = path.join(tmp, 'home');
         fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -194,7 +194,7 @@ describe('quota / token', () => {
     });
 
     test('can read Windows Credential Manager when the fast path is not requested', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-credential-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-credential-'));
       try {
         const home = path.join(tmp, 'home');
         fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -224,7 +224,7 @@ describe('quota / token', () => {
       }
     });
     test('reads token from Linux Keyring when no token file exists', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-linux-keyring-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-linux-keyring-'));
       try {
         const home = path.join(tmp, 'home');
         fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -259,7 +259,7 @@ describe('quota / token', () => {
     });
 
     test('falls back to token file when Linux Keyring returns null', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-linux-fallback-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-linux-fallback-'));
       try {
         const home = path.join(tmp, 'home');
         fs.mkdirSync(path.join(home, '.gemini', 'antigravity-cli'), { recursive: true });
@@ -288,7 +288,7 @@ describe('quota / token', () => {
     });
 
     test('accepts raw Linux Keyring token strings', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-linux-raw-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-linux-raw-'));
       try {
         const home = path.join(tmp, 'home');
         fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -314,7 +314,7 @@ describe('quota / token', () => {
     });
 
     test('passes platform and roots arguments to keyringReader on Linux', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-linux-args-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-linux-args-'));
       try {
         const home = path.join(tmp, 'home');
         fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -346,7 +346,7 @@ describe('quota / token', () => {
     });
 
     test('prefers macOS Keychain reader over file tokens on darwin', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-darwin-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-darwin-'));
       try {
         const home = path.join(tmp, 'home');
         fs.mkdirSync(path.join(home, '.gemini', 'antigravity-cli'), { recursive: true });
@@ -382,13 +382,13 @@ describe('quota / token', () => {
     });
 
     test('macOS Keychain reader is not shadowed by stale temp token file', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-darwin-temp-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-darwin-temp-'));
       try {
         const home = path.join(tmp, 'home');
         const cliDir = path.join(home, '.gemini', 'antigravity-cli');
         fs.mkdirSync(cliDir, { recursive: true });
         fs.writeFileSync(
-          path.join(cliDir, 'agy-hud-token.json'),
+          path.join(cliDir, 'agy-pulse-token.json'),
           JSON.stringify({
             tokens: [{
               accessToken: 'stale-temp-token',
@@ -428,12 +428,12 @@ describe('quota / token', () => {
     });
 
     test('clearTokenTemp removes existing temporary token cache file', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-clear-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-clear-'));
       try {
         const home = path.join(tmp, 'home');
         const cliDir = path.join(home, '.gemini', 'antigravity-cli');
         fs.mkdirSync(cliDir, { recursive: true });
-        const tokenFile = path.join(cliDir, 'agy-hud-token.json');
+        const tokenFile = path.join(cliDir, 'agy-pulse-token.json');
         fs.writeFileSync(tokenFile, JSON.stringify({ tokens: [{ accessToken: 'stale' }] }));
 
         withEnv({
@@ -484,7 +484,7 @@ describe('quota / token', () => {
     });
 
     test('readToken skips Linux keyring and macOS keychain when skip flags are set', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-token-skip-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-skip-'));
       try {
         const cliDir = path.join(tmp, '.gemini', 'antigravity-cli');
         fs.mkdirSync(cliDir, { recursive: true });
@@ -517,15 +517,15 @@ describe('quota / token', () => {
       }
     });
 
-    test('disk credential newer than agy-hud-token.json mirror overrides stale mirror and refreshes it', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-mirror-fresh-'));
+    test('disk credential newer than agy-pulse-token.json mirror overrides stale mirror and refreshes it', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-mirror-fresh-'));
       try {
         const geminiDir = path.join(tmp, '.gemini');
         const cliDir = path.join(geminiDir, 'antigravity-cli');
         fs.mkdirSync(cliDir, { recursive: true });
 
         const oldTime = Date.now() - 60_000;
-        const mirrorPath = path.join(cliDir, 'agy-hud-token.json');
+        const mirrorPath = path.join(cliDir, 'agy-pulse-token.json');
         fs.writeFileSync(mirrorPath, JSON.stringify({
           tokens: [{
             accessToken: 'stale-account-a',
@@ -559,13 +559,13 @@ describe('quota / token', () => {
     });
 
     test('google_accounts.json account switch invalidates mirror even without disk token file', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-mirror-switch-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-mirror-switch-'));
       try {
         const geminiDir = path.join(tmp, '.gemini');
         const cliDir = path.join(geminiDir, 'antigravity-cli');
         fs.mkdirSync(cliDir, { recursive: true });
 
-        const mirrorPath = path.join(cliDir, 'agy-hud-token.json');
+        const mirrorPath = path.join(cliDir, 'agy-pulse-token.json');
         fs.writeFileSync(mirrorPath, JSON.stringify({
           tokens: [{
             accessToken: 'stale-account-a',
@@ -598,7 +598,7 @@ describe('quota / token', () => {
     });
 
     test('expired Linux keyring token does not shadow a valid non-expired disk token', () => {
-      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-expired-keyring-'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-expired-keyring-'));
       try {
         const cliDir = path.join(tmp, 'antigravity-cli');
         fs.mkdirSync(cliDir, { recursive: true });
@@ -630,6 +630,282 @@ describe('quota / token', () => {
       } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
       }
+    });
+
+    test('buildWindowsCredentialScript unwraps go-keyring-base64, expiry_date fallback, and email extraction', () => {
+      const script = quotaModule.tokenMod
+        ? quotaModule.tokenMod.buildWindowsCredentialScript()
+        : tokenModule.buildWindowsCredentialScript();
+      assert.match(script, /go-keyring-base64:/);
+      assert.match(script, /expiry_date/);
+      assert.match(script, /id_token_email/);
+      assert.match(script, /Get-JwtEmail/);
+    });
+
+    test('stale email-less oauth_creds.json does not shadow keyring when google_accounts.json switches account', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-stale-disk-mask-'));
+      try {
+        const geminiDir = path.join(tmp, '.gemini');
+        const cliDir = path.join(geminiDir, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+
+        // Old email-less oauth_creds.json from an older session
+        const oauthPath = path.join(geminiDir, 'oauth_creds.json');
+        fs.writeFileSync(oauthPath, JSON.stringify({
+          access_token: 'very-old-oauth-token',
+          expiry_date: Date.now() + 3600_000,
+        }));
+        const pastSec = (Date.now() - 120_000) / 1000;
+        fs.utimesSync(oauthPath, pastSec, pastSec);
+
+        // Mirror written more recently for account A
+        const mirrorPath = path.join(cliDir, 'agy-pulse-token.json');
+        fs.writeFileSync(mirrorPath, JSON.stringify({
+          tokens: [{
+            accessToken: 'mirror-a',
+            expiry: new Date(Date.now() + 3600_000).toISOString(),
+            sourceFormat: 'linux-keyring',
+            email: 'a@example.com',
+          }],
+          writtenAt: Date.now() - 10_000,
+        }));
+
+        // google_accounts.json switched to b@example.com
+        fs.writeFileSync(path.join(geminiDir, 'google_accounts.json'), JSON.stringify({
+          active: 'b@example.com',
+        }));
+
+        const tok = readToken({
+          platform: 'linux',
+          roots: [cliDir],
+          keyringReader: () => ({
+            accessToken: 'keyring-b',
+            sourceFormat: 'linux-keyring',
+            email: 'b@example.com',
+          }),
+        });
+        assert.equal(tok?.accessToken, 'keyring-b', 'stale email-less oauth_creds must not shadow keyring');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('readLinuxKeyringTokens falls back to secret-tool when python3 lacks keyring', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-secret-tool-'));
+      try {
+        const cliDir = path.join(tmp, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+        const payload = {
+          token: { access_token: 'secret-tool-token', expiry: new Date(Date.now() + 3600_000).toISOString() },
+          id_token_email: 'secret-tool@example.com',
+        };
+        const encoded = 'go-keyring-base64:' + Buffer.from(JSON.stringify(payload)).toString('base64');
+
+        const calls = [];
+        const tok = tokenModule.readLinuxKeyringTokens('linux', [cliDir], {
+          _resolveSafeExecutable: (name) => (name === 'secret-tool' ? '/usr/bin/secret-tool' : null),
+          _execFileSync: (cmd, args) => {
+            calls.push({ cmd, args });
+            return encoded;
+          },
+        });
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].cmd, '/usr/bin/secret-tool');
+        assert.deepEqual(calls[0].args, ['lookup', 'service', 'gemini', 'account', 'antigravity']);
+        assert.equal(tok?.accessToken, 'secret-tool-token');
+        assert.equal(tok?.email, 'secret-tool@example.com');
+        assert.equal(tok?.sourceFormat, 'linux-keyring');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('noWriteMirror: true prevents creating or deleting agy-pulse-token.json', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-nowrite-mirror-'));
+      try {
+        const geminiDir = path.join(tmp, '.gemini');
+        const cliDir = path.join(geminiDir, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+        const mirrorPath = path.join(cliDir, 'agy-pulse-token.json');
+
+        // 1) secret-tool / python keyring read with noWriteMirror: true must not write mirror
+        tokenModule.readLinuxKeyringTokens('linux', [cliDir], {
+          noWriteMirror: true,
+          _resolveSafeExecutable: (name) => (name === 'secret-tool' ? '/usr/bin/secret-tool' : null),
+          _execFileSync: () => JSON.stringify({ access_token: 'readonly-tok' }),
+        });
+        assert.equal(fs.existsSync(mirrorPath), false);
+
+        // 2) Stale mirror must NOT be deleted when readToken runs with noWriteMirror: true
+        fs.writeFileSync(mirrorPath, JSON.stringify({
+          tokens: [{
+            accessToken: 'existing-mirror-a',
+            expiry: new Date(Date.now() + 3600_000).toISOString(),
+            email: 'a@example.com',
+          }],
+          writtenAt: Date.now() - 60_000,
+        }));
+        fs.writeFileSync(path.join(geminiDir, 'google_accounts.json'), JSON.stringify({
+          active: 'b@example.com',
+        }));
+
+        const tok = readToken({
+          platform: 'linux',
+          roots: [cliDir],
+          noWriteMirror: true,
+          keyringReader: () => ({ accessToken: 'live-b', sourceFormat: 'linux-keyring', email: 'b@example.com' }),
+        });
+        assert.equal(tok?.accessToken, 'live-b');
+        assert.equal(fs.existsSync(mirrorPath), true, 'noWriteMirror must not delete existing mirror');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('macOS fast: true hits fresh mirror without calling security, while injected keychainReader stays live', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-darwin-fast-'));
+      try {
+        const cliDir = path.join(tmp, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+        const mirrorPath = path.join(cliDir, 'agy-pulse-token.json');
+
+        // Populate mirror via readMacosKeychainTokens
+        const fromSecurity = tokenModule.readMacosKeychainTokens('darwin', [cliDir], {
+          _resolveSafeExecutable: () => '/usr/bin/security',
+          _execFileSync: () => JSON.stringify({
+            token: { access_token: 'darwin-live-tok', expiry: new Date(Date.now() + 3600_000).toISOString() },
+            id_token_email: 'mac@example.com',
+          }),
+        });
+        assert.equal(fromSecurity?.accessToken, 'darwin-live-tok');
+        assert.equal(fs.existsSync(mirrorPath), true, 'macOS keychain read should populate mirror');
+
+        // fast: true without custom keychainReader returns mirrored token directly
+        const fastTok = readToken({
+          platform: 'darwin',
+          roots: [cliDir],
+          fast: true,
+        });
+        assert.equal(fastTok?.accessToken, 'darwin-live-tok');
+        assert.equal(fastTok?.sourceFormat, 'macos-keychain');
+
+        // fast: true WITH injected keychainReader still uses injected reader
+        const injectedTok = readToken({
+          platform: 'darwin',
+          roots: [cliDir],
+          fast: true,
+          keychainReader: () => ({
+            accessToken: 'injected-live-tok',
+            sourceFormat: 'macos-keychain',
+          }),
+        });
+        assert.equal(injectedTok?.accessToken, 'injected-live-tok');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('writeWindowsTokenTemp unlinks symlinked agy-pulse-token.json before atomic rename', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-token-symlink-'));
+      try {
+        const cliDir = path.join(tmp, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+        const targetFile = path.join(tmp, 'outside-target.txt');
+        fs.writeFileSync(targetFile, 'KEEP_INTACT');
+        const mirrorPath = path.join(cliDir, 'agy-pulse-token.json');
+        fs.symlinkSync(targetFile, mirrorPath);
+
+        tokenModule.writeWindowsTokenTemp([{ accessToken: 'safe-tok' }], [cliDir]);
+        assert.equal(fs.readFileSync(targetFile, 'utf8'), 'KEEP_INTACT');
+        assert.equal(fs.lstatSync(mirrorPath).isSymbolicLink(), false);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('non-fast readToken reads live Linux keyring and Windows credential manager before mirror', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-live-first-'));
+      try {
+        const cliDir = path.join(tmp, 'antigravity-cli');
+        fs.mkdirSync(cliDir, { recursive: true });
+        const mirrorPath = path.join(cliDir, 'agy-pulse-token.json');
+
+        fs.writeFileSync(mirrorPath, JSON.stringify({
+          tokens: [{
+            accessToken: 'stale-mirror-token',
+            expiry: new Date(Date.now() + 3600_000).toISOString(),
+            sourceFormat: 'linux-keyring',
+            email: 'old@example.com',
+          }],
+          writtenAt: Date.now(),
+        }));
+
+        const linuxLive = readToken({
+          platform: 'linux',
+          fast: false,
+          roots: [cliDir],
+          keyringReader: () => ({
+            accessToken: 'live-linux-token',
+            expiry: new Date(Date.now() + 3600_000).toISOString(),
+            sourceFormat: 'linux-keyring',
+            email: 'new@example.com',
+          }),
+        });
+        assert.equal(linuxLive?.accessToken, 'live-linux-token');
+        assert.equal(linuxLive?.email, 'new@example.com');
+
+        fs.writeFileSync(mirrorPath, JSON.stringify({
+          tokens: [{
+            accessToken: 'stale-win-mirror',
+            expiry: new Date(Date.now() + 3600_000).toISOString(),
+            sourceFormat: 'windows-credential',
+            email: 'old@example.com',
+          }],
+          writtenAt: Date.now(),
+        }));
+
+        const winLive = readToken({
+          platform: 'win32',
+          fast: false,
+          roots: [cliDir],
+          credentialReader: () => ({
+            accessToken: 'live-win-token',
+            expiry: new Date(Date.now() + 3600_000).toISOString(),
+            sourceFormat: 'windows-credential',
+            email: 'new@example.com',
+          }),
+        });
+        assert.equal(winLive?.accessToken, 'live-win-token');
+        assert.equal(winLive?.email, 'new@example.com');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('probeLinuxKeyringAvailability falls back to secret-tool --version when python keyring fails', () => {
+      const okSecretTool = tokenModule.probeLinuxKeyringAvailability('linux', {
+        _resolveSafeExecutable: (name) => (name === 'secret-tool' ? '/usr/bin/secret-tool' : '/usr/bin/python3'),
+        _execFileSync: (cmd, args) => {
+          if (cmd === '/usr/bin/python3') {
+            const err = new Error('No module named keyring');
+            err.status = 1;
+            err.stderr = 'ModuleNotFoundError: No module named keyring';
+            throw err;
+          }
+          if (cmd === '/usr/bin/secret-tool' && args[0] === '--version') {
+            return 'secret-tool 0.21';
+          }
+          throw new Error('unexpected');
+        },
+      });
+      assert.equal(okSecretTool.available, true);
+      assert.equal(okSecretTool.secretTool, '/usr/bin/secret-tool');
+
+      const bothMissing = tokenModule.probeLinuxKeyringAvailability('linux', {
+        _resolveSafeExecutable: () => null,
+      });
+      assert.equal(bothMissing.available, false);
+      assert.equal(bothMissing.reason, 'python-not-found');
     });
   });
 });

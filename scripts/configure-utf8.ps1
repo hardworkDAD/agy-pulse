@@ -26,7 +26,7 @@ function Invoke-CheckedCommand {
 
 # 1. Configure PowerShell Profile
 Write-Host "Configuring PowerShell Profile..." -ForegroundColor Cyan
-$profilePath = if ($env:AGY_HUD_PROFILE_PATH) { $env:AGY_HUD_PROFILE_PATH } else { $PROFILE }
+$profilePath = if ($env:AGY_PULSE_PROFILE_PATH) { $env:AGY_PULSE_PROFILE_PATH } else { $PROFILE }
 $profileDir = Split-Path -Path $profilePath -Parent
 if (!(Test-Path -Path $profileDir)) {
     New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
@@ -35,7 +35,7 @@ if (!(Test-Path -Path $profileDir)) {
 
 $utf8Config = @"
 
-# AGY-HUD UTF-8 encoding setup
+# AGY-PULSE UTF-8 encoding setup
 # Force PowerShell console input/output encoding to UTF-8
 [System.Console]::OutputEncoding = [System.Console]::InputEncoding = [System.Text.Encoding]::UTF8
 `$OutputEncoding = [System.Text.Encoding]::UTF8
@@ -43,7 +43,7 @@ $utf8Config = @"
 
 if (Test-Path -Path $profilePath) {
     $content = Get-Content -Path $profilePath -Raw
-    if ($content -notlike "*AGY-HUD UTF-8 encoding setup*") {
+    if ($content -notlike "*AGY-PULSE UTF-8 encoding setup*") {
         Add-Content -Path $profilePath -Value $utf8Config -Encoding UTF8
         Write-Host "Appended UTF-8 configuration to existing Profile: $profilePath" -ForegroundColor Green
     } else {

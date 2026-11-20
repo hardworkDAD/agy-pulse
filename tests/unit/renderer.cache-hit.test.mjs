@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert';
-import { renderHUD } from '../../runtime/renderer.js';
+import { renderStatusLine } from '../../runtime/renderer.js';
 import {
   calculateTurnCacheMetrics,
   formatTurnCacheBadge,
@@ -30,7 +30,7 @@ function render(currentUsage, display = {}, options = {}) {
     },
   };
 
-  return renderHUD(state, agyData, {
+  return renderStatusLine(state, agyData, {
     display: {
       showTurnCacheHitRate: true,
       ...display,

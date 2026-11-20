@@ -1,4 +1,4 @@
-# agy-hud Development Workflow Rules
+# agy-pulse Development Workflow Rules
 
 ## 1. Quality Assurance (TDD/E2E)
 - **TDD First**: Every new feature MUST start with a unit test. Logic implementation follows only after the test is in place.

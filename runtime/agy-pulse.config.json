@@ -7,7 +7,9 @@
   },
   "display": {
     "showContextMonitor": true,
+    "showModelCache": true,
     "showCurrentDir": true,
+    "showCycleMode": true,
     "showSpeed": true,
     "showModel": false,
     "showTokenBar": false,

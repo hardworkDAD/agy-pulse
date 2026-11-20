@@ -7,22 +7,47 @@
 # (agy rewrites settings.json from in-memory state on exit).
 #
 # Env:
-#   AGY_PULSE_REPO      owner/repo slug (e.g. yourname/agy-pulse)
+#   AGY_PULSE_REPO      owner/repo slug (e.g. hardworkDAD/agy-pulse)
 #   AGY_PULSE_REPO_RAW  override raw GitHub base URL (forks / mirrors)
 #   AGY_PULSE_REPO_URL  override git URL for `agy plugin install`
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_SLUG="${AGY_PULSE_REPO:-${AGY_HUD_REPO:-}}"
-REPO_RAW="${AGY_PULSE_REPO_RAW:-${AGY_HUD_REPO_RAW:-}}"
-REPO_URL="${AGY_PULSE_REPO_URL:-${AGY_HUD_REPO_URL:-}}"
+DEFAULT_REPO_SLUG="hardworkDAD/agy-pulse"
+
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+else
+  SCRIPT_DIR=""
+  REPO_ROOT=""
+fi
+
+REPO_SLUG="${AGY_PULSE_REPO:-}"
+REPO_RAW="${AGY_PULSE_REPO_RAW:-}"
+REPO_URL="${AGY_PULSE_REPO_URL:-}"
+HAS_EXPLICIT_REPO=0
+if [ -n "$REPO_SLUG" ] || [ -n "$REPO_RAW" ] || [ -n "$REPO_URL" ]; then
+  HAS_EXPLICIT_REPO=1
+fi
+
+IS_LOCAL_REPO=0
+if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/plugin.json" ] && [ -f "$REPO_ROOT/scripts/bootstrap.js" ]; then
+  IS_LOCAL_REPO=1
+fi
+
+if [ "$HAS_EXPLICIT_REPO" -eq 0 ] && [ "$IS_LOCAL_REPO" -eq 0 ]; then
+  REPO_SLUG="$DEFAULT_REPO_SLUG"
+fi
 
 if [ -z "$REPO_RAW" ] && [ -n "$REPO_SLUG" ]; then
   REPO_RAW="https://raw.githubusercontent.com/$REPO_SLUG/main"
 fi
 if [ -z "$REPO_URL" ] && [ -n "$REPO_SLUG" ]; then
   REPO_URL="https://github.com/$REPO_SLUG.git"
+fi
+if [ "$HAS_EXPLICIT_REPO" -eq 1 ] && [ "$IS_LOCAL_REPO" -eq 0 ]; then
+  [ -n "$REPO_RAW" ] || REPO_RAW="https://raw.githubusercontent.com/$DEFAULT_REPO_SLUG/main"
+  [ -n "$REPO_URL" ] || REPO_URL="https://github.com/$DEFAULT_REPO_SLUG.git"
 fi
 
 if ! command -v agy >/dev/null 2>&1; then
@@ -35,26 +60,27 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-# Step 1: stage the plugin. Uninstall old/current names so stale files don't linger.
-echo "==> Removing any existing agy-pulse / agy-hud plugin install..."
+# Step 1: stage the plugin. Uninstall first so stale files don't linger.
+echo "==> Removing any existing agy-pulse plugin install..."
 agy plugin uninstall agy-pulse >/dev/null 2>&1 || true
-agy plugin uninstall agy-hud >/dev/null 2>&1 || true
 
-if [ -n "$REPO_URL" ]; then
+if [ "$HAS_EXPLICIT_REPO" -eq 1 ] && [ -n "$REPO_URL" ]; then
   echo "==> Installing plugin from $REPO_URL..."
   agy plugin install "$REPO_URL"
-elif [ -f "$REPO_ROOT/plugin.json" ]; then
+elif [ "$IS_LOCAL_REPO" -eq 1 ]; then
   echo "==> Installing plugin from local repository $REPO_ROOT..."
   agy plugin install "$REPO_ROOT"
 else
-  echo "agy-pulse: set AGY_PULSE_REPO or AGY_PULSE_REPO_URL when installing remotely." >&2
-  exit 1
+  echo "==> Installing plugin from $REPO_URL..."
+  agy plugin install "$REPO_URL"
 fi
 
 # Step 2: install runtime + configure statusLine
 echo
 echo "==> Bootstrapping runtime + statusLine config..."
-if [ -f "$REPO_ROOT/scripts/bootstrap.js" ] && [ -f "$REPO_ROOT/runtime/bin/agy-pulse.js" ]; then
+if [ "$HAS_EXPLICIT_REPO" -eq 0 ] && [ "$IS_LOCAL_REPO" -eq 1 ] && [ -f "$REPO_ROOT/runtime/bin/agy-pulse.js" ]; then
+  node "$REPO_ROOT/scripts/bootstrap.js"
+elif [ -z "$REPO_RAW" ] && [ "$IS_LOCAL_REPO" -eq 1 ] && [ -f "$REPO_ROOT/runtime/bin/agy-pulse.js" ]; then
   node "$REPO_ROOT/scripts/bootstrap.js"
 else
   if ! command -v curl >/dev/null 2>&1; then
@@ -67,6 +93,6 @@ fi
 cat <<DONE
 
 ==> agy-pulse installed.
-    Open a new agy session in your terminal to see the HUD.
+    Open a new agy session to see the agy-pulse status line.
     Repair anytime by re-running this script.
 DONE

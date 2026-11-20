@@ -22,11 +22,11 @@ function readWindowsCodepage() {
 
 /**
  * Decide whether the current terminal can render the box-drawing and Nerd Font
- * glyphs used by the HUD.
+ * glyphs used by the status line.
  *
  * Resolution order:
- *   1. AGY_HUD_FORCE_ASCII=1   → false
- *   2. AGY_HUD_FORCE_UNICODE=1 → true
+ *   1. AGY_PULSE_FORCE_ASCII=1   → false
+ *   2. AGY_PULSE_FORCE_UNICODE=1 → true
  *   3. Windows: codepage 65001 → true, anything else → false
  *   4. Unix: LANG/LC_ALL/LC_CTYPE contains "UTF-8" or "utf8" → true
  *   5. Default → true (modern terminals dominate)
@@ -42,8 +42,8 @@ function detectUnicodeSupport(opts = {}) {
   const platform = opts.platform || process.platform;
   const readCodepage = opts.readCodepage || readWindowsCodepage;
 
-  if (env.AGY_HUD_FORCE_ASCII === '1') return false;
-  if (env.AGY_HUD_FORCE_UNICODE === '1') return true;
+  if (env.AGY_PULSE_FORCE_ASCII === '1') return false;
+  if (env.AGY_PULSE_FORCE_UNICODE === '1') return true;
 
   if (platform === 'win32') {
     const cp = readCodepage();

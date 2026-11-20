@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const { resolveAntigravityPath } = require('../paths.js');
 const { mergeQuotaWindows } = require('./models.js');
 
-const CACHE_FILENAME = 'agy-hud-quota-cache.json';
+const CACHE_FILENAME = 'agy-pulse-quota-cache.json';
 const CACHE_PATH = resolveAntigravityPath(CACHE_FILENAME);
 const CACHE_VERSION = 3;
 
@@ -37,10 +37,16 @@ function getWriteCachePath(options = {}) {
 }
 
 function writeCacheFileAtomic(cachePath, payload) {
-  const tmpPath = `${cachePath}.tmp.${process.pid}.${Date.now()}`;
+  const dir = path.dirname(cachePath);
+  const tmpPath = `${cachePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
   try {
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    fs.writeFileSync(tmpPath, JSON.stringify(payload), { mode: 0o600 });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tmpPath, JSON.stringify(payload), { mode: 0o600, flag: 'wx' });
+    try {
+      if (fs.lstatSync(cachePath).isSymbolicLink()) {
+        fs.unlinkSync(cachePath);
+      }
+    } catch { /* target does not exist */ }
     fs.renameSync(tmpPath, cachePath);
   } catch {
     try { fs.unlinkSync(tmpPath); } catch {}
@@ -164,6 +170,60 @@ function readCacheRaw(options = {}) {
   }
 }
 
+const SHARED_KEYRING_FORMATS = new Set([
+  'linux-keyring',
+  'macos-keychain',
+  'windows-credential',
+]);
+
+function isSameCacheIdentity(previousRaw, tokenOrAccessToken, accountEmail = null) {
+  if (!previousRaw || !doesCachePayloadMatchToken(previousRaw, tokenOrAccessToken)) {
+    return false;
+  }
+  const normalizedToken = normalizeTokenCacheInput(tokenOrAccessToken);
+  const effectiveIncomingEmail = accountEmail || normalizedToken?.email || null;
+  if (
+    effectiveIncomingEmail &&
+    previousRaw.accountEmail &&
+    effectiveIncomingEmail.toLowerCase() !== previousRaw.accountEmail.toLowerCase()
+  ) {
+    return false;
+  }
+  const tokenHash = getTokenHash(tokenOrAccessToken);
+  const isSharedKeyringSource = Boolean(
+    normalizedToken?.sourceFormat && SHARED_KEYRING_FORMATS.has(normalizedToken.sourceFormat)
+  );
+  if (
+    previousRaw.accountEmail &&
+    !effectiveIncomingEmail &&
+    previousRaw.tokenHash &&
+    tokenHash &&
+    previousRaw.tokenHash !== tokenHash &&
+    isSharedKeyringSource
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function mergeProviderQuota(previousProviderQuota, incomingProviderQuota) {
+  if (!incomingProviderQuota) return previousProviderQuota || null;
+  if (!previousProviderQuota) return incomingProviderQuota;
+  const merged = { ...previousProviderQuota };
+  for (const [provider, windows] of Object.entries(incomingProviderQuota)) {
+    if (windows && typeof windows === 'object') {
+      const prevWin = previousProviderQuota[provider];
+      merged[provider] = {
+        ...(prevWin && typeof prevWin === 'object' ? prevWin : {}),
+        ...windows,
+      };
+    } else {
+      merged[provider] = windows;
+    }
+  }
+  return merged;
+}
+
 /**
  * Write quota cache. Expires at the earliest resetTime among all buckets.
  * Uses atomic write (tmp + rename) to prevent concurrent readers from seeing
@@ -177,17 +237,9 @@ function writeCache(data, tokenOrAccessToken, tier = null, accountEmail = null, 
   const now = Date.now();
   const cachePath = getWriteCachePath(options);
   const previousRaw = readCacheRaw(options);
-  let sameIdentity = previousRaw && doesCachePayloadMatchToken(previousRaw, tokenOrAccessToken);
-  // The OAuth token file path is shared across accounts on one machine, so an
-  // access-token rotation (same account) and an account switch look identical
-  // at the token level (same cacheKeyHash, different tokenHash). The account
-  // email disambiguates them: when the previous and the fresh email are both
-  // known and differ, this is a switch — treat it as a new identity so the
-  // previous account's windows / tier / email cannot leak into this one.
-  if (sameIdentity && accountEmail && previousRaw.accountEmail &&
-      accountEmail !== previousRaw.accountEmail) {
-    sameIdentity = false;
-  }
+  const normalizedToken = normalizeTokenCacheInput(tokenOrAccessToken);
+  const effectiveIncomingEmail = accountEmail || normalizedToken?.email || null;
+  const sameIdentity = isSameCacheIdentity(previousRaw, tokenOrAccessToken, accountEmail);
   const previousData = sameIdentity ? previousRaw.data : [];
   const incomingProviderQuota = providerQuota || data?.providerQuota || null;
   let merged = mergeQuotaWindows(data, previousData, now);
@@ -196,9 +248,13 @@ function writeCache(data, tokenOrAccessToken, tier = null, accountEmail = null, 
     merged = previousData;
   }
 
-  // Find earliest resetTime across top-level AND each merged window — a
-  // preserved 5-hour observation can reset well before the weekly top-level,
-  // and we must refresh by then or risk serving a stale fiveHour.
+  const previousProviderQuota = sameIdentity && previousRaw?.providerQuota ? previousRaw.providerQuota : null;
+  const resolvedProviderQuota = mergeProviderQuota(previousProviderQuota, incomingProviderQuota);
+
+  // Find earliest resetTime across top-level, each merged window, and
+  // providerQuota windows — a preserved 5-hour observation can reset well
+  // before the weekly top-level, and we must refresh by then or risk serving
+  // a stale fiveHour.
   let earliest = Infinity;
   const considerResetTime = (value) => {
     if (!value) return;
@@ -209,6 +265,13 @@ function writeCache(data, tokenOrAccessToken, tier = null, accountEmail = null, 
     considerResetTime(m.resetTime);
     considerResetTime(m.windows?.fiveHour?.resetTime);
     considerResetTime(m.windows?.weekly?.resetTime);
+  }
+  if (resolvedProviderQuota && typeof resolvedProviderQuota === 'object') {
+    for (const provQuota of Object.values(resolvedProviderQuota)) {
+      if (!provQuota || typeof provQuota !== 'object') continue;
+      considerResetTime(provQuota.fiveHour?.resetTime);
+      considerResetTime(provQuota.weekly?.resetTime);
+    }
   }
   const maxFreshDuration = 2 * 60 * 1000;
   let expiresAt = now + maxFreshDuration;
@@ -221,17 +284,12 @@ function writeCache(data, tokenOrAccessToken, tier = null, accountEmail = null, 
   // cache belongs to the same identity — fetchTierFromCloud transient failures
   // must not wipe 'Google AI Pro' down to 'Free'.
   const resolvedTier = tier || (sameIdentity ? (previousRaw.tier || null) : null);
-  const resolvedEmail = accountEmail || (sameIdentity ? (previousRaw.accountEmail || null) : null);
-  const previousProviderQuota = sameIdentity && previousRaw?.providerQuota ? previousRaw.providerQuota : null;
-  const resolvedProviderQuota = incomingProviderQuota
-    ? (previousProviderQuota ? { ...previousProviderQuota, ...incomingProviderQuota } : incomingProviderQuota)
-    : (previousProviderQuota || null);
+  const resolvedEmail = effectiveIncomingEmail || (sameIdentity ? (previousRaw.accountEmail || null) : null);
 
   // Re-read disk right before final write to reduce concurrent overwrite loss.
   const latestRaw = readCacheRaw(options);
   if (latestRaw && latestRaw !== previousRaw && latestRaw.lastRefreshed > (previousRaw?.lastRefreshed || 0)) {
-    const latestSame = doesCachePayloadMatchToken(latestRaw, tokenOrAccessToken) &&
-      !(accountEmail && latestRaw.accountEmail && accountEmail !== latestRaw.accountEmail);
+    const latestSame = isSameCacheIdentity(latestRaw, tokenOrAccessToken, accountEmail);
     if (latestSame) {
       merged = mergeQuotaWindows(merged, latestRaw.data, now);
     }
@@ -262,12 +320,9 @@ function recordRefreshAttempt(tokenOrAccessToken, reason = 'quota_fetch_failed',
   const previousRaw = readCacheRaw(options);
   const tokenHash = getTokenHash(tokenOrAccessToken);
   const cacheKeyHash = getTokenCacheKeyHash(tokenOrAccessToken);
-
-  let sameIdentity = previousRaw && doesCachePayloadMatchToken(previousRaw, tokenOrAccessToken);
-  if (sameIdentity && options.accountEmail && previousRaw.accountEmail &&
-      options.accountEmail !== previousRaw.accountEmail) {
-    sameIdentity = false;
-  }
+  const normalizedToken = normalizeTokenCacheInput(tokenOrAccessToken);
+  const effectiveIncomingEmail = options.accountEmail || normalizedToken?.email || null;
+  const sameIdentity = isSameCacheIdentity(previousRaw, tokenOrAccessToken, effectiveIncomingEmail);
 
   if (previousRaw && previousRaw.version === CACHE_VERSION && previousRaw.data.length > 0) {
     const payload = {
@@ -276,7 +331,9 @@ function recordRefreshAttempt(tokenOrAccessToken, reason = 'quota_fetch_failed',
       lastAttemptTokenHash: tokenHash,
       lastRefreshError: reason || 'quota_fetch_failed',
       ...(sameIdentity && options.tier && !previousRaw.tier ? { tier: options.tier } : {}),
-      ...(sameIdentity && options.accountEmail && !previousRaw.accountEmail ? { accountEmail: options.accountEmail } : {}),
+      ...(sameIdentity && effectiveIncomingEmail && !previousRaw.accountEmail
+        ? { accountEmail: effectiveIncomingEmail }
+        : {}),
     };
     writeCacheFileAtomic(cachePath, payload);
     return payload;
@@ -292,7 +349,47 @@ function recordRefreshAttempt(tokenOrAccessToken, reason = 'quota_fetch_failed',
     cacheKeyHash,
     tokenHash,
     tier: options.tier || (sameIdentity ? (previousRaw?.tier || null) : null),
-    accountEmail: options.accountEmail || (sameIdentity ? (previousRaw?.accountEmail || null) : null),
+    accountEmail: effectiveIncomingEmail || (sameIdentity ? (previousRaw?.accountEmail || null) : null),
+    providerQuota: null,
+    data: [],
+  };
+  writeCacheFileAtomic(cachePath, payload);
+  return payload;
+}
+
+/**
+ * Records a credential/refresh attempt timestamp on disk while preserving any
+ * existing cache payload intact so multi-process CLI statuslines share debounce state.
+ */
+function markCacheRefreshAttempt(tokenOrAccessToken = null, options = {}) {
+  const now = Date.now();
+  const cachePath = getWriteCachePath(options);
+  const previousRaw = readCacheRaw(options);
+  const tokenHash = getTokenHash(tokenOrAccessToken);
+  const cacheKeyHash = getTokenCacheKeyHash(tokenOrAccessToken);
+
+  if (previousRaw && previousRaw.version === CACHE_VERSION) {
+    const payload = {
+      ...previousRaw,
+      lastRefreshAttempt: now,
+      lastPlatformCredentialRefreshAt: now,
+      lastAttemptTokenHash: tokenHash,
+    };
+    writeCacheFileAtomic(cachePath, payload);
+    return payload;
+  }
+
+  const payload = {
+    version: CACHE_VERSION,
+    expiresAt: 0,
+    lastRefreshed: 0,
+    lastRefreshAttempt: now,
+    lastPlatformCredentialRefreshAt: now,
+    lastAttemptTokenHash: tokenHash,
+    cacheKeyHash,
+    tokenHash,
+    tier: null,
+    accountEmail: null,
     providerQuota: null,
     data: [],
   };
@@ -357,7 +454,11 @@ function readCacheLastRefreshed(options = {}) {
 function readCacheLastRefreshAttempt(options = {}) {
   try {
     const raw = JSON.parse(fs.readFileSync(getReadCachePath(options), 'utf8'));
-    return Math.max(raw.lastRefreshed || 0, raw.lastRefreshAttempt || 0);
+    return Math.max(
+      raw.lastRefreshed || 0,
+      raw.lastRefreshAttempt || 0,
+      raw.lastPlatformCredentialRefreshAt || 0
+    );
   } catch {
     return 0;
   }
@@ -373,6 +474,30 @@ function readCacheFallback(options = {}) {
   } catch {
     return null;
   }
+}
+
+function readAnyCachePayload(options = {}) {
+  const roots = options?.roots;
+  const candidatePaths = [];
+  if (Array.isArray(roots) && roots.length > 0 && options.strictRoots) {
+    for (const root of roots) {
+      if (root) candidatePaths.push(path.join(root, CACHE_FILENAME));
+    }
+  } else {
+    candidatePaths.push(getReadCachePath(options));
+  }
+
+  for (const candidate of candidatePaths) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      const raw = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      if (!raw || raw.version !== CACHE_VERSION || !Array.isArray(raw.data) || raw.data.length === 0) {
+        continue;
+      }
+      return attachCacheMetadata(raw);
+    } catch { /* try next */ }
+  }
+  return null;
 }
 
 module.exports = {
@@ -392,10 +517,12 @@ module.exports = {
   readCacheRaw,
   writeCache,
   recordRefreshAttempt,
+  markCacheRefreshAttempt,
   getCachedTier,
   getCachedAccountEmail,
   readCachePayload,
   readCacheLastRefreshed,
   readCacheLastRefreshAttempt,
   readCacheFallback,
+  readAnyCachePayload,
 };

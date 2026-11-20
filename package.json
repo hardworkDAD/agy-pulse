@@ -1,21 +1,25 @@
 {
   "name": "agy-pulse",
   "version": "1.0.0",
-  "description": "All-in-one single-process statusline HUD, real-time context & compaction monitor, and quota tracker for Antigravity CLI",
+  "description": "All-in-one single-process status line, real-time context & compaction monitor, and quota tracker for Antigravity CLI",
   "main": "runtime/bin/agy-pulse.js",
   "bin": {
-    "agy-pulse": "runtime/bin/agy-pulse.js",
-    "agy-hud": "runtime/bin/agy-hud.js"
+    "agy-pulse": "runtime/bin/agy-pulse.js"
   },
   "files": [
     "runtime",
     "scripts",
     "skills",
     "plugin.json",
+    "gemini-extension.json",
     "README.md",
+    "README_zh.md",
+    "LICENSE",
+    "uninstall.sh",
+    "uninstall.ps1",
     "package.json"
   ],
-  "repository": "",
+  "repository": "https://github.com/hardworkDAD/agy-pulse",
   "scripts": {
     "test": "node --test tests/unit/*.test.mjs",
     "bootstrap": "node scripts/bootstrap.js",
@@ -26,11 +30,10 @@
   "keywords": [
     "antigravity",
     "cli",
-    "hud",
     "statusline",
     "agy-pulse",
     "terminal"
   ],
-  "author": "",
+  "author": "hardworkDAD",
   "license": "MIT"
 }

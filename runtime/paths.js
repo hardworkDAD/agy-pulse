@@ -18,7 +18,7 @@ const path = require('path');
  */
 function getAntigravityRoots(env = process.env, homeDir = os.homedir()) {
   const safeEnv = env || process.env;
-  const dataDir = safeEnv.AGY_PULSE_DATA_DIR || safeEnv.AGY_HUD_DATA_DIR;
+  const dataDir = safeEnv.AGY_PULSE_DATA_DIR;
   if (dataDir) {
     return [dataDir];
   }
@@ -38,6 +38,60 @@ function getAntigravityRoots(env = process.env, homeDir = os.homedir()) {
   ].filter(Boolean);
 
   return candidates;
+}
+
+/**
+ * Return all candidate Antigravity IDE data roots, ordered by priority:
+ *   1. $AGY_PULSE_IDE_DATA_DIR           (explicit IDE data dir override)
+ *   2. [] when $AGY_PULSE_DATA_DIR is set (isolates custom sandboxes/tests)
+ *   3. ~/.gemini/antigravity              (standard macOS/Linux/Windows install)
+ *   4. $XDG_DATA_HOME/antigravity         (Linux XDG override)
+ *   5. $APPDATA/antigravity               (Windows roaming)
+ *   6. $LOCALAPPDATA/antigravity          (Windows local)
+ *
+ * Unset env vars and duplicate resolved paths are filtered out.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [homeDir]
+ * @returns {string[]}
+ */
+function getAntigravityIdeRoots(env = process.env, homeDir = os.homedir()) {
+  const safeEnv = env || process.env;
+  const ideDataDir = typeof safeEnv.AGY_PULSE_IDE_DATA_DIR === 'string'
+    ? safeEnv.AGY_PULSE_IDE_DATA_DIR.trim()
+    : '';
+  if (ideDataDir) {
+    return [ideDataDir];
+  }
+
+  const dataDir = typeof safeEnv.AGY_PULSE_DATA_DIR === 'string'
+    ? safeEnv.AGY_PULSE_DATA_DIR.trim()
+    : '';
+  if (dataDir) {
+    return [];
+  }
+
+  const resolvedHome = homeDir || os.homedir();
+  const xdg = typeof safeEnv.XDG_DATA_HOME === 'string' ? safeEnv.XDG_DATA_HOME.trim() : '';
+  const appData = typeof safeEnv.APPDATA === 'string' ? safeEnv.APPDATA.trim() : '';
+  const localAppData = typeof safeEnv.LOCALAPPDATA === 'string' ? safeEnv.LOCALAPPDATA.trim() : '';
+
+  const rawCandidates = [
+    path.join(resolvedHome, '.gemini', 'antigravity'),
+    xdg ? path.join(xdg, 'antigravity') : null,
+    appData ? path.join(appData, 'antigravity') : null,
+    localAppData ? path.join(localAppData, 'antigravity') : null,
+  ].filter(Boolean);
+
+  const seen = new Set();
+  const deduped = [];
+  for (const candidate of rawCandidates) {
+    const key = path.resolve(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(candidate);
+  }
+  return deduped;
 }
 
 /**
@@ -106,6 +160,7 @@ function resolveSafeExecutable(name, env = process.env) {
 
 module.exports = {
   getAntigravityRoots,
+  getAntigravityIdeRoots,
   resolveAntigravityPath,
   resolveSafeExecutable,
 };

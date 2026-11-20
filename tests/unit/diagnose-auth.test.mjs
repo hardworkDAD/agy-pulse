@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { buildAuthDiagnostic } = require('../../scripts/diagnose-auth.js');
+const { buildAuthDiagnostic, sanitizeReadTokenResult } = require('../../scripts/diagnose-auth.js');
 
 function withEnv(overrides, fn) {
   const snapshot = {};
@@ -26,7 +26,7 @@ function withEnv(overrides, fn) {
 }
 
 test('auth diagnostic reuses token parsing without leaking token values', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-diagnose-auth-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-diagnose-auth-'));
   try {
     const home = path.join(tmp, 'home');
     fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -75,7 +75,7 @@ test('auth diagnostic reuses token parsing without leaking token values', () => 
 });
 
 test('auth diagnostic reports Linux keyring source without leaking token values', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-diagnose-keyring-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-diagnose-keyring-'));
   try {
     const home = path.join(tmp, 'home');
     fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -110,7 +110,7 @@ test('auth diagnostic reports Linux keyring source without leaking token values'
 });
 
 test('auth diagnostic surfaces Linux keyring probe result', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-diagnose-probe-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-diagnose-probe-'));
   try {
     const home = path.join(tmp, 'home');
     fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -138,7 +138,7 @@ test('auth diagnostic surfaces Linux keyring probe result', () => {
 });
 
 test('auth diagnostic reports macOS Keychain source and probe without leaking token values', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-diagnose-macos-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-diagnose-macos-'));
   try {
     const home = path.join(tmp, 'home');
     fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
@@ -169,6 +169,120 @@ test('auth diagnostic reports macOS Keychain source and probe without leaking to
       assert.equal(diagnostic.keychainProbe.available, true);
       assert.doesNotMatch(serialized, /secret-keychain-token/);
       assert.doesNotMatch(serialized, /secret-user@example.com/);
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('auth diagnostic forwards credentialReader, enforces noWriteMirror, and reports mirror + google_accounts existence without leaking secrets', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-diagnose-readonly-'));
+  try {
+    const home = path.join(tmp, 'home');
+    const geminiDir = path.join(home, '.gemini');
+    const cliDir = path.join(geminiDir, 'antigravity-cli');
+    fs.mkdirSync(cliDir, { recursive: true });
+
+    const mirrorPath = path.join(cliDir, 'agy-pulse-token.json');
+    fs.writeFileSync(mirrorPath, JSON.stringify({
+      tokens: [{ accessToken: 'secret-mirror-value' }],
+      writtenAt: Date.now() - 10 * 60 * 1000,
+    }));
+    fs.writeFileSync(path.join(geminiDir, 'google_accounts.json'), JSON.stringify({
+      active: 'private-user@example.com',
+    }));
+
+    withEnv({
+      HOME: home,
+      USERPROFILE: home,
+      XDG_DATA_HOME: undefined,
+      APPDATA: undefined,
+      LOCALAPPDATA: undefined,
+    }, () => {
+      let receivedNoWriteMirror = null;
+      const winDiag = buildAuthDiagnostic({
+        resolveAgyInfo: () => ({ found: false, candidates: [] }),
+        platform: 'win32',
+        credentialReader: (_platform, _roots, opts) => {
+          receivedNoWriteMirror = opts?.noWriteMirror;
+          return {
+            accessToken: 'secret-win-cred-value',
+            sourceFormat: 'windows-credential',
+          };
+        },
+      });
+      const serialized = JSON.stringify(winDiag);
+      assert.equal(receivedNoWriteMirror, true);
+      assert.equal(winDiag.readToken.found, true);
+      assert.equal(winDiag.readToken.sourceFormat, 'windows-credential');
+      assert.equal(
+        winDiag.tokenCandidates.some(c =>
+          c.path.endsWith('agy-pulse-token.json') && c.exists === true && c.sourceFormat === 'token-mirror'
+        ),
+        true
+      );
+      assert.equal(
+        winDiag.tokenCandidates.some(c =>
+          c.path.endsWith('google_accounts.json') && c.exists === true && c.sourceFormat === 'google-accounts' && c.hasActiveAccount === true
+        ),
+        true
+      );
+      assert.doesNotMatch(serialized, /secret-mirror-value/);
+      assert.doesNotMatch(serialized, /secret-win-cred-value/);
+      assert.doesNotMatch(serialized, /private-user@example\.com/);
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('sanitizeReadTokenResult reports isExpired and buildAuthDiagnostic surfaces quotaCache summary with masked email', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-diagnose-cache-'));
+  try {
+    const dataDir = path.join(tmp, 'data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'agy-pulse-quota-cache.json'), JSON.stringify({
+      version: 3,
+      expiresAt: 0,
+      lastRefreshed: 1000,
+      lastRefreshAttempt: 2000,
+      lastRefreshError: 'quota_fetch_failed',
+      unavailableReason: 'auth_failed',
+      accountEmail: 'sensitive.person@example.com',
+      data: [],
+    }));
+
+    assert.equal(sanitizeReadTokenResult({
+      accessToken: 'tok',
+      expiry: '2000-01-01T00:00:00.000Z',
+    }).isExpired, true);
+    assert.equal(sanitizeReadTokenResult({
+      accessToken: 'tok',
+      expiry: new Date(Date.now() + 3600_000).toISOString(),
+    }).isExpired, false);
+
+    withEnv({
+      AGY_PULSE_DATA_DIR: dataDir,
+    }, () => {
+      const diagnostic = buildAuthDiagnostic({
+        resolveAgyInfo: () => ({ found: false, candidates: [] }),
+        platform: 'linux',
+        keyringReader: () => ({
+          accessToken: 'expired-kr',
+          expiry: '2000-01-01T00:00:00.000Z',
+          sourceFormat: 'linux-keyring',
+        }),
+        keyringProbe: () => ({ available: true }),
+      });
+      const serialized = JSON.stringify(diagnostic);
+
+      assert.equal(diagnostic.readToken.isExpired, true);
+      assert.equal(diagnostic.quotaCache.exists, true);
+      assert.equal(diagnostic.quotaCache.lastRefreshError, 'quota_fetch_failed');
+      assert.equal(diagnostic.quotaCache.unavailableReason, 'auth_failed');
+      assert.equal(diagnostic.quotaCache.hasAccountEmail, true);
+      assert.match(diagnostic.quotaCache.accountEmail, /^se\*\*\*@ex\*\*\*\.com$/);
+      assert.doesNotMatch(serialized, /sensitive\.person@example\.com/);
     });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

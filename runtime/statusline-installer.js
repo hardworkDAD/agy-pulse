@@ -17,10 +17,10 @@ function getSettingsPath() {
  * entirely: `%~dp0` resolves to the shim's own dir so the script keeps working
  * when the runtime is relocated.
  *
- * @param {string} hudScriptPath  absolute path to agy-pulse.js (or legacy agy-hud.js)
+ * @param {string} scriptPath  absolute path to agy-pulse.js
  */
-function buildCmdShimContents(hudScriptPath) {
-  const scriptName = path.win32.basename(hudScriptPath);
+function buildCmdShimContents(scriptPath) {
+  const scriptName = path.win32.basename(scriptPath);
   return [
     '@echo off',
     'setlocal',
@@ -96,10 +96,10 @@ function ensureWindowsShShim(platform = process.platform, env = process.env) {
   return written;
 }
 
-function writeCmdShim(hudScriptPath, platform = process.platform) {
+function writeCmdShim(scriptPath, platform = process.platform) {
   if (platform !== 'win32') return null;
-  const shimPath = hudScriptPath.replace(/\.js$/i, '.cmd');
-  const contents = buildCmdShimContents(hudScriptPath);
+  const shimPath = scriptPath.replace(/\.js$/i, '.cmd');
+  const contents = buildCmdShimContents(scriptPath);
   fs.mkdirSync(path.dirname(shimPath), { recursive: true });
   let existing = null;
   try { existing = fs.readFileSync(shimPath, 'utf8'); } catch {}
@@ -109,32 +109,30 @@ function writeCmdShim(hudScriptPath, platform = process.platform) {
   return shimPath;
 }
 
-function createStatusLineCommand(hudScriptPath, nodePath = process.execPath || 'node', platform = process.platform) {
+function createStatusLineCommand(scriptPath, nodePath = process.execPath || 'node', platform = process.platform) {
   if (platform === 'win32') {
-    return hudScriptPath.replace(/\.js$/i, '.cmd');
+    return scriptPath.replace(/\.js$/i, '.cmd');
   }
-  return `"${nodePath}" "${hudScriptPath}"`;
+  return `"${nodePath}" "${scriptPath}"`;
 }
 
-function resolveHudScriptPath(baseDir) {
-  const pulseEntry = path.resolve(baseDir, 'bin', 'agy-pulse.js');
-  if (fs.existsSync(pulseEntry)) return pulseEntry;
-  const legacyEntry = path.resolve(baseDir, 'bin', 'agy-hud.js');
-  if (fs.existsSync(legacyEntry)) return legacyEntry;
-  return pulseEntry;
+function resolveStatusLineScriptPath(baseDir) {
+  return path.resolve(baseDir, 'bin', 'agy-pulse.js');
 }
 
-function buildCombinedShimContents(hudScriptPath, nodePath = process.execPath || '/usr/bin/node') {
+function buildCombinedShimContents(scriptPath, nodePath = process.execPath || 'node') {
+  const safeDefaultNode = String(nodePath || 'node').replace(/'/g, `'\\''`);
+  const safeScriptPath = String(scriptPath).replace(/"/g, '\\"');
   return [
     '#!/usr/bin/env bash',
-    `exec "\${AGY_STATUSLINE_NODE:-${nodePath}}" "${hudScriptPath}" "$@"`,
+    `exec "$(_n="\${AGY_PULSE_NODE:-\${AGY_STATUSLINE_NODE:-}}"; if [ -n "$_n" ] && command -v "$_n" >/dev/null 2>&1; then printf '%s' "$_n"; else command -v node 2>/dev/null || printf '%s' '${safeDefaultNode}'; fi)" "${safeScriptPath}" "$@"`,
     '',
   ].join('\n');
 }
 
 function updateLegacyCombinedShim(
   rootDir,
-  hudScriptPath,
+  scriptPath,
   nodePath = process.execPath || '/usr/bin/node',
   platform = process.platform
 ) {
@@ -147,7 +145,7 @@ function updateLegacyCombinedShim(
     return null;
   }
 
-  const contents = buildCombinedShimContents(hudScriptPath, nodePath);
+  const contents = buildCombinedShimContents(scriptPath, nodePath);
   let existing = null;
   try {
     if (stat.isSymbolicLink()) {
@@ -168,20 +166,29 @@ function updateLegacyCombinedShim(
 
 function configureStatusLine(baseDir = __dirname, options = {}) {
   const settingsPath = options.settingsPath || getSettingsPath();
-  const hudScriptPath = resolveHudScriptPath(baseDir);
+  const scriptPath = resolveStatusLineScriptPath(baseDir);
 
-  writeCmdShim(hudScriptPath);
+  writeCmdShim(scriptPath);
   ensureWindowsShShim();
-  updateLegacyCombinedShim(path.dirname(settingsPath), hudScriptPath);
+  updateLegacyCombinedShim(path.dirname(settingsPath), scriptPath);
 
-  const targetCommand = createStatusLineCommand(hudScriptPath);
+  const targetCommand = createStatusLineCommand(scriptPath);
 
   let settings = {};
   if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    } catch {
-      settings = {};
+    const raw = fs.readFileSync(settingsPath, 'utf8');
+    if (raw.trim()) {
+      try {
+        settings = JSON.parse(raw);
+        if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+          settings = {};
+        }
+      } catch {
+        try {
+          fs.copyFileSync(settingsPath, `${settingsPath}.bak`);
+        } catch {}
+        settings = {};
+      }
     }
   }
 
@@ -211,7 +218,7 @@ module.exports = {
   updateLegacyCombinedShim,
   getWindowsAgyBinDirs,
   createStatusLineCommand,
-  resolveHudScriptPath,
+  resolveStatusLineScriptPath,
   configureStatusLine,
   getSettingsPath,
 };

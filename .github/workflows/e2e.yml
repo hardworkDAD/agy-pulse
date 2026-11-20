@@ -13,12 +13,11 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
-# E2E gate: install agy CLI, install agy-hud, bootstrap, assert the HUD command
+# E2E gate: install agy CLI, install agy-pulse, bootstrap, verify the status line command
 # renders the current status-line structure. Cross-platform (macOS / Windows /
 # Linux). No OAuth required — we verify install/bootstrap plumbing plus the
-# standalone HUD command. The auth-required "HUD visible inside live agy
-# session" check stays in dev / release.sh on a machine with a real signed-in
-# token.
+# standalone status line command. Verification inside a signed-in agy
+# session runs locally through release.sh.
 
 jobs:
   unit-tests:
@@ -97,18 +96,18 @@ jobs:
           $tempDir = Join-Path $env:RUNNER_TEMP 'configure-utf8'
           New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
-          $env:AGY_HUD_PROFILE_PATH = Join-Path $tempDir 'Microsoft.PowerShell_profile.ps1'
+          $env:AGY_PULSE_PROFILE_PATH = Join-Path $tempDir 'Microsoft.PowerShell_profile.ps1'
           $env:GIT_CONFIG_GLOBAL = Join-Path $tempDir '.gitconfig'
 
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\configure-utf8.ps1
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\configure-utf8.ps1
 
-          if (-not (Test-Path $env:AGY_HUD_PROFILE_PATH)) {
+          if (-not (Test-Path $env:AGY_PULSE_PROFILE_PATH)) {
             throw 'configure-utf8 did not create the expected profile file'
           }
 
-          $profileText = Get-Content -Raw -Path $env:AGY_HUD_PROFILE_PATH
-          $markerCount = ([regex]::Matches($profileText, 'AGY-HUD UTF-8 encoding setup')).Count
+          $profileText = Get-Content -Raw -Path $env:AGY_PULSE_PROFILE_PATH
+          $markerCount = ([regex]::Matches($profileText, 'AGY-PULSE UTF-8 encoding setup')).Count
           if ($markerCount -ne 1) {
             throw "expected exactly one UTF-8 profile marker, got $markerCount"
           }
@@ -132,7 +131,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release_tmp
-          cp plugin.json gemini-extension.json package.json README.md README_zh.md release_tmp/
+          cp plugin.json gemini-extension.json package.json README.md README_zh.md LICENSE uninstall.sh uninstall.ps1 release_tmp/
           cp -r runtime release_tmp/
           cp -r scripts release_tmp/
           cp -r skills release_tmp/
@@ -144,7 +143,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release_tmp | Out-Null
-          Copy-Item plugin.json,gemini-extension.json,package.json,README.md,README_zh.md release_tmp\
+          Copy-Item plugin.json,gemini-extension.json,package.json,README.md,README_zh.md,LICENSE,uninstall.sh,uninstall.ps1 release_tmp\
           Copy-Item -Recurse runtime,scripts,skills release_tmp\
           if (Test-Path agy-pulse.zip) { Remove-Item agy-pulse.zip -Force }
           Compress-Archive -Path release_tmp\* -DestinationPath agy-pulse.zip
@@ -155,19 +154,23 @@ jobs:
       # contains backslashes on Windows that get eaten by bash heredoc → node -e.
       - name: Run E2E (no-auth)
         env:
-          AGY_HUD_E2E_NO_AUTH_OBSERVE: '1'
-          AGY_HUD_E2E_ARTIFACT_DIR: ${{ runner.temp }}
-          AGY_HUD_SKIP_BUILD: '1'
+          AGY_PULSE_E2E_NO_AUTH_OBSERVE: '1'
+          AGY_PULSE_E2E_ARTIFACT_DIR: ${{ runner.temp }}
+          AGY_PULSE_SKIP_BUILD: '1'
         shell: bash
         run: |
           set +e
-          node scripts/verify-display.js > e2e-report.json 2>&1
+          node scripts/verify-display.js > e2e-report.json 2> e2e-stderr.log
           E2E_RC=$?
           set -e
           cat e2e-report.json
           OK=$(node -e "try { console.log(require('./e2e-report.json').ok || false) } catch (e) { console.log('parse_error: ' + e.message) }")
           echo "report.ok = $OK"
           if [ "$E2E_RC" != "0" ] || [ "$OK" != "true" ]; then
+            if [ -s e2e-stderr.log ]; then
+              echo "--- verify-display stderr ---"
+              cat e2e-stderr.log
+            fi
             echo "::error::E2E failed on ${{ matrix.os }} (exit=$E2E_RC ok=$OK)"
             exit 1
           fi
@@ -182,7 +185,6 @@ jobs:
         shell: cmd
         run: |
           agy plugin uninstall agy-pulse 2>nul
-          agy plugin uninstall agy-hud 2>nul
           powershell -ExecutionPolicy Bypass -File scripts\install.ps1
           echo "" | "%USERPROFILE%\.gemini\antigravity-cli\agy-pulse-runtime\runtime\bin\agy-pulse.cmd"
           if %ERRORLEVEL% neq 0 (
@@ -197,15 +199,14 @@ jobs:
           name: e2e-${{ matrix.os }}
           path: |
             e2e-report.json
-            ${{ runner.temp }}/agy-hud-pty-*.log
+            ${{ runner.temp }}/agy-pulse-pty-*.log
           if-no-files-found: warn
           retention-days: 14
 
-      # Render PNG screenshots of the HUD using charm.sh `freeze`. Purpose-built
+      # Render PNG screenshots of the agy-pulse status line using charm.sh `freeze`. Purpose-built
       # for ANSI → PNG; no PTY / ttyd / tape machinery like vhs. Two variants:
-      #   - hud-ascii: AGY_HUD_FORCE_ASCII=1 → every glyph is plain ASCII,
-      #     guaranteed to render even without Nerd Fonts (universal evidence)
-      #   - hud-unicode: default → pretty box-drawing chars when font cooperates
+      #   - ASCII with AGY_PULSE_FORCE_ASCII=1 for plain glyphs
+      #   - Unicode by default with box-drawing characters
       # freeze hangs on stdin in non-TTY contexts — always redirect `</dev/null`.
       - name: Install freeze (macOS)
         if: runner.os == 'macOS'
@@ -237,14 +238,14 @@ jobs:
       # NOTE: skipping freeze install on Windows. v0.2.2 errors 'No input' for
       # every invocation form we tried (positional file, --execute, UTF-8 file
       # written via .NET WriteAllText). Likely an upstream Windows-only bug.
-      # Windows still gets the e2e-report.json + agy-hud-pty-*.log artifacts
+      # Windows still gets the e2e-report.json + agy-pulse-pty-*.log artifacts
       # (raw ANSI bytes that reviewers can `cat` for visual evidence) — only
       # the rendered PNG is missing on this OS.
 
       # Render from the repo's runtime/ directly — don't depend on a HOME-installed
       # runtime (verify-display.js installs into an isolated tmp HOME then cleans up,
       # so $HOME/.gemini/... is empty at this point).
-      - name: Render HUD screenshots (Unix)
+      - name: Render agy-pulse screenshots (Unix)
         if: runner.os != 'Windows'
         shell: bash
         continue-on-error: true
@@ -255,28 +256,28 @@ jobs:
           fi
 
           # ASCII variant — every glyph guaranteed readable on every font
-          AGY_HUD_FORCE_ASCII=1 node runtime/bin/agy-pulse.js < /dev/null > /tmp/hud-ascii.ansi
+          AGY_PULSE_FORCE_ASCII=1 node runtime/bin/agy-pulse.js < /dev/null > /tmp/agy-pulse-screenshot-ascii.ansi
           freeze < /dev/null \
-            --output "hud-ascii-${{ matrix.os }}.png" \
+            --output "agy-pulse-screenshot-ascii-${{ matrix.os }}.png" \
             --language ansi \
             --font.family "JetBrains Mono" \
-            /tmp/hud-ascii.ansi || echo "(ascii render failed)"
+            /tmp/agy-pulse-screenshot-ascii.ansi || echo "(ascii render failed)"
 
           # Unicode variant — pretty box-drawing when the font has glyphs
-          node runtime/bin/agy-pulse.js < /dev/null > /tmp/hud-unicode.ansi
+          node runtime/bin/agy-pulse.js < /dev/null > /tmp/agy-pulse-screenshot-unicode.ansi
           freeze < /dev/null \
-            --output "hud-unicode-${{ matrix.os }}.png" \
+            --output "agy-pulse-screenshot-unicode-${{ matrix.os }}.png" \
             --language ansi \
             --font.family "JetBrains Mono" \
-            /tmp/hud-unicode.ansi || echo "(unicode render failed)"
+            /tmp/agy-pulse-screenshot-unicode.ansi || echo "(unicode render failed)"
 
-          ls -la hud-*-${{ matrix.os }}.png 2>/dev/null || echo "no PNGs produced"
+          ls -la agy-pulse-screenshot-*-${{ matrix.os }}.png 2>/dev/null || echo "no PNGs produced"
 
-      - name: Upload HUD screenshots
+      - name: Upload agy-pulse screenshots
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: hud-screenshot-${{ matrix.os }}
-          path: hud-*-${{ matrix.os }}.png
+          name: agy-pulse-screenshot-${{ matrix.os }}
+          path: agy-pulse-screenshot-*-${{ matrix.os }}.png
           if-no-files-found: warn
           retention-days: 14

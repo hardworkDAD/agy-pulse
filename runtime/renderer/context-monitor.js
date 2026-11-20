@@ -2,13 +2,19 @@
 
 const {
   ANSI_COLORS,
+  DEFAULT_THRESHOLDS,
+  compactModelName,
   modelIncludesCacheInInput,
   sanitizeTerminalText,
+  getAnsiDisplayWidth,
+  truncateAnsiToDisplayWidth,
 } = require('./format.js');
 const {
   LANGUAGE_TEXT,
   resolveLanguage,
 } = require('./lang.js');
+const { getNativeCostUsd } = require('../cost.js');
+const { resolveModelDisplayName } = require('../quota/models.js');
 
 /**
  * Format token count using uppercase K/M units matching the agy-statusline
@@ -77,18 +83,24 @@ function hasPositiveUsage(usage) {
   );
 }
 
-function resolveModelLabel(agyData) {
+function resolveModelLabel(agyData, state) {
   const modelObj = agyData?.model;
   if (modelObj && typeof modelObj === 'object') {
-    let name = modelObj.display_name || modelObj.id || 'Unknown Model';
-    const effort = modelObj.effort || '';
-    if (effort && !name.toLowerCase().includes(effort.toLowerCase())) {
-      name = `${name} (${effort})`;
+    let name = modelObj.display_name || modelObj.id || '';
+    if (name) {
+      const effort = modelObj.effort || '';
+      if (effort && !name.toLowerCase().includes(effort.toLowerCase())) {
+        name = `${name} (${effort})`;
+      }
+      return sanitizeTerminalText(name, 80);
     }
-    return sanitizeTerminalText(name, 80);
   }
   if (typeof modelObj === 'string' && modelObj.trim()) {
     return sanitizeTerminalText(modelObj.trim(), 80);
+  }
+  const ltModel = typeof state?.lastTurnUsage?.model === 'string' ? state.lastTurnUsage.model.trim() : '';
+  if (ltModel) {
+    return sanitizeTerminalText(resolveModelDisplayName(ltModel, undefined) || ltModel, 80);
   }
   return 'Unknown Model';
 }
@@ -125,9 +137,10 @@ function renderContextMonitorLine({
   const { reset, bold, dim, red, green, yellow, cyan, magenta } = palette;
 
   const rawCols = Number(agyData?.terminal_width || config?.display?.terminalWidth || process.env.COLUMNS || 0);
-  const cols = Number.isFinite(rawCols) && rawCols > 0 ? rawCols : 120;
+  const hasExplicitCols = Number.isFinite(rawCols) && rawCols > 0;
+  const cols = hasExplicitCols ? Math.floor(rawCols) : 120;
 
-  const modelName = resolveModelLabel(agyData);
+  const modelName = resolveModelLabel(agyData, state);
   const cw = agyData?.context_window || {};
   const rawWinSize = Number(cw.context_window_size || 0);
   const rawUsedPct = Number(cw.used_percentage || 0);
@@ -151,7 +164,9 @@ function renderContextMonitorLine({
 
   const cacheTotal = cCreate + cRead;
   const isInclusive = !rawModelIdent || modelIncludesCacheInInput(rawModelIdent);
-  const promptCtx = (inp >= cacheTotal && isInclusive) ? inp : inp + cacheTotal;
+  const isCacheExclusiveTurn = hasTurn && (cur.cacheExclusive === true || inp < cacheTotal);
+  const useInclusiveMode = isInclusive && !isCacheExclusiveTurn;
+  const promptCtx = useInclusiveMode ? inp : inp + cacheTotal;
   let activeCtx = promptCtx + turnOut;
 
   if (activeCtx === 0 && rawUsedPct > 0 && rawWinSize > 0) {
@@ -161,7 +176,7 @@ function renderContextMonitorLine({
   const ckpts = Math.max(0, Number(state?.compactionCount || 0));
   const hasModePeaks = Boolean(state?.turnHistoryMaxByMode && typeof state.turnHistoryMaxByMode === 'object');
   const historyPeak = hasModePeaks
-    ? (isInclusive
+    ? (useInclusiveMode
       ? Number(state.turnHistoryMaxByMode.inclusivePeak || 0)
       : Number(state.turnHistoryMaxByMode.exclusivePeak || 0))
     : Number(state?.peakRawTurnTokens || 0);
@@ -177,67 +192,313 @@ function renderContextMonitorLine({
 
   const realPct = activeCtx > 0 && effectiveLimit > 0 ? (activeCtx * 100) / effectiveLimit : 0;
 
+  const customWarn = config?.thresholds?.warning;
+  const customCrit = config?.thresholds?.critical;
+  const warnPct = (typeof customWarn === 'number' && Number.isFinite(customWarn) && customWarn !== DEFAULT_THRESHOLDS.warning)
+    ? customWarn * 100
+    : 65;
+  const critPct = (typeof customCrit === 'number' && Number.isFinite(customCrit) && customCrit !== DEFAULT_THRESHOLDS.critical)
+    ? customCrit * 100
+    : 85;
+
   let barColor = cyan;
-  if (realPct >= 85) barColor = red;
-  else if (realPct >= 65) barColor = yellow;
-
-  const barWidth = cols >= 80 ? 12 : 8;
-  const bar = buildSmoothBar(realPct, barWidth, unicode);
-
-  const ctxSeg = (activeCtx > 0 || hasTurn)
-    ? `${dim}${text.ctxLabel}${reset} ${barColor}${bar}${reset} ${bold}${realPct.toFixed(1)}%${reset} ${dim}(${formatMonitorTokens(activeCtx)}/${formatMonitorTokens(effectiveLimit)})${reset}`
-    : `${dim}${text.ctxLabel}${reset} ${dim}${bar}${reset} ${bold}0.0%${reset} ${dim}(${text.limitLabel} ${formatMonitorTokens(effectiveLimit)})${reset}`;
+  if (realPct >= critPct) barColor = red;
+  else if (realPct >= warnPct) barColor = yellow;
 
   const sep = unicode ? `${dim} · ${reset}` : `${dim} | ${reset}`;
+  const compactUnicodeSep = `${dim}·${reset}`;
   const modelGlyph = unicode ? '◈' : '*';
   const timesGlyph = unicode ? '×' : 'x';
-
-  const parts = [];
-  if (cols >= 80 && modelName) {
-    parts.push(`${magenta}${modelGlyph} ${modelName}${reset}`);
-  }
-
-  parts.push(ctxSeg);
-
-  if (ckpts > 0) {
-    if (cols >= 95 && peakCtx > 0) {
-      const peakPrefix = resolvedLang === 'zh' ? text.peakLabel : `${text.peakLabel} `;
-      parts.push(`${yellow}${text.compactedLabel}${timesGlyph}${ckpts}${reset}${dim}(${peakPrefix}${formatMonitorTokens(peakCtx)})${reset}`);
-    } else {
-      parts.push(`${yellow}${text.compactedLabel}${timesGlyph}${ckpts}${reset}`);
-    }
-  }
-
-  if (promptCtx > 0) {
-    const cachePct = Math.min(100, Math.max(0, (cRead * 100) / promptCtx));
-    const cacheColor = cachePct >= 50 ? green : dim;
-    if (cols >= 105 && cRead > 0) {
-      parts.push(`${dim}${text.cacheLabelMonitor}${reset} ${cacheColor}${cachePct.toFixed(0)}%${reset} ${dim}(${formatMonitorTokens(cRead)})${reset}`);
-    } else {
-      parts.push(`${dim}${text.cacheLabelMonitor}${reset} ${cacheColor}${cachePct.toFixed(0)}%${reset}`);
-    }
-  }
-
   const totOut = Math.max(Number(cw.total_output_tokens || 0), Number(state?.totalOutputTokens || 0));
-  if (cols >= 85 && totOut > 0) {
-    parts.push(`${dim}${text.outLabelMonitor}${reset} ${bold}${formatMonitorTokens(totOut)}${reset}`);
+  const rawUsd = (typeof sessionCostUsd === 'number' && Number.isFinite(sessionCostUsd))
+    ? sessionCostUsd
+    : getNativeCostUsd(agyData, { allowRoutedCost: config?.display?.showRoutedCost });
+
+  const buildLine = ({
+    barWidth,
+    compactSep,
+    showCacheAbs,
+    showCompactionPeak,
+    showOut,
+    modelDisplayMode,
+    showCache,
+    showCompaction,
+  }) => {
+    const activeSep = (unicode && compactSep) ? compactUnicodeSep : sep;
+    const bar = buildSmoothBar(realPct, barWidth, unicode);
+    const ctxSeg = (activeCtx > 0 || hasTurn)
+      ? `${dim}${text.ctxLabel}${reset} ${barColor}${bar}${reset} ${bold}${realPct.toFixed(1)}%${reset} ${dim}(${formatMonitorTokens(activeCtx)}/${formatMonitorTokens(effectiveLimit)})${reset}`
+      : `${dim}${text.ctxLabel}${reset} ${dim}${bar}${reset} ${bold}0.0%${reset} ${dim}(${text.limitLabel} ${formatMonitorTokens(effectiveLimit)})${reset}`;
+
+    const parts = [];
+    if (cols >= 80 && modelName && modelDisplayMode !== 'none') {
+      const displayModel = modelDisplayMode === 'compact'
+        ? (compactModelName(modelName) || modelName)
+        : modelName;
+      parts.push(`${magenta}${modelGlyph} ${displayModel}${reset}`);
+    }
+
+    parts.push(ctxSeg);
+
+    if (ckpts > 0 && showCompaction) {
+      if (showCompactionPeak && cols >= 95 && peakCtx > 0) {
+        const peakPrefix = resolvedLang === 'zh' ? text.peakLabel : `${text.peakLabel} `;
+        parts.push(`${yellow}${text.compactedLabel}${timesGlyph}${ckpts}${reset}${dim}(${peakPrefix}${formatMonitorTokens(peakCtx)})${reset}`);
+      } else {
+        parts.push(`${yellow}${text.compactedLabel}${timesGlyph}${ckpts}${reset}`);
+      }
+    }
+
+    if (promptCtx > 0 && showCache) {
+      const cachePct = Math.min(100, Math.max(0, (cRead * 100) / promptCtx));
+      const cacheColor = cachePct >= 50 ? green : dim;
+      if (showCacheAbs && cols >= 105 && cRead > 0) {
+        parts.push(`${dim}${text.cacheLabelMonitor}${reset} ${cacheColor}${cachePct.toFixed(0)}%${reset} ${dim}(${formatMonitorTokens(cRead)})${reset}`);
+      } else {
+        parts.push(`${dim}${text.cacheLabelMonitor}${reset} ${cacheColor}${cachePct.toFixed(0)}%${reset}`);
+      }
+    }
+
+    if (showOut && cols >= 85 && totOut > 0) {
+      parts.push(`${dim}${text.outLabelMonitor}${reset} ${bold}${formatMonitorTokens(totOut)}${reset}`);
+    }
+
+    if (cols >= 95 && typeof rawUsd === 'number' && Number.isFinite(rawUsd) && rawUsd > 0) {
+      const usdFmt = rawUsd < 0.01 ? `$${rawUsd.toFixed(3)}` : `$${rawUsd.toFixed(2)}`;
+      parts.push(`${dim}${text.costLabelMonitor}${reset} ${bold}${usdFmt}${reset}`);
+    }
+
+    if (realPct >= critPct) {
+      parts.push(`${red}${bold}${text.compactionImminent}${reset}`);
+    }
+
+    return parts.join(activeSep);
+  };
+
+  const opts = {
+    barWidth: cols >= 80 ? 12 : 8,
+    compactSep: false,
+    showCacheAbs: true,
+    showCompactionPeak: true,
+    showOut: true,
+    modelDisplayMode: 'full',
+    showCache: true,
+    showCompaction: true,
+  };
+
+  let joined = buildLine(opts);
+  if (!hasExplicitCols || getAnsiDisplayWidth(joined) <= cols) {
+    return joined;
   }
 
-  const rawUsd = agyData?.cost?.total_usd ?? agyData?.cost?.total_cost_usd ?? sessionCostUsd;
-  if (cols >= 95 && typeof rawUsd === 'number' && Number.isFinite(rawUsd) && rawUsd > 0) {
-    const usdFmt = rawUsd < 0.01 ? `$${rawUsd.toFixed(3)}` : `$${rawUsd.toFixed(2)}`;
-    parts.push(`${dim}${text.costLabelMonitor}${reset} ${bold}${usdFmt}${reset}`);
+  const degradationSteps = [
+    () => { if (opts.barWidth > 8) opts.barWidth = 8; },
+    () => { if (opts.barWidth > 6) opts.barWidth = 6; },
+    () => { if (opts.barWidth > 4) opts.barWidth = 4; },
+    () => { if (unicode) opts.compactSep = true; },
+    () => { opts.showCacheAbs = false; },
+    () => { opts.showCompactionPeak = false; },
+    () => { opts.showOut = false; },
+    () => { opts.modelDisplayMode = 'compact'; },
+    () => { opts.modelDisplayMode = 'none'; },
+    () => { opts.showCache = false; },
+    () => { opts.showCompaction = false; },
+  ];
+
+  for (const applyStep of degradationSteps) {
+    applyStep();
+    joined = buildLine(opts);
+    if (getAnsiDisplayWidth(joined) <= cols) {
+      return joined;
+    }
   }
 
-  if (realPct >= 85) {
-    parts.push(`${red}${bold}${text.compactionImminent}${reset}`);
+  return truncateAnsiToDisplayWidth(joined, cols, unicode ? '…' : '...');
+}
+
+/**
+ * Render the per-model cache hit breakdown line above the context monitor line.
+ *
+ * @param {object} params
+ * @returns {string}
+ */
+function renderModelCacheLine({
+  state,
+  agyData,
+  config,
+  colors,
+  unicode = true,
+  lang,
+} = {}) {
+  const resolvedLang = (lang === 'zh' || lang === 'en') ? lang : resolveLanguage(config);
+  const text = LANGUAGE_TEXT[resolvedLang] || LANGUAGE_TEXT.en;
+
+  const palette = {
+    reset: '\x1b[0m',
+    bold: '\x1b[1m',
+    dim: '\x1b[2m',
+    green: ANSI_COLORS.green,
+    yellow: ANSI_COLORS.yellow,
+    cyan: ANSI_COLORS.cyan,
+    ...(colors || {}),
+  };
+  const { reset, bold, dim, green, yellow, cyan } = palette;
+
+  const rawCols = Number(agyData?.terminal_width || config?.display?.terminalWidth || process.env.COLUMNS || 0);
+  const hasExplicitCols = Number.isFinite(rawCols) && rawCols > 0;
+  const cols = hasExplicitCols ? Math.floor(rawCols) : 120;
+
+  const mainModelIdent =
+    agyData?.model?.display_name ||
+    agyData?.model?.id ||
+    (typeof agyData?.model === 'string' ? agyData.model : '') ||
+    state?.lastTurnUsage?.model ||
+    '';
+  const mainModelKey = compactModelName(mainModelIdent) || '';
+
+  const modelMap = new Map();
+  const addEntry = (rawKey, inputTokens, cacheReadTokens, cacheWriteTokens) => {
+    const inp = Math.max(0, Number(inputTokens) || 0);
+    const cRead = Math.max(0, Number(cacheReadTokens) || 0);
+    const cWrite = Math.max(0, Number(cacheWriteTokens) || 0);
+    const totalPrompt = inp + cRead + cWrite;
+    if (totalPrompt <= 0) return;
+    const modelKey = compactModelName(rawKey) || String(rawKey || '').trim() || 'Model';
+    const existing = modelMap.get(modelKey);
+    if (existing) {
+      existing.inputTokens += inp;
+      existing.cacheReadTokens += cRead;
+      existing.cacheWriteTokens += cWrite;
+      existing.totalPrompt += totalPrompt;
+    } else {
+      modelMap.set(modelKey, {
+        modelKey,
+        inputTokens: inp,
+        cacheReadTokens: cRead,
+        cacheWriteTokens: cWrite,
+        totalPrompt,
+      });
+    }
+  };
+
+  const byModel = state?.costBreakdown?.byModel;
+  if (byModel && typeof byModel === 'object' && !Array.isArray(byModel)) {
+    for (const [modelKey, stats] of Object.entries(byModel)) {
+      if (!modelKey || !stats || typeof stats !== 'object') continue;
+      addEntry(modelKey, stats.inputTokens, stats.cacheReadTokens, stats.cacheWriteTokens);
+    }
   }
 
-  return parts.join(sep);
+  if (modelMap.size === 0) {
+    const cw = agyData?.context_window || {};
+    const cur = hasPositiveUsage(cw.current_usage)
+      ? cw.current_usage
+      : (state?.lastTurnUsage && typeof state.lastTurnUsage === 'object' ? state.lastTurnUsage : null);
+    if (cur) {
+      const inp = Math.max(0, Number(cur.input_tokens || 0));
+      const cCreate = Math.max(0, Number(cur.cache_creation_input_tokens || 0));
+      const cRead = Math.max(0, Number(cur.cache_read_input_tokens || 0));
+      const cacheTotal = cCreate + cRead;
+      const ident = mainModelIdent || cur.model || '';
+      const isInclusive = !ident || modelIncludesCacheInInput(ident);
+      const isCacheExclusiveTurn = Boolean(cur) && (cur.cacheExclusive === true || inp < cacheTotal);
+      const useInclusiveMode = isInclusive && !isCacheExclusiveTurn;
+      const uncachedIn = useInclusiveMode ? Math.max(0, inp - cacheTotal) : inp;
+      const fallbackKey = mainModelKey || compactModelName(cur.model || '') || 'Model';
+      addEntry(fallbackKey, uncachedIn, cRead, cCreate);
+    }
+  }
+
+  if (modelMap.size === 0) {
+    return '';
+  }
+
+  const entries = Array.from(modelMap.values()).sort((a, b) => {
+    const aIsMain = mainModelKey && a.modelKey === mainModelKey ? 1 : 0;
+    const bIsMain = mainModelKey && b.modelKey === mainModelKey ? 1 : 0;
+    if (aIsMain !== bIsMain) return bIsMain - aIsMain;
+    if (b.totalPrompt !== a.totalPrompt) return b.totalPrompt - a.totalPrompt;
+    return a.modelKey.localeCompare(b.modelKey);
+  }).slice(0, 4);
+
+  const icon = unicode ? '⟳' : '~';
+  const prefix = `${cyan}${icon}${reset} ${dim}${text.modelCacheLabel}${reset}`;
+  const normalSep = unicode ? `${dim} · ${reset}` : `${dim} | ${reset}`;
+  const compactSep = unicode ? `${dim}·${reset}` : `${dim}|${reset}`;
+  const innerDot = unicode ? ' · ' : ', ';
+
+  const formatEntry = (entry, detailMode) => {
+    const hitPct = Math.min(100, Math.max(0, (entry.cacheReadTokens * 100) / entry.totalPrompt));
+    let hitColor = dim;
+    if (hitPct >= 80) hitColor = `${green}${bold}`;
+    else if (hitPct >= 50) hitColor = yellow;
+
+    const head = `${entry.modelKey} ${hitColor}${hitPct.toFixed(0)}%${reset}`;
+    if (detailMode === 'pctOnly') {
+      return head;
+    }
+
+    const hitFmt = formatMonitorTokens(entry.cacheReadTokens);
+    const totalFmt = formatMonitorTokens(entry.totalPrompt);
+    const writeFmt = entry.cacheWriteTokens > 0 ? formatMonitorTokens(entry.cacheWriteTokens) : '';
+
+    if (detailMode === 'hitOnly') {
+      return `${head} ${dim}(${hitFmt})${reset}`;
+    }
+    if (detailMode === 'slash') {
+      const detail = writeFmt ? `${hitFmt}+${writeFmt}/${totalFmt}` : `${hitFmt}/${totalFmt}`;
+      return `${head} ${dim}(${detail})${reset}`;
+    }
+    const detail = writeFmt
+      ? `${text.cacheHitLabel} ${hitFmt}${innerDot}${text.cacheWriteLabel} ${writeFmt} / ${text.cacheInLabel} ${totalFmt}`
+      : `${text.cacheHitLabel} ${hitFmt} / ${text.cacheInLabel} ${totalFmt}`;
+    return `${head} ${dim}(${detail})${reset}`;
+  };
+
+  const buildLine = ({ detailMode, useCompactSep, limit }) => {
+    const activeSep = useCompactSep ? compactSep : normalSep;
+    const parts = [prefix];
+    for (const entry of entries.slice(0, limit)) {
+      parts.push(formatEntry(entry, detailMode));
+    }
+    return parts.join(activeSep);
+  };
+
+  const opts = {
+    detailMode: 'full',
+    useCompactSep: false,
+    limit: entries.length,
+  };
+
+  let line = buildLine(opts);
+  if (!hasExplicitCols || getAnsiDisplayWidth(line) <= cols) {
+    return line;
+  }
+
+  const steps = [
+    () => { opts.detailMode = 'slash'; },
+    () => { opts.detailMode = 'hitOnly'; },
+    () => { opts.useCompactSep = true; },
+    () => { opts.detailMode = 'pctOnly'; },
+  ];
+  for (let nextLimit = entries.length - 1; nextLimit >= 1; nextLimit -= 1) {
+    steps.push(() => { opts.limit = nextLimit; });
+  }
+
+  for (const applyStep of steps) {
+    applyStep();
+    line = buildLine(opts);
+    if (getAnsiDisplayWidth(line) <= cols) {
+      return line;
+    }
+  }
+
+  return truncateAnsiToDisplayWidth(line, cols, unicode ? '…' : '...');
 }
 
 module.exports = {
   formatMonitorTokens,
   buildSmoothBar,
   renderContextMonitorLine,
+  renderModelCacheLine,
 };

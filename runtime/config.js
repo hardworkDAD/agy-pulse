@@ -14,7 +14,9 @@ const FULL_DEFAULT_CONFIG = {
   },
   display: {
     showContextMonitor: true,
+    showModelCache: true,
     showCurrentDir: true,
+    showCycleMode: true,
     showSpeed: true,
     showModel: false,
     showTokenBar: false,
@@ -44,12 +46,18 @@ function getLocalConfigPath(cwd = process.cwd()) {
   return path.join(cwd, CONFIG_FILENAMES[0]);
 }
 
+function getGlobalConfigDir() {
+  const override = process.env.AGY_PULSE_GLOBAL_CONFIG_DIR;
+  return typeof override === 'string' && override.trim() ? override.trim() : __dirname;
+}
+
 function getGlobalConfigPath() {
+  const globalDir = getGlobalConfigDir();
   for (const name of CONFIG_FILENAMES) {
-    const candidate = path.join(__dirname, name);
+    const candidate = path.join(globalDir, name);
     if (fs.existsSync(candidate)) return candidate;
   }
-  return path.join(__dirname, CONFIG_FILENAMES[1]);
+  return path.join(globalDir, CONFIG_FILENAMES[0]);
 }
 
 function readJsonFile(filePath) {
@@ -65,31 +73,52 @@ function findExistingConfigPath(cwd = process.cwd()) {
     const localCandidate = path.join(cwd, name);
     if (fs.existsSync(localCandidate)) return localCandidate;
   }
+  const globalDir = getGlobalConfigDir();
   for (const name of CONFIG_FILENAMES) {
-    const globalCandidate = path.join(__dirname, name);
+    const globalCandidate = path.join(globalDir, name);
     if (fs.existsSync(globalCandidate)) return globalCandidate;
   }
   return null;
 }
 
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
 function mergeConfig(base, override) {
-  const safeBase = base && typeof base === 'object' ? base : {};
-  const safeOverride = override && typeof override === 'object' ? override : {};
-  return {
+  const safeBase = isPlainObject(base) ? base : {};
+  const safeOverride = isPlainObject(override) ? override : {};
+  const baseDisplay = isPlainObject(safeBase.display) ? safeBase.display : {};
+  const overrideDisplay = isPlainObject(safeOverride.display) ? safeOverride.display : {};
+  const mergedDisplay = {
+    ...baseDisplay,
+    ...overrideDisplay,
+  };
+  if (isPlainObject(baseDisplay.cacheHitThresholds) || isPlainObject(overrideDisplay.cacheHitThresholds)) {
+    mergedDisplay.cacheHitThresholds = {
+      ...(isPlainObject(baseDisplay.cacheHitThresholds) ? baseDisplay.cacheHitThresholds : {}),
+      ...(isPlainObject(overrideDisplay.cacheHitThresholds) ? overrideDisplay.cacheHitThresholds : {}),
+    };
+  }
+  const merged = {
     ...safeBase,
     ...safeOverride,
     theme: typeof safeOverride.theme === 'string'
       ? safeOverride.theme
-      : { ...(safeBase.theme || {}), ...(safeOverride.theme && typeof safeOverride.theme === 'object' ? safeOverride.theme : {}) },
-    display: {
-      ...(safeBase.display || {}),
-      ...(safeOverride.display && typeof safeOverride.display === 'object' ? safeOverride.display : {}),
-    },
+      : { ...(isPlainObject(safeBase.theme) ? safeBase.theme : {}), ...(isPlainObject(safeOverride.theme) ? safeOverride.theme : {}) },
+    display: mergedDisplay,
     thresholds: {
-      ...(safeBase.thresholds || {}),
-      ...(safeOverride.thresholds && typeof safeOverride.thresholds === 'object' ? safeOverride.thresholds : {}),
+      ...(isPlainObject(safeBase.thresholds) ? safeBase.thresholds : {}),
+      ...(isPlainObject(safeOverride.thresholds) ? safeOverride.thresholds : {}),
     },
   };
+  if (isPlainObject(safeBase.icons) || isPlainObject(safeOverride.icons)) {
+    merged.icons = {
+      ...(isPlainObject(safeBase.icons) ? safeBase.icons : {}),
+      ...(isPlainObject(safeOverride.icons) ? safeOverride.icons : {}),
+    };
+  }
+  return merged;
 }
 
 async function loadConfig(cwd = process.cwd()) {
@@ -114,7 +143,7 @@ async function saveConfig(config, isGlobal = true, cwd = process.cwd()) {
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
   const tmpPath = `${targetPath}.tmp.${process.pid}.${Date.now()}`;
   try {
-    fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), 'utf8');
+    fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmpPath, targetPath);
   } catch (err) {
     try {
@@ -126,6 +155,7 @@ async function saveConfig(config, isGlobal = true, cwd = process.cwd()) {
 
 module.exports = {
   FULL_DEFAULT_CONFIG,
+  mergeConfig,
   loadConfig,
   getLocalConfigPath,
   getGlobalConfigPath,

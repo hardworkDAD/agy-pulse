@@ -57,7 +57,7 @@ function buildHeaders(accessToken) {
 }
 
 function resolveEndpoints(config = {}) {
-  const envEndpoints = process.env.AGY_PULSE_ENDPOINTS || process.env.AGY_HUD_ENDPOINTS;
+  const envEndpoints = process.env.AGY_PULSE_ENDPOINTS;
   if (envEndpoints) {
     return envEndpoints.split(',').map(s => s.trim()).filter(Boolean);
   }
@@ -317,6 +317,51 @@ function classifySummaryBucketWindow(bucket) {
   return classifyQuotaWindow(bucket?.resetTime);
 }
 
+function resolveSummaryGroupFallbackTarget(displayName, buckets) {
+  if (displayName.includes('argon')) return 'argon';
+  if (
+    displayName.includes('gemini') ||
+    displayName.includes('carbon') ||
+    displayName.includes('hydrogen') ||
+    displayName.includes('neon') ||
+    displayName.includes('orchestrator')
+  ) {
+    return 'google';
+  }
+  if (
+    displayName.includes('claude') ||
+    displayName.includes('3p') ||
+    displayName.includes('gpt-oss') ||
+    displayName.includes('gpt')
+  ) {
+    return 'claude';
+  }
+  return deriveCustomProviderKey(displayName, buckets);
+}
+
+function resolveSummaryBucketTarget(bucket, groupFallbackTarget) {
+  const bid = typeof bucket?.bucketId === 'string' ? bucket.bucketId.toLowerCase() : '';
+  if (bid.includes('argon')) return 'argon';
+  if (
+    bid.startsWith('gemini-') ||
+    bid.includes('carbon') ||
+    bid.includes('hydrogen') ||
+    bid.includes('neon') ||
+    bid.includes('orchestrator')
+  ) {
+    return 'google';
+  }
+  if (
+    bid.startsWith('3p-') ||
+    bid.includes('claude') ||
+    bid.includes('gpt-oss') ||
+    bid.includes('gpt')
+  ) {
+    return 'claude';
+  }
+  return groupFallbackTarget;
+}
+
 /**
  * Parse the retrieveUserQuotaSummary response into provider-level windows.
  * Expected shape: { groups: [{ displayName, buckets: [{ bucketId, window, remainingFraction, resetTime }] }] }
@@ -332,42 +377,7 @@ function parseQuotaSummary(data) {
     if (!group || !Array.isArray(group.buckets)) continue;
     const buckets = group.buckets;
     const displayName = (group.displayName || '').toLowerCase();
-    const bucketIds = buckets
-      .map(b => (b && typeof b.bucketId === 'string' ? b.bucketId.toLowerCase() : ''))
-      .filter(Boolean);
-
-    const hasArgonBucket = bucketIds.some(id => id.includes('argon'));
-    const hasGeminiBucket = bucketIds.some(id =>
-      (id.startsWith('gemini-') || id.includes('carbon') || id.includes('hydrogen') || id.includes('orchestrator')) &&
-      !id.includes('argon')
-    );
-    const has3pBucket = bucketIds.some(id =>
-      id.startsWith('3p-') || id.includes('claude') || id.includes('gpt-oss') || id.includes('gpt')
-    );
-
-    let target = null;
-    if (displayName.includes('argon') || hasArgonBucket) {
-      target = 'argon';
-    } else if (
-      displayName.includes('gemini') ||
-      displayName.includes('carbon') ||
-      displayName.includes('hydrogen') ||
-      displayName.includes('orchestrator') ||
-      hasGeminiBucket
-    ) {
-      target = 'google';
-    } else if (
-      displayName.includes('claude') ||
-      displayName.includes('3p') ||
-      displayName.includes('gpt-oss') ||
-      displayName.includes('gpt') ||
-      has3pBucket
-    ) {
-      target = 'claude';
-    } else {
-      target = deriveCustomProviderKey(displayName, buckets);
-      if (!result[target]) result[target] = {};
-    }
+    const groupFallbackTarget = resolveSummaryGroupFallbackTarget(displayName, buckets);
 
     for (const b of buckets) {
       if (!b || typeof b.resetTime !== 'string') continue;
@@ -375,6 +385,8 @@ function parseQuotaSummary(data) {
       if (!Number.isFinite(ts)) continue;
       const winType = classifySummaryBucketWindow(b);
       if (!winType) continue;
+      const target = resolveSummaryBucketTarget(b, groupFallbackTarget);
+      if (!result[target]) result[target] = {};
       // Proto3 may omit a default 0 remainingFraction.
       let rf = typeof b.remainingFraction === 'number' ? b.remainingFraction : 0;
       if (!Number.isFinite(rf) || rf < 0) rf = 0;
@@ -402,7 +414,7 @@ function parseQuotaSummary(data) {
 
 /**
  * Enrich normalized models with provider-level weekly/5h windows from summary.
- * Provider mapping: GOOGLE/gemini/carbon/hydrogen/orchestrator -> google summary,
+ * Provider mapping: GOOGLE/gemini/carbon/hydrogen/neon/orchestrator -> google summary,
  * ANTHROPIC/claude/gpt -> claude summary, ARGON -> argon summary, or matching custom keys.
  * @param {Array} models
  * @param {Object|null} summary
@@ -416,13 +428,13 @@ function enrichModelsWithQuotaSummary(models, summary, now = Date.now()) {
   );
   if (validSummaryKeys.length === 0) return models;
 
-  return models.map(m => {
+  const enriched = models.map(m => {
     if (!m || !m.id) return m;
     const idAndName = `${m.id} ${m.displayName || ''}`.toLowerCase();
     const isArgon = /argon/i.test(idAndName);
     const isGoogle = !isArgon && (
       m.modelProvider === 'MODEL_PROVIDER_GOOGLE' ||
-      /gemini|carbon|hydrogen|orchestrator/i.test(idAndName)
+      /gemini|carbon|hydrogen|neon|orchestrator/i.test(idAndName)
     );
     const isClaude = m.modelProvider === 'MODEL_PROVIDER_ANTHROPIC' || /claude|gpt/i.test(idAndName);
     let key = isArgon ? 'argon' : isGoogle ? 'google' : isClaude ? 'claude' : null;
@@ -451,6 +463,14 @@ function enrichModelsWithQuotaSummary(models, summary, now = Date.now()) {
     }
     return { ...m, windows };
   });
+  if (enriched.length === 0 && models.unavailableReason) {
+    Object.defineProperty(enriched, 'unavailableReason', {
+      value: models.unavailableReason,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  return enriched;
 }
 
 /**
@@ -505,7 +525,7 @@ async function fetchQuotaFromCloud(accessToken, injectedConfig) {
 
   const endpoints = resolveEndpoints(config);
 
-  const envModelsRaw = process.env.AGY_PULSE_INTERESTING_MODELS || process.env.AGY_HUD_INTERESTING_MODELS;
+  const envModelsRaw = process.env.AGY_PULSE_INTERESTING_MODELS;
   const envModelIds = envModelsRaw
     ? envModelsRaw.split(',').map(s => s.trim()).filter(Boolean)
     : null;
@@ -535,7 +555,7 @@ async function fetchQuotaFromCloud(accessToken, injectedConfig) {
             data
           );
       if (data && data.models) {
-        const imageModelIds = Object.keys(data.models).filter(id => id.includes('-image') || id.toLowerCase().includes('image'));
+        const imageModelIds = Object.keys(data.models).filter(id => /image|imagen/i.test(id));
         interestingModelIds = [...new Set([...interestingModelIds, ...imageModelIds])];
       }
       normalized = normalizeQuotaModels(models, interestingModelIds);

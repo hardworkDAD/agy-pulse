@@ -8,9 +8,7 @@ const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
-const zipPath = fs.existsSync(path.join(projectRoot, 'agy-pulse.zip'))
-  ? path.join(projectRoot, 'agy-pulse.zip')
-  : path.join(projectRoot, 'agy-hud.zip');
+const zipPath = path.join(projectRoot, 'agy-pulse.zip');
 const agyBin = process.env.AGY_BIN || 'agy';
 const currentHome = process.argv.includes('--current-home');
 const timeoutArg = process.argv.find(arg => arg.startsWith('--observe-timeout-ms='));
@@ -22,7 +20,7 @@ function stripAnsi(value) {
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
 }
 
-function detectHudRender(...values) {
+function detectStatusLineRender(...values) {
   return values
     .filter(value => typeof value === 'string' && value.trim())
     .some(value => {
@@ -30,11 +28,11 @@ function detectHudRender(...values) {
       const hasBranch = /(?:⎇||\[B\])\s*\S+/.test(plain);
       const hasContext = /(?:⛁|󱔐|\[C\])\s*\d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]?/i.test(plain);
       const hasTokenBreakdown = /(?:⚿|󰚩|\[Tk\]|Tokens)\s*(?:Tokens\s+)?\d+(?:\.\d+)?[kM]?\s*(?:↑|\^|\(in:)/i.test(plain);
-      const hasLegacyHud = hasBranch && hasContext && hasTokenBreakdown;
+      const hasClassicStatusLine = hasBranch && hasContext && hasTokenBreakdown;
 
       const hasContextMonitor = /(?:◈|\*)\s+.+?\s+·\s+(?:Ctx|上下文)\s+\S+\s+\d+(?:\.\d+)?%/.test(plain);
       const hasStatusOrQuota = /(?:Quota\s+(?:unavailable|loading)|配额|Free|Pro|Ultra|Enterprise|Google|Claude|│|\|)/i.test(plain);
-      return hasLegacyHud || (hasContextMonitor && hasStatusOrQuota);
+      return hasClassicStatusLine || (hasContextMonitor && hasStatusOrQuota);
     });
 }
 
@@ -164,7 +162,7 @@ function run(command, args, options = {}) {
 
 function startZipServer() {
   const server = http.createServer((req, res) => {
-    if (req.url !== '/agy-pulse.zip' && req.url !== '/agy-hud.zip') {
+    if (req.url !== '/agy-pulse.zip') {
       res.writeHead(404);
       res.end();
       return;
@@ -219,8 +217,7 @@ function readInstallState(env) {
   const settingsPath = path.join(base, 'settings.json');
   const pluginDirs = getPluginDirs(env);
   const pulseRuntimeDir = path.join(base, 'agy-pulse-runtime');
-  const legacyRuntimeDir = path.join(base, 'agy-hud-runtime');
-  const runtimeDir = fs.existsSync(pulseRuntimeDir) ? pulseRuntimeDir : legacyRuntimeDir;
+  const runtimeDir = pulseRuntimeDir;
   let settings = null;
   try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch { /* missing */ }
   return {
@@ -230,9 +227,7 @@ function readInstallState(env) {
     pluginExists: pluginDirs.some(pluginDir => fs.existsSync(pluginDir)),
     pluginDirs: pluginDirs.filter(pluginDir => fs.existsSync(pluginDir)),
     runtimeExists: fs.existsSync(runtimeDir),
-    runtimeHudExists:
-      fs.existsSync(path.join(runtimeDir, 'runtime', 'bin', 'agy-pulse.js')) ||
-      fs.existsSync(path.join(runtimeDir, 'runtime', 'bin', 'agy-hud.js')),
+    runtimeEntrypointExists: fs.existsSync(path.join(runtimeDir, 'runtime', 'bin', 'agy-pulse.js')),
   };
 }
 
@@ -240,7 +235,7 @@ function getPluginDirs(env) {
   const home = env.HOME || env.USERPROFILE || os.homedir();
   const base = path.join(home, '.gemini', 'antigravity-cli');
   const dirs = [];
-  for (const name of ['agy-pulse', 'agy-hud']) {
+  for (const name of ['agy-pulse']) {
     dirs.push(
       path.join(home, '.gemini', 'config', 'plugins', name),
       path.join(base, 'plugins', name),
@@ -323,18 +318,74 @@ function observeLocalAgy(env) {
   });
 }
 
+const REQUIRED_ZIP_ENTRIES = [
+  'plugin.json',
+  'gemini-extension.json',
+  'skills/pulse-config/SKILL.md',
+  'runtime/bin/agy-pulse.js',
+];
+
+function listZipEntries(zipFilePath) {
+  const buf = fs.readFileSync(zipFilePath);
+  const minEocdOffset = Math.max(0, buf.length - 65557);
+  let eocdOffset = -1;
+  for (let i = buf.length - 22; i >= minEocdOffset; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) {
+    throw new Error(`Invalid zip archive (missing EOCD): ${zipFilePath}`);
+  }
+  const totalEntries = buf.readUInt16LE(eocdOffset + 10);
+  let offset = buf.readUInt32LE(eocdOffset + 16);
+  const entries = [];
+  for (let idx = 0; idx < totalEntries; idx++) {
+    if (offset + 46 > buf.length || buf.readUInt32LE(offset) !== 0x02014b50) {
+      throw new Error(`Invalid zip central directory entry at offset ${offset}`);
+    }
+    const nameLen = buf.readUInt16LE(offset + 28);
+    const extraLen = buf.readUInt16LE(offset + 30);
+    const commentLen = buf.readUInt16LE(offset + 32);
+    const name = buf.subarray(offset + 46, offset + 46 + nameLen).toString('utf8').replace(/\\/g, '/');
+    entries.push(name);
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+function verifyZipManifest(zipFilePath, requiredEntries = REQUIRED_ZIP_ENTRIES) {
+  if (!fs.existsSync(zipFilePath)) {
+    return { ok: false, missing: [...requiredEntries], entryCount: 0, reason: 'zip_missing' };
+  }
+  const entries = listZipEntries(zipFilePath);
+  const entrySet = new Set(entries);
+  const missing = requiredEntries.filter(req => !entrySet.has(req));
+  return {
+    ok: missing.length === 0,
+    missing,
+    entryCount: entries.length,
+  };
+}
+
 async function main() {
   // Skip the zip build when caller already did it (e.g. release.sh's E2E
   // gate). Without this, release.sh → verify-display.js → release.sh =
   // infinite recursion.
-  if (!process.env.AGY_HUD_SKIP_BUILD) {
+  if (!process.env.AGY_PULSE_SKIP_BUILD) {
     execFileSync('bash', ['release.sh', '--local'], {
       cwd: projectRoot,
-      stdio: process.env.AGY_HUD_VERIFY_VERBOSE ? 'inherit' : 'ignore',
+      stdio: process.env.AGY_PULSE_VERIFY_VERBOSE ? 'inherit' : 'ignore',
     });
   }
 
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-hud-verify-'));
+  const zipManifest = verifyZipManifest(zipPath);
+  if (!zipManifest.ok) {
+    fail('agy-pulse.zip manifest check failed', { zipPath, ...zipManifest });
+  }
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-verify-'));
   const env = buildEnv(tmpRoot);
   const { server, url } = await startZipServer();
   try {
@@ -352,7 +403,7 @@ async function main() {
       }));
     }
     const stalePresentBeforeBootstrap = Boolean(planted && fs.existsSync(planted));
-    const noAuthMode = process.env.AGY_HUD_E2E_NO_AUTH_OBSERVE === '1';
+    const noAuthMode = process.env.AGY_PULSE_E2E_NO_AUTH_OBSERVE === '1';
     if (install.status !== 0 || !/\[ok\]/.test(install.stdout || '')) {
       fail('agy plugin install failed', {
         status: install.status,
@@ -367,11 +418,11 @@ async function main() {
 
     // Two-step install: plugin install does not run JS. Bootstrap explicitly.
     const bootstrap = await run(process.execPath, [path.join(projectRoot, 'scripts', 'bootstrap.js')], {
-      env: { ...env, AGY_HUD_SETUP_SOURCE_DIR: projectRoot },
+      env: { ...env, AGY_PULSE_SETUP_SOURCE_DIR: projectRoot },
       timeout: 60_000,
     });
     if (bootstrap.status !== 0) {
-      fail('agy-hud bootstrap failed', {
+      fail('agy-pulse bootstrap failed', {
         status: bootstrap.status,
         stdout: bootstrap.stdout,
         stderr: bootstrap.stderr,
@@ -381,7 +432,7 @@ async function main() {
     // No-auth mode (CI): skip the agy-session PTY spawn (needs OAuth) and
     // directly invoke the configured statusLine command. Catches install,
     // bootstrap, and standalone runtime rendering issues; the auth-required
-    // "HUD visible inside live agy session" check stays in dev / release.sh.
+    // "status line visible inside live agy session" check stays in dev / release.sh.
     let observation;
     if (noAuthMode) {
       const stateNow = readInstallState(env);
@@ -404,17 +455,17 @@ async function main() {
     const observedPlain = stripAnsi(observedRaw);
     const observedScreen = renderTerminalScreen(observedRaw);
     const afterObserve = readInstallState(env);
-    const hudVisible = detectHudRender(observedRaw, observedScreen, observedPlain);
-    const streamHudPresent = detectHudRender(observedRaw, observedPlain);
-    const statusLineReady = Boolean(afterObserve.statusLine && /agy-(?:pulse|hud)/i.test(String(afterObserve.statusLine.command || '')));
-    const runtimeReady = Boolean(afterObserve.runtimeHudExists);
+    const statusLineVisible = detectStatusLineRender(observedRaw, observedScreen, observedPlain);
+    const streamStatusLinePresent = detectStatusLineRender(observedRaw, observedPlain);
+    const statusLineReady = Boolean(afterObserve.statusLine && /agy-pulse/i.test(String(afterObserve.statusLine.command || '')));
+    const runtimeReady = Boolean(afterObserve.runtimeEntrypointExists);
     const staleCleaned = stalePresentBeforeBootstrap ? !fs.existsSync(planted) : true;
-    const displayReady = hudVisible && statusLineReady && runtimeReady && staleCleaned;
+    const displayReady = statusLineVisible && statusLineReady && runtimeReady && staleCleaned;
 
     // Dump raw PTY bytes as artifact so CI can upload and reviewers can
-    // `cat` the file in their own terminal and see the colored HUD render.
-    const artifactDir = process.env.AGY_HUD_E2E_ARTIFACT_DIR || os.tmpdir();
-    const artifactPath = path.join(artifactDir, `agy-hud-pty-${Date.now()}.log`);
+    // `cat` the file in their own terminal and see the colored status line.
+    const artifactDir = process.env.AGY_PULSE_E2E_ARTIFACT_DIR || os.tmpdir();
+    const artifactPath = path.join(artifactDir, `agy-pulse-pty-${Date.now()}.log`);
     try {
       fs.writeFileSync(artifactPath, observedRaw);
     } catch { /* artifact best-effort */ }
@@ -422,6 +473,7 @@ async function main() {
     const report = {
       ok: displayReady,
       homeMode: currentHome ? 'current-home' : 'isolated-home',
+      zipManifest,
       install: {
         status: install.status,
         processedSkills: /skills\s+:\s+\d+ processed/.test(stripAnsi(`${install.stdout}\n${install.stderr}`)),
@@ -435,8 +487,8 @@ async function main() {
         status: observation.status,
         signal: observation.signal,
         timedOut: observation.timedOut,
-        hudVisible,
-        streamHudPresent,
+        statusLineVisible,
+        streamStatusLinePresent,
         statusLineReady,
         runtimeReady,
         displayReady,
@@ -461,7 +513,10 @@ async function main() {
 module.exports = {
   stripAnsi,
   renderTerminalScreen,
-  detectHudRender,
+  detectStatusLineRender,
+  REQUIRED_ZIP_ENTRIES,
+  listZipEntries,
+  verifyZipManifest,
 };
 
 if (require.main === module) {

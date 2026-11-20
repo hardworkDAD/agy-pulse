@@ -8,6 +8,12 @@ const FIVE_HOUR_WINDOW_THRESHOLD_MS = 12 * 60 * 60 * 1000;
 // Authoritative display-name mapping for 2026 and legacy model IDs when the
 // upstream API omits `displayName`.
 const MODEL_DISPLAY_NAMES = {
+  'gemini-3-flash-agent': 'Gemini 3.5 Flash (High)',
+  'gemini-3.5-flash-low': 'Gemini 3.5 Flash (Medium)',
+  'gemini-3.5-flash-extra-low': 'Gemini 3.5 Flash (Low)',
+  'gemini-pro-agent': 'Gemini 3.1 Pro (High)',
+  'gemini-3.1-pro-low': 'Gemini 3.1 Pro (Low)',
+  'gemini-4-argon': 'Gemini 4 Argon (Medium)',
   'gemini-4-carbon-high': 'Gemini 4 Carbon (High)',
   'gemini-4-carbon-medium': 'Gemini 4 Carbon (Medium)',
   'gemini-4-carbon-low': 'Gemini 4 Carbon (Low)',
@@ -15,16 +21,30 @@ const MODEL_DISPLAY_NAMES = {
   'gemini-4-hydrogen-high': 'Gemini 4 Hydrogen (High)',
   'gemini-4-hydrogen-medium': 'Gemini 4 Hydrogen (Medium)',
   'gemini-4-hydrogen-low': 'Gemini 4 Hydrogen (Low)',
+  'gemini-4-hydrogen-sonar': 'Gemini 4 Hydrogen (Sonar)',
+  'gemini-4-neon': 'Gemini 4 Neon',
+  'gemini-4-neon-xhigh': 'Gemini 4 Neon (XHigh)',
+  'gemini-4-neon-high': 'Gemini 4 Neon (High)',
+  'gemini-4-neon-medium': 'Gemini 4 Neon (Medium)',
+  'gemini-4-neon-low': 'Gemini 4 Neon (Low)',
   'gemini-4-argon-high': 'Gemini 4 Argon (High)',
   'gemini-4-argon-medium': 'Gemini 4 Argon (Medium)',
   'gemini-4-argon-low': 'Gemini 4 Argon (Low)',
   'gemini-3.8-flash-high': 'Gemini 3.8 Flash (High)',
   'gemini-3.8-flash-medium': 'Gemini 3.8 Flash (Medium)',
   'gemini-3.8-flash-low': 'Gemini 3.8 Flash (Low)',
+  'gemini-3.8-flash-tiered': 'Gemini 3.8 Flash (Tiered)',
+  'gemini-3.5-flash-lite': 'Gemini 3.5 Flash Lite',
+  'gemini-3.1-flash-image': 'Gemini 3.1 Flash Image',
   'gemini-pro-orchestrator': 'Orchestrator (Carbon)',
   'gemini-pro-orchestrator-argon': 'Orchestrator (Argon)',
+  'gemini-pro-orchestrator-neon': 'Orchestrator (Neon)',
   'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
   'claude-sonnet-4-6': 'Claude Sonnet 4.6 (Thinking)',
+  'claude-opus-5-5': 'Claude Opus 5.5',
+  'claude-opus-5-5-thinking': 'Claude Opus 5.5 (Thinking)',
+  'claude-sonnet-5-5': 'Claude Sonnet 5.5',
+  'claude-sonnet-5-5-thinking': 'Claude Sonnet 5.5 (Thinking)',
   'gpt-oss-120b-medium': 'GPT-OSS 120B (Medium)',
 };
 
@@ -33,8 +53,10 @@ const FALLBACK_AGENT_MODEL_IDS = [
   'gemini-3-flash-agent',
   'gemini-3.5-flash-low',
   'gemini-3.5-flash-extra-low',
+  'gemini-3.5-flash-lite',
   'gemini-pro-agent',
   'gemini-3.1-pro-low',
+  'gemini-3.1-flash-image',
   'gemini-4-argon',
   'gemini-4-carbon-high',
   'gemini-4-carbon-medium',
@@ -43,24 +65,39 @@ const FALLBACK_AGENT_MODEL_IDS = [
   'gemini-4-hydrogen-high',
   'gemini-4-hydrogen-medium',
   'gemini-4-hydrogen-low',
+  'gemini-4-hydrogen-sonar',
+  'gemini-4-neon',
+  'gemini-4-neon-xhigh',
+  'gemini-4-neon-high',
+  'gemini-4-neon-medium',
+  'gemini-4-neon-low',
   'gemini-4-argon-high',
   'gemini-4-argon-medium',
   'gemini-4-argon-low',
   'gemini-3.8-flash-high',
   'gemini-3.8-flash-medium',
   'gemini-3.8-flash-low',
+  'gemini-3.8-flash-tiered',
   'gemini-pro-orchestrator',
   'gemini-pro-orchestrator-argon',
+  'gemini-pro-orchestrator-neon',
   'claude-sonnet-4-6',
   'claude-opus-4-6-thinking',
+  'claude-opus-5-5',
+  'claude-opus-5-5-thinking',
+  'claude-sonnet-5-5',
+  'claude-sonnet-5-5-thinking',
   'gpt-oss-120b-medium',
 ];
 
 function resolveModelDisplayName(id, explicitDisplayName) {
-  if (typeof explicitDisplayName === 'string' && explicitDisplayName.trim()) {
-    return explicitDisplayName;
+  if (typeof explicitDisplayName === 'string') {
+    const trimmed = explicitDisplayName.trim();
+    if (trimmed && trimmed !== id) {
+      return explicitDisplayName;
+    }
   }
-  return MODEL_DISPLAY_NAMES[id] || id;
+  return MODEL_DISPLAY_NAMES[id] || (typeof explicitDisplayName === 'string' && explicitDisplayName.trim()) || id;
 }
 
 function discoverAgentModelIds(apiResponse) {
@@ -145,7 +182,7 @@ function pruneExpiredWindows(windows, now = Date.now()) {
 }
 
 /**
- * Normalize the fetchAvailableModels response to the HUD quota shape.
+ * Normalize the fetchAvailableModels response to the status line quota shape.
  * Each model carries the `window` tag inferred from its resetTime so that
  * downstream merging can keep both windows' last observed values in cache.
  * @param {Object<string, Object>} models

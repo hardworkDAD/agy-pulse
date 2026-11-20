@@ -7,22 +7,23 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 
-const DEFAULT_SOURCE_BASE = '';
+const DEFAULT_SOURCE_BASE = 'https://raw.githubusercontent.com/hardworkDAD/agy-pulse/main';
 
 const RUNTIME_FILES = [
   'package.json',
-  'runtime/agy-hud.config.json',
+  'runtime/agy-pulse.config.json',
   'runtime/brand.js',
   'runtime/bin/agy-pulse.js',
   'runtime/bin/agy-pulse.cmd',
-  'runtime/bin/agy-hud.js',
-  'runtime/bin/agy-hud.cmd',
   'runtime/compaction.js',
   'runtime/config-wizard.js',
   'runtime/config.js',
   'runtime/cost.js',
   'runtime/daily-cost.js',
+  'runtime/dashboard-ui.js',
+  'runtime/dashboard.js',
   'runtime/encoding.js',
+  'runtime/ledger.js',
   'runtime/parser.js',
   'runtime/paths.js',
   'runtime/quota.js',
@@ -36,12 +37,17 @@ const RUNTIME_FILES = [
   'runtime/renderer/lang.js',
   'runtime/renderer/quota-render.js',
   'runtime/speed.js',
+  'runtime/stats.js',
   'runtime/statusline-installer.js',
   'runtime/uninstall.js',
   'runtime/update-checker.js',
+  'scripts/diagnose-auth.js',
 ];
 
 function getAntigravityRoots(env = process.env, homeDir = os.homedir()) {
+  if (env && env.AGY_PULSE_DATA_DIR) {
+    return [env.AGY_PULSE_DATA_DIR];
+  }
   return [
     path.join(homeDir, '.gemini', 'antigravity-cli'),
     env.XDG_DATA_HOME ? path.join(env.XDG_DATA_HOME, 'antigravity-cli') : null,
@@ -73,12 +79,10 @@ function resolveSourceBase(options = {}, env = process.env) {
   if (options.sourceBase) return options.sourceBase;
   const explicit =
     env.AGY_PULSE_REPO_RAW ||
-    env.AGY_HUD_REPO_RAW ||
-    env.AGY_PULSE_SETUP_SOURCE_BASE ||
-    env.AGY_HUD_SETUP_SOURCE_BASE;
+    env.AGY_PULSE_SETUP_SOURCE_BASE;
   if (explicit) return explicit;
 
-  const repoSlug = env.AGY_PULSE_REPO || env.AGY_HUD_REPO;
+  const repoSlug = env.AGY_PULSE_REPO;
   if (repoSlug && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repoSlug.trim())) {
     return `https://raw.githubusercontent.com/${repoSlug.trim()}/main`;
   }
@@ -146,7 +150,7 @@ async function readRuntimeFile(relativePath, options) {
 }
 
 const STALE_PLUGIN_FILES = ['hooks.json', 'mcp_config.json'];
-const STALE_PLUGIN_DIRS = ['agents', 'commands', 'rules', 'extensions'];
+const STALE_PLUGIN_DIRS = ['agents', 'commands', 'rules', 'extensions', 'skills/hud-config'];
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
@@ -155,7 +159,7 @@ function unique(values) {
 function getPluginDirs(antigravityRoot, options = {}) {
   const env = options.env || process.env;
   const homeDir = options.homeDir || os.homedir();
-  const pluginNames = ['agy-pulse', 'agy-hud'];
+  const pluginNames = ['agy-pulse'];
   const dirs = [];
 
   for (const name of pluginNames) {
@@ -184,7 +188,7 @@ function cleanStalePluginFiles(antigravityRoot, options = {}) {
       }
     }
     for (const d of STALE_PLUGIN_DIRS) {
-      const p = path.join(pluginDir, d);
+      const p = path.join(pluginDir, ...d.split('/'));
       if (fs.existsSync(p)) {
         fs.rmSync(p, { recursive: true, force: true });
         removed.push(p);
@@ -216,17 +220,177 @@ function replaceRuntimeDirAtomically(runtimeDir, tempRuntimeDir) {
   }
 }
 
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function mergePreservedConfig(defaults, existing) {
+  const merged = { ...defaults, ...existing };
+  if (typeof existing.theme === 'string') {
+    merged.theme = existing.theme;
+  } else if (isPlainObject(defaults.theme) || isPlainObject(existing.theme)) {
+    merged.theme = {
+      ...(isPlainObject(defaults.theme) ? defaults.theme : {}),
+      ...(isPlainObject(existing.theme) ? existing.theme : {}),
+    };
+  }
+  if (isPlainObject(defaults.display) || isPlainObject(existing.display)) {
+    const mergedDisplay = {
+      ...(isPlainObject(defaults.display) ? defaults.display : {}),
+      ...(isPlainObject(existing.display) ? existing.display : {}),
+    };
+    if (isPlainObject(defaults.display?.cacheHitThresholds) || isPlainObject(existing.display?.cacheHitThresholds)) {
+      mergedDisplay.cacheHitThresholds = {
+        ...(isPlainObject(defaults.display?.cacheHitThresholds) ? defaults.display.cacheHitThresholds : {}),
+        ...(isPlainObject(existing.display?.cacheHitThresholds) ? existing.display.cacheHitThresholds : {}),
+      };
+    }
+    merged.display = mergedDisplay;
+  }
+  if (isPlainObject(defaults.icons) || isPlainObject(existing.icons)) {
+    merged.icons = {
+      ...(isPlainObject(defaults.icons) ? defaults.icons : {}),
+      ...(isPlainObject(existing.icons) ? existing.icons : {}),
+    };
+  }
+  if (isPlainObject(defaults.thresholds) || isPlainObject(existing.thresholds)) {
+    merged.thresholds = {
+      ...(isPlainObject(defaults.thresholds) ? defaults.thresholds : {}),
+      ...(isPlainObject(existing.thresholds) ? existing.thresholds : {}),
+    };
+  }
+  return merged;
+}
+
+function preserveExistingConfig(runtimeDir, tempRuntimeDir, options = {}) {
+  const resetConfig = options.resetConfig === true || process.argv.includes('--reset-config');
+  if (resetConfig) return false;
+
+  const existingConfigPath = path.join(runtimeDir, 'runtime', 'agy-pulse.config.json');
+  const nextConfigPath = path.join(tempRuntimeDir, 'runtime', 'agy-pulse.config.json');
+  if (!fs.existsSync(existingConfigPath) || !fs.existsSync(nextConfigPath)) {
+    return false;
+  }
+
+  try {
+    const existingConfig = JSON.parse(fs.readFileSync(existingConfigPath, 'utf8'));
+    const nextDefaultConfig = JSON.parse(fs.readFileSync(nextConfigPath, 'utf8'));
+    if (!isPlainObject(existingConfig) || !isPlainObject(nextDefaultConfig)) {
+      return false;
+    }
+    const mergedConfig = mergePreservedConfig(nextDefaultConfig, existingConfig);
+    fs.writeFileSync(nextConfigPath, JSON.stringify(mergedConfig, null, 2) + '\n', 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearStaleUpdateStatus(antigravityRoot, runtimeDir) {
+  const statusPath = path.join(antigravityRoot, 'agy-pulse-update-status.json');
+  if (!fs.existsSync(statusPath)) return false;
+
+  let installedVersion = '0.0.0';
+  try {
+    const pkgPath = path.join(runtimeDir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      if (typeof pkg?.version === 'string' && pkg.version.trim()) {
+        installedVersion = pkg.version.trim();
+      }
+    }
+  } catch {}
+
+  try {
+    const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+    if (!status || typeof status !== 'object') {
+      fs.rmSync(statusPath, { force: true });
+      return true;
+    }
+    const checkerPath = path.join(runtimeDir, 'runtime', 'update-checker.js');
+    delete require.cache[require.resolve(checkerPath)];
+    const { isNewerVersion } = require(checkerPath);
+    if (!status.latestVersion || !isNewerVersion(status.latestVersion, installedVersion)) {
+      const nextStatus = {
+        ...status,
+        localVersion: installedVersion,
+        updateAvailable: false,
+      };
+      const tmpPath = `${statusPath}.tmp.${process.pid}.${Date.now()}`;
+      fs.writeFileSync(tmpPath, JSON.stringify(nextStatus, null, 2), { mode: 0o600 });
+      fs.renameSync(tmpPath, statusPath);
+      return true;
+    }
+    return false;
+  } catch {
+    try { fs.rmSync(statusPath, { force: true }); } catch {}
+    return true;
+  }
+}
+
+function resolveCliBinDir(options = {}) {
+  const env = options.env || process.env;
+  const homeDir = options.homeDir || os.homedir();
+  const platform = options.platform || process.platform;
+  if (options.binDir) return options.binDir;
+  if (env.AGY_PULSE_BIN_DIR) return env.AGY_PULSE_BIN_DIR;
+  if (platform === 'win32' && env.LOCALAPPDATA) {
+    return path.join(env.LOCALAPPDATA, 'agy', 'bin');
+  }
+  return path.join(homeDir, '.local', 'bin');
+}
+
+function installCliShim(runtimeDir, options = {}) {
+  const platform = options.platform || process.platform;
+  const binDir = resolveCliBinDir(options);
+  const nodeExecPath = options.nodeExecPath || process.execPath || 'node';
+  const entryPath = path.join(runtimeDir, 'runtime', 'bin', 'agy-pulse.js');
+  const commandNames = ['agypl', 'agy-pulse'];
+
+  fs.mkdirSync(binDir, { recursive: true });
+
+  if (platform === 'win32') {
+    const body = [
+      '@echo off',
+      'rem agy-pulse CLI shim',
+      'setlocal',
+      `node "${entryPath}" %* 2>nul`,
+      'if %ERRORLEVEL%==0 exit /b 0',
+      `if exist "${nodeExecPath}" "${nodeExecPath}" "${entryPath}" %*`,
+      '',
+    ].join('\r\n');
+    const shimPaths = commandNames.map(name => path.join(binDir, `${name}.cmd`));
+    for (const shimPath of shimPaths) {
+      try { fs.rmSync(shimPath, { force: true }); } catch {}
+      fs.writeFileSync(shimPath, body, 'utf8');
+    }
+    return { binDir, shimPath: shimPaths[0], shimPaths, platform };
+  }
+
+  const body = [
+    '#!/bin/sh',
+    '# agy-pulse CLI shim',
+    `exec "${nodeExecPath}" "${entryPath}" "$@"`,
+    '',
+  ].join('\n');
+  const shimPaths = commandNames.map(name => path.join(binDir, name));
+  for (const shimPath of shimPaths) {
+    try { fs.rmSync(shimPath, { force: true }); } catch {}
+    fs.writeFileSync(shimPath, body, { mode: 0o755 });
+    fs.chmodSync(shimPath, 0o755);
+  }
+  return { binDir, shimPath: shimPaths[0], shimPaths, platform };
+}
+
 async function installRuntime(options = {}) {
   const env = options.env || process.env;
   const homeDir = options.homeDir || os.homedir();
   const repoCandidate = path.resolve(__dirname, '..');
   const hasLocalRuntime =
-    fs.existsSync(path.join(repoCandidate, 'runtime', 'bin', 'agy-pulse.js')) ||
-    fs.existsSync(path.join(repoCandidate, 'runtime', 'bin', 'agy-hud.js'));
+    fs.existsSync(path.join(repoCandidate, 'runtime', 'bin', 'agy-pulse.js'));
   const sourceDir =
     options.sourceDir ||
     env.AGY_PULSE_SETUP_SOURCE_DIR ||
-    env.AGY_HUD_SETUP_SOURCE_DIR ||
     (hasLocalRuntime ? repoCandidate : '');
   const sourceBase = resolveSourceBase(options, env);
   const antigravityRoot = options.antigravityRoot || pickAntigravityRoot(env, homeDir);
@@ -237,11 +401,9 @@ async function installRuntime(options = {}) {
   fs.rmSync(tempRuntimeDir, { recursive: true, force: true });
 
   if ((options.platform || process.platform) === 'darwin') {
-    for (const legacyFile of ['agy-pulse-token.json', 'agy-hud-token.json']) {
-      const legacyTempToken = path.join(antigravityRoot, legacyFile);
-      if (fs.existsSync(legacyTempToken)) {
-        try { fs.rmSync(legacyTempToken, { force: true }); } catch {}
-      }
+    const tempToken = path.join(antigravityRoot, 'agy-pulse-token.json');
+    if (fs.existsSync(tempToken)) {
+      try { fs.rmSync(tempToken, { force: true }); } catch {}
     }
   }
 
@@ -252,6 +414,7 @@ async function installRuntime(options = {}) {
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, body);
     }
+    preserveExistingConfig(runtimeDir, tempRuntimeDir, options);
     replaceRuntimeDirAtomically(runtimeDir, tempRuntimeDir);
   } catch (error) {
     fs.rmSync(tempRuntimeDir, { recursive: true, force: true });
@@ -270,12 +433,21 @@ async function installRuntime(options = {}) {
     platform: options.platform,
     keyringReader: options.keyringReader,
   });
+  clearStaleUpdateStatus(antigravityRoot, runtimeDir);
+  const cliShim = installCliShim(runtimeDir, {
+    env,
+    homeDir,
+    platform: options.platform,
+    binDir: options.binDir,
+    nodeExecPath: options.nodeExecPath,
+  });
 
   return {
     antigravityRoot,
     runtimeDir,
     settingsPath: result.settingsPath,
     command: result.command,
+    cliShim,
     files: RUNTIME_FILES,
     stalePluginFiles,
     quotaRefresh,
@@ -304,10 +476,38 @@ async function refreshQuotaCache(runtimeDir, options = {}) {
       };
     }
 
-    writeCache(quota, token, tier);
+    writeCache(quota, token, tier, null, quota.providerQuota || null, { roots });
     return { status: 'refreshed', count: quota.length, tier: tier || null };
   } catch (error) {
     return { status: 'failed', reason: error.message };
+  }
+}
+
+function isPathInsideDir(targetPath, parentDir) {
+  let resolvedParent;
+  let resolvedTarget;
+  try {
+    resolvedParent = fs.realpathSync(parentDir);
+  } catch {
+    resolvedParent = path.resolve(parentDir);
+  }
+  try {
+    resolvedTarget = fs.realpathSync(targetPath);
+  } catch {
+    resolvedTarget = path.resolve(targetPath);
+  }
+  const rel = path.relative(resolvedParent, resolvedTarget);
+  return Boolean(rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function cleanupSelfIfRequested(argv = process.argv, selfPath = __filename, tmpDir = os.tmpdir()) {
+  if (!argv.includes('--cleanup-self')) return false;
+  if (!isPathInsideDir(selfPath, tmpDir)) return false;
+  try {
+    fs.rmSync(selfPath, { force: true });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -320,12 +520,18 @@ if (require.main === module) {
     return installRuntime();
   };
 
+  let exitCode = 0;
   run()
     .then(result => {
       process.stdout.write(`agy-pulse bootstrap complete\n`);
       process.stdout.write(`runtime: ${result.runtimeDir}\n`);
       process.stdout.write(`settings: ${result.settingsPath}\n`);
       process.stdout.write(`statusLine: ${result.command}\n`);
+      if (result.cliShim && Array.isArray(result.cliShim.shimPaths) && result.cliShim.shimPaths.length > 0) {
+        process.stdout.write(`cli: ${result.cliShim.shimPaths.join(', ')}\n`);
+      } else if (result.cliShim && result.cliShim.shimPath) {
+        process.stdout.write(`cli: ${result.cliShim.shimPath}\n`);
+      }
       if (result.stalePluginFiles.length > 0) {
         process.stdout.write(`cleaned ${result.stalePluginFiles.length} stale plugin file(s) from prior install\n`);
       }
@@ -337,7 +543,11 @@ if (require.main === module) {
     })
     .catch(error => {
       process.stderr.write(`${error.stack || error.message}\n`);
-      process.exit(1);
+      exitCode = 1;
+    })
+    .finally(() => {
+      cleanupSelfIfRequested();
+      if (exitCode !== 0) process.exit(exitCode);
     });
 }
 
@@ -351,6 +561,10 @@ module.exports = {
   pickAntigravityRoot,
   cleanStalePluginFiles,
   replaceRuntimeDirAtomically,
+  preserveExistingConfig,
+  cleanupSelfIfRequested,
+  resolveCliBinDir,
+  installCliShim,
   installRuntime,
   refreshQuotaCache,
 };

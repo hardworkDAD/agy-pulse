@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   getAntigravityRoots,
+  getAntigravityIdeRoots,
   resolveAntigravityPath,
   resolveSafeExecutable,
 } from '../../runtime/paths.js';
@@ -117,17 +118,11 @@ test('resolveSafeExecutable resolves absolute path and skips relative directorie
   });
 });
 
-test('getAntigravityRoots supports AGY_PULSE_DATA_DIR over AGY_HUD_DATA_DIR and injected env/homeDir', () => {
+test('getAntigravityRoots honors AGY_PULSE_DATA_DIR and injected env/homeDir', () => {
   const rootsPulse = getAntigravityRoots({
     AGY_PULSE_DATA_DIR: '/pulse/data',
-    AGY_HUD_DATA_DIR: '/hud/data',
   }, '/custom/home');
   assert.deepEqual(rootsPulse, ['/pulse/data']);
-
-  const rootsHud = getAntigravityRoots({
-    AGY_HUD_DATA_DIR: '/hud/data',
-  }, '/custom/home');
-  assert.deepEqual(rootsHud, ['/hud/data']);
 
   const injectedRoots = getAntigravityRoots({
     XDG_DATA_HOME: '/custom/xdg',
@@ -158,4 +153,50 @@ test('resolveAntigravityPath and resolveSafeExecutable respect injected env/home
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('getAntigravityIdeRoots resolves default, XDG/APPDATA/LOCALAPPDATA, and deduplicates resolved paths', () => {
+  const customHome = path.join(os.tmpdir(), 'ide-home-test');
+  const defaultRoots = getAntigravityIdeRoots({
+    AGY_PULSE_DATA_DIR: undefined,
+    AGY_PULSE_IDE_DATA_DIR: undefined,
+    XDG_DATA_HOME: undefined,
+    APPDATA: undefined,
+    LOCALAPPDATA: undefined,
+  }, customHome);
+  assert.deepEqual(defaultRoots, [path.join(customHome, '.gemini', 'antigravity')]);
+
+  const sharedWinDir = 'C:\\Users\\dev\\AppData\\Shared';
+  const multiRoots = getAntigravityIdeRoots({
+    XDG_DATA_HOME: '/xdg/ide',
+    APPDATA: sharedWinDir,
+    LOCALAPPDATA: sharedWinDir,
+  }, customHome);
+  assert.deepEqual(multiRoots, [
+    path.join(customHome, '.gemini', 'antigravity'),
+    path.join('/xdg/ide', 'antigravity'),
+    path.join(sharedWinDir, 'antigravity'),
+  ]);
+
+  const dupXdgRoots = getAntigravityIdeRoots({
+    XDG_DATA_HOME: path.join(customHome, '.gemini') + path.sep,
+  }, customHome);
+  assert.deepEqual(dupXdgRoots, [path.join(customHome, '.gemini', 'antigravity')]);
+});
+
+test('getAntigravityIdeRoots honors AGY_PULSE_IDE_DATA_DIR and isolates on AGY_PULSE_DATA_DIR without changing getAntigravityRoots', () => {
+  const customHome = '/custom/ide-home';
+  const cliOnlyEnv = {
+    AGY_PULSE_DATA_DIR: '/pulse/cli-only',
+    XDG_DATA_HOME: '/xdg/should-ignore',
+  };
+  assert.deepEqual(getAntigravityIdeRoots(cliOnlyEnv, customHome), []);
+  assert.deepEqual(getAntigravityRoots(cliOnlyEnv, customHome), ['/pulse/cli-only']);
+
+  const overrideEnv = {
+    AGY_PULSE_DATA_DIR: '/pulse/cli-only',
+    AGY_PULSE_IDE_DATA_DIR: '/pulse/ide-override',
+  };
+  assert.deepEqual(getAntigravityIdeRoots(overrideEnv, customHome), ['/pulse/ide-override']);
+  assert.deepEqual(getAntigravityRoots(overrideEnv, customHome), ['/pulse/cli-only']);
 });
