@@ -1,7 +1,7 @@
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,10 +21,14 @@ use super::http_wire::{
     HttpParseError, HttpRequest, is_allowed_host, is_allowed_origin, parse_query_params,
     query_param, read_http_request, write_http_response,
 };
+use super::keepalive::{
+    KeepaliveState, resolve_close_grace_ms, resolve_ping_lease_ms, resolve_sse_ping_interval_ms,
+};
 use super::{DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_DASHBOARD_PORT, LOOPBACK_HOST, render_dashboard_html};
 
 const DEFAULT_AUTO_SYNC_INTERVAL_MS: u64 = 10_000;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(15);
+const SSE_EOF_POLL_TIMEOUT: Duration = Duration::from_millis(50);
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const DASHBOARD_CSP: &str = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:;";
 
@@ -48,6 +52,7 @@ pub struct DashboardServerConfig {
     pub no_sync: bool,
     pub defer_initial_sync: bool,
     pub idle_timeout_ms: u64,
+    pub close_grace_ms: Option<u64>,
     pub auto_sync_interval_ms: u64,
     pub ledger_path: Option<PathBuf>,
     pub source_roots: Option<Vec<SourceRoot>>,
@@ -62,6 +67,7 @@ impl Default for DashboardServerConfig {
             no_sync: false,
             defer_initial_sync: false,
             idle_timeout_ms: 0,
+            close_grace_ms: None,
             auto_sync_interval_ms: DEFAULT_AUTO_SYNC_INTERVAL_MS,
             ledger_path: None,
             source_roots: None,
@@ -91,28 +97,14 @@ struct ServerSharedState {
     no_sync: bool,
     idle_timeout_ms: u64,
     auto_sync_interval_ms: u64,
+    sse_ping_interval: Duration,
     started_at: String,
-    started_instant: Instant,
-    last_activity_ms: AtomicU64,
+    keepalive: Arc<KeepaliveState>,
     shutdown: AtomicBool,
     ledger: Mutex<LedgerRuntime>,
 }
 
 impl ServerSharedState {
-    fn touch_idle(&self) {
-        let elapsed = self.started_instant.elapsed().as_millis() as u64;
-        self.last_activity_ms.store(elapsed, Ordering::Release);
-    }
-
-    fn is_idle_expired(&self) -> bool {
-        if self.idle_timeout_ms == 0 {
-            return false;
-        }
-        let now_rel = self.started_instant.elapsed().as_millis() as u64;
-        let last_rel = self.last_activity_ms.load(Ordering::Acquire);
-        now_rel.saturating_sub(last_rel) >= self.idle_timeout_ms
-    }
-
     fn maybe_auto_sync(&self, guard: &mut LedgerRuntime) {
         if self.no_sync || self.auto_sync_interval_ms == 0 {
             return;
@@ -188,6 +180,15 @@ impl DashboardServer {
         let default_lang = resolve_language_from_locale(config.lang, locale.as_deref());
         let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         let started_instant = Instant::now();
+        let close_grace_ms = resolve_close_grace_ms(config.close_grace_ms);
+        let ping_lease_ms = resolve_ping_lease_ms();
+        let sse_ping_interval = Duration::from_millis(resolve_sse_ping_interval_ms());
+        let keepalive = Arc::new(KeepaliveState::new(
+            config.idle_timeout_ms,
+            close_grace_ms,
+            ping_lease_ms,
+            started_instant,
+        ));
 
         let shared = Arc::new(ServerSharedState {
             port: actual_port,
@@ -195,9 +196,9 @@ impl DashboardServer {
             no_sync: config.no_sync,
             idle_timeout_ms: config.idle_timeout_ms,
             auto_sync_interval_ms: config.auto_sync_interval_ms,
+            sse_ping_interval,
             started_at: started_at.clone(),
-            started_instant,
-            last_activity_ms: AtomicU64::new(0),
+            keepalive,
             shutdown: AtomicBool::new(false),
             ledger: Mutex::new(LedgerRuntime {
                 store,
@@ -255,7 +256,10 @@ impl Drop for DashboardServer {
 
 fn run_accept_loop(listener: TcpListener, shared: Arc<ServerSharedState>) {
     loop {
-        if shared.shutdown.load(Ordering::Acquire) || shared.is_idle_expired() {
+        if shared.shutdown.load(Ordering::Acquire)
+            || shared.keepalive.should_shutdown()
+            || platform::shutdown_signal_requested()
+        {
             shared.shutdown.store(true, Ordering::Release);
             break;
         }
@@ -290,14 +294,84 @@ struct HealthPayload<'a> {
     pid: u32,
     port: u16,
     idle_timeout_ms: u64,
+    close_grace_ms: u64,
+    active_clients: usize,
     started_at: &'a str,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PingPayload {
     ok: bool,
     active: bool,
+    active_clients: usize,
     ts: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisconnectPayload {
+    ok: bool,
+    active_clients: usize,
+}
+
+struct SseConnectionGuard {
+    keepalive: Arc<KeepaliveState>,
+    conn_id: u64,
+}
+
+impl Drop for SseConnectionGuard {
+    fn drop(&mut self) {
+        self.keepalive.unregister_sse(self.conn_id);
+    }
+}
+
+fn serve_sse_keepalive(
+    stream: &mut TcpStream,
+    shared: &ServerSharedState,
+    client_id: Option<&str>,
+) {
+    let conn_id = shared.keepalive.register_sse(client_id);
+    let _guard = SseConnectionGuard {
+        keepalive: Arc::clone(&shared.keepalive),
+        conn_id,
+    };
+
+    let headers = "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream; charset=utf-8\r\n\
+         Cache-Control: no-store\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         X-Frame-Options: DENY\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         Connection: close\r\n\r\n\
+         : connected\n\n";
+    if stream.write_all(headers.as_bytes()).is_err() || stream.flush().is_err() {
+        return;
+    }
+
+    let _ = stream.set_read_timeout(Some(SSE_EOF_POLL_TIMEOUT));
+    let mut last_ping = Instant::now();
+    let mut buf = [0u8; 64];
+
+    loop {
+        if shared.shutdown.load(Ordering::Acquire) || !shared.keepalive.is_sse_active(conn_id) {
+            break;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
+        if last_ping.elapsed() >= shared.sse_ping_interval {
+            if stream.write_all(b": ping\n\n").is_err() || stream.flush().is_err() {
+                break;
+            }
+            last_ping = Instant::now();
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -450,10 +524,23 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                     pid: std::process::id(),
                     port: shared.port,
                     idle_timeout_ms: shared.idle_timeout_ms,
+                    close_grace_ms: shared.keepalive.close_grace_ms(),
+                    active_clients: shared.keepalive.active_client_count(),
                     started_at: &shared.started_at,
                 },
                 &[],
             );
+        }
+        "/api/keepalive" => {
+            if method != "GET" {
+                send_error_json(stream, 405, "Method Not Allowed");
+                return;
+            }
+            if !is_allowed_origin(req.header("origin"), shared.port) {
+                send_error_json(stream, 403, "Forbidden: invalid Origin header");
+                return;
+            }
+            serve_sse_keepalive(stream, shared, query_param(&params, "client"));
         }
         "/api/ping" => {
             if method != "POST" {
@@ -464,14 +551,37 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 403, "Forbidden: invalid Origin header");
                 return;
             }
-            shared.touch_idle();
+            let active_clients = shared.keepalive.record_ping(query_param(&params, "client"));
             send_json_value(
                 stream,
                 200,
                 &PingPayload {
                     ok: true,
                     active: true,
+                    active_clients,
                     ts: current_epoch_ms_u64(),
+                },
+                &[],
+            );
+        }
+        "/api/disconnect" => {
+            if method != "POST" {
+                send_error_json(stream, 405, "Method Not Allowed");
+                return;
+            }
+            if !is_allowed_origin(req.header("origin"), shared.port) {
+                send_error_json(stream, 403, "Forbidden: invalid Origin header");
+                return;
+            }
+            let active_clients = shared
+                .keepalive
+                .record_disconnect(query_param(&params, "client"));
+            send_json_value(
+                stream,
+                200,
+                &DisconnectPayload {
+                    ok: true,
+                    active_clients,
                 },
                 &[],
             );
@@ -524,7 +634,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            shared.touch_idle();
+            shared.keepalive.touch_page_load();
             let initial_lang = match query_param(&params, "lang") {
                 Some("zh") => LanguageSetting::Zh,
                 Some("en") => LanguageSetting::En,
@@ -545,7 +655,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            shared.touch_idle();
+            shared.keepalive.touch_activity();
             let (filter, _) = parse_overview_filter(&params);
             let Ok(mut guard) = shared.ledger.lock() else {
                 send_error_json(stream, 500, "Ledger lock poisoned");
@@ -566,7 +676,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 403, "Forbidden: invalid Origin header");
                 return;
             }
-            shared.touch_idle();
+            shared.keepalive.touch_activity();
             let Ok(mut guard) = shared.ledger.lock() else {
                 send_error_json(stream, 500, "Ledger lock poisoned");
                 return;
@@ -585,7 +695,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            shared.touch_idle();
+            shared.keepalive.touch_activity();
             let (filter, safe_range) = parse_overview_filter(&params);
             let kind = query_param(&params, "kind")
                 .and_then(CsvExportKind::from_raw)
@@ -615,7 +725,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            shared.touch_idle();
+            shared.keepalive.touch_activity();
             let (filter, safe_range) = parse_overview_filter(&params);
             let Ok(guard) = shared.ledger.lock() else {
                 send_error_json(stream, 500, "Ledger lock poisoned");

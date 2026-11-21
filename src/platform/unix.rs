@@ -1,9 +1,12 @@
 use std::env;
 use std::fs::{self, Metadata, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn detect_unicode_from_os() -> bool {
@@ -203,4 +206,84 @@ pub(super) fn resolve_claude_desktop_config_path() -> Option<PathBuf> {
             .unwrap_or_else(|| home.join(".config"));
         Some(cfg_root.join("Claude").join("claude_desktop_config.json"))
     }
+}
+
+static SHUTDOWN_SIGNAL_FLAG: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_shutdown_signal(_sig: libc::c_int) {
+    SHUTDOWN_SIGNAL_FLAG.store(true, Ordering::Relaxed);
+}
+
+pub(super) fn install_shutdown_signal_handler() {
+    SHUTDOWN_SIGNAL_FLAG.store(false, Ordering::Release);
+    // SAFETY: `handle_shutdown_signal` only executes an async-signal-safe atomic store.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handle_shutdown_signal as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = 0;
+        let _ = libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        let _ = libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
+}
+
+pub(super) fn shutdown_signal_requested() -> bool {
+    SHUTDOWN_SIGNAL_FLAG.load(Ordering::Acquire)
+}
+
+pub(super) fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<u32> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: `libc::setsid()` is async-signal-safe and detaches the child into a new session.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+    Ok(child.id())
+}
+
+pub(super) fn is_process_alive(pid: u32) -> bool {
+    let Ok(raw_pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if raw_pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill(pid, 0)` checks process existence without sending a signal.
+    let rc = unsafe { libc::kill(raw_pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+pub(super) fn terminate_process(pid: u32) -> io::Result<()> {
+    let raw_pid = libc::pid_t::try_from(pid)
+        .ok()
+        .filter(|&p| p > 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid PID"))?;
+    // SAFETY: sends SIGTERM to the specific target PID.
+    let rc = unsafe { libc::kill(raw_pid, libc::SIGTERM) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(err)
+}
+
+pub(super) fn set_executable_0755(path: &Path) -> io::Result<()> {
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)
 }

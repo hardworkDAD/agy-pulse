@@ -1,13 +1,20 @@
 use std::env;
 use std::fs::{self, Metadata, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
 use windows_sys::Win32::System::Console::{
     CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
     GetConsoleMode, GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE,
     STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
+};
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    TerminateProcess,
 };
 
 pub(super) fn detect_unicode_from_os() -> bool {
@@ -156,4 +163,66 @@ pub(super) fn resolve_claude_desktop_config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| super::home_dir().map(|h| h.join("AppData").join("Roaming")))?;
     Some(appdata.join("Claude").join("claude_desktop_config.json"))
+}
+
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+pub(super) fn install_shutdown_signal_handler() {}
+
+pub(super) fn shutdown_signal_requested() -> bool {
+    false
+}
+
+pub(super) fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<u32> {
+    let child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn()?;
+    Ok(child.id())
+}
+
+pub(super) fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: `OpenProcess` queries process exit code and `CloseHandle` frees the handle.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut exit_code);
+        CloseHandle(handle);
+        ok != 0 && exit_code == STILL_ACTIVE as u32
+    }
+}
+
+pub(super) fn terminate_process(pid: u32) -> io::Result<()> {
+    if pid == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid PID"));
+    }
+    // SAFETY: opens target process with `PROCESS_TERMINATE` and closes handle afterwards.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let ok = TerminateProcess(handle, 0);
+        let err = io::Error::last_os_error();
+        CloseHandle(handle);
+        if ok == 0 {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn set_executable_0755(_path: &Path) -> io::Result<()> {
+    Ok(())
 }

@@ -1,4 +1,6 @@
 mod http_wire;
+mod keepalive;
+mod launcher;
 mod server;
 
 use std::env;
@@ -8,6 +10,12 @@ use crate::config::{self, LanguageSetting};
 use crate::platform;
 use crate::render::resolve_language_from_locale;
 
+pub use launcher::{
+    BrowserLaunchSpec, BrowserOpenResult, DASHBOARD_ICON_MARKER, DASHBOARD_SHORTCUT_MARKER,
+    DASHBOARD_STATE_FILENAME, DashboardStateFile, EnsureDashboardResult, RunningDashboardInfo,
+    ShortcutInstallReport, ShortcutStatus, ShortcutUninstallReport, StopDashboardResult,
+    build_app_window_launch_spec, uninstall_desktop_shortcuts,
+};
 pub use server::{DashboardError, DashboardServer, DashboardServerConfig, DashboardServerInfo};
 
 pub const DEFAULT_DASHBOARD_PORT: u16 = 3789;
@@ -237,29 +245,53 @@ pub fn build_dashboard_help_text(lang: LanguageSetting) -> String {
         format!(
             "agy-pulse v{VERSION} — 本地回环网页看板\n\n\
 用法:\n  \
-  agypl dashboard [options]               启动本地 127.0.0.1 网页看板（别名: dash, ui, --dashboard）\n\n\
+  agypl dashboard [action] [options]      启动或管理本地 127.0.0.1 网页看板（别名: dash, ui, --dashboard）\n\n\
+子动作:\n  \
+  open                                    在后台守护启动/复用看板，并以独立小窗打开\n  \
+  status                                  查看后台看板与桌面快捷图标运行/安装状态\n  \
+  stop                                    优雅停止后台运行中的看板守护进程\n  \
+  install-shortcut                        安装系统应用菜单/桌面快捷图标（别名: install-app）\n  \
+  uninstall-shortcut                      按专属指纹安全移除快捷图标（别名: uninstall-app）\n\n\
 选项:\n  \
   --port, -p <port>                       监听端口（默认 3789，冲突自动回退随机端口）\n  \
+  --host <addr>                           绑定地址（仅允许 127.0.0.1）\n  \
+  --app / --browser                       优先以无地址栏独立小窗 / 默认浏览器标签页打开\n  \
+  --desktop                               同时在桌面目录创建/清理快捷图标\n  \
   --no-open                               仅启动服务，不自动打开浏览器\n  \
   --no-sync                               跳过启动及查询时的自动账本扫描\n  \
   --zh / --en / --lang <auto|zh|en>       指定界面语言\n  \
-  --idle-timeout <sec>                    无请求自动退出秒数（默认 0 常驻）\n  \
+  --idle-timeout <sec>                    无活跃页面连接时的自动退出秒数（后台默认 600，前台默认 0）\n  \
+  --background                            作为后台守护模式运行（配合 open 使用）\n  \
   --help, -h                              显示此帮助信息\n"
         )
     } else {
         format!(
             "agy-pulse v{VERSION} — Local Loopback Telemetry Dashboard\n\n\
 Usage:\n  \
-  agypl dashboard [options]               Start local 127.0.0.1 web dashboard (alias: dash, ui, --dashboard)\n\n\
+  agypl dashboard [action] [options]      Start or manage local 127.0.0.1 dashboard (alias: dash, ui, --dashboard)\n\n\
+Actions:\n  \
+  open                                    Start/reuse background daemon and open standalone app window\n  \
+  status                                  Show running dashboard daemon & desktop shortcut status\n  \
+  stop                                    Gracefully stop the background dashboard daemon\n  \
+  install-shortcut                        Install app-menu / desktop shortcut (alias: install-app)\n  \
+  uninstall-shortcut                      Safely remove fingerprinted shortcuts (alias: uninstall-app)\n\n\
 Options:\n  \
   --port, -p <port>                       Listen port (default 3789, auto-fallback on collision)\n  \
+  --host <addr>                           Bind address (must be 127.0.0.1)\n  \
+  --app / --browser                       Prefer frameless app window / default browser tab\n  \
+  --desktop                               Also install/remove Desktop shortcut copy\n  \
   --no-open                               Do not open browser automatically\n  \
   --no-sync                               Skip automatic ledger sync on startup/queries\n  \
   --zh / --en / --lang <auto|zh|en>       Set initial UI language\n  \
-  --idle-timeout <sec>                    Idle auto-exit timeout in seconds (default 0)\n  \
+  --idle-timeout <sec>                    Auto-exit seconds when no pages are active (bg default 600, fg 0)\n  \
+  --background                            Run as background daemon worker\n  \
   --help, -h                              Show this help message\n"
         )
     }
+}
+
+fn should_auto_open(args: &DashboardCliArgs) -> bool {
+    args.open && env::var("AGY_PULSE_NO_OPEN").ok().as_deref() != Some("1")
 }
 
 /// Execute `agypl dashboard` / `dash` / `ui` / `--dashboard` CLI entrypoint.
@@ -282,62 +314,250 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
         return 0;
     }
 
-    if args.action != DashboardAction::Serve {
-        eprintln!(
-            "agy-pulse dashboard launcher subcommand '{:?}' requires Ticket 08 daemon/shortcut support",
-            args.action
-        );
-        return 1;
-    }
-
-    let cfg = DashboardServerConfig {
-        host: args.host,
-        port: args.port,
-        lang: resolved_lang,
-        no_sync: args.no_sync,
-        defer_initial_sync: false,
-        idle_timeout_ms: args.idle_timeout_sec.saturating_mul(1000),
-        ..Default::default()
-    };
-
-    let mut server = match DashboardServer::start(cfg) {
-        Ok(s) => s,
-        Err(err) => {
-            eprintln!("agy-pulse dashboard error: {err}");
-            return 1;
+    match args.action {
+        DashboardAction::Open => {
+            if args.host != LOOPBACK_HOST {
+                eprintln!(
+                    "agy-pulse dashboard error: {}",
+                    DashboardError::NonLoopbackHost(args.host)
+                );
+                return 1;
+            }
+            match launcher::ensure_background_dashboard(
+                &args.host,
+                args.port,
+                args.idle_timeout_sec,
+                resolved_lang,
+                args.no_sync,
+            ) {
+                Ok(res) => {
+                    if should_auto_open(&args) {
+                        launcher::open_dashboard_window(&res.info.url, args.app_mode);
+                    }
+                    if is_zh {
+                        let verb = if res.reused {
+                            "已在运行"
+                        } else {
+                            "已在后台启动"
+                        };
+                        println!(
+                            "agy-pulse 本地看板{verb}: {} (PID {})",
+                            res.info.url, res.info.pid
+                        );
+                    } else {
+                        let verb = if res.reused {
+                            "already running"
+                        } else {
+                            "started in background"
+                        };
+                        println!(
+                            "agy-pulse dashboard {verb}: {} (PID {})",
+                            res.info.url, res.info.pid
+                        );
+                    }
+                    0
+                }
+                Err(err) => {
+                    eprintln!("agy-pulse dashboard error: {err}");
+                    1
+                }
+            }
         }
-    };
+        DashboardAction::Stop => match launcher::stop_background_dashboard(&args.host, args.port) {
+            Ok(res) => {
+                if res.stopped {
+                    let pid = res.pid.unwrap_or(0);
+                    let url = res
+                        .url
+                        .unwrap_or_else(|| format!("http://{}:{}", args.host, args.port));
+                    if is_zh {
+                        println!("已停止 agy-pulse 后台看板 (PID {pid}, {url})");
+                    } else {
+                        println!("Stopped background agy-pulse dashboard (PID {pid}, {url})");
+                    }
+                } else if is_zh {
+                    println!("未检测到正在运行的 agy-pulse 后台看板。");
+                } else {
+                    println!("No running background agy-pulse dashboard found.");
+                }
+                0
+            }
+            Err(err) => {
+                eprintln!("agy-pulse dashboard error: {err}");
+                1
+            }
+        },
+        DashboardAction::Status => {
+            let running = launcher::find_running_dashboard(&args.host, args.port);
+            let shortcut = launcher::get_desktop_shortcut_status();
 
-    let info = server.info().clone();
-    if !args.no_sync
-        && let Some(ref report) = info.sync_report
-    {
-        if is_zh {
-            println!(
-                "agy-pulse 遥测账本已同步: 扫描 {} 个库，归档 {} 步 ({}ms)",
-                report.total_dbs, report.steps_upserted, report.duration_ms
-            );
-        } else {
-            println!(
-                "agy-pulse ledger synced: {} DBs scanned, {} steps upserted ({}ms)",
-                report.total_dbs, report.steps_upserted, report.duration_ms
-            );
+            if let Some(info) = running {
+                if is_zh {
+                    println!("看板状态: 运行中 | URL: {} | PID: {}", info.url, info.pid);
+                } else {
+                    println!(
+                        "Dashboard: running | URL: {} | PID: {}",
+                        info.url, info.pid
+                    );
+                }
+            } else if is_zh {
+                println!("看板状态: 未运行");
+            } else {
+                println!("Dashboard: not running");
+            }
+
+            if shortcut.installed {
+                let path_str = shortcut
+                    .path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                if is_zh {
+                    println!("桌面快捷方式: 已安装 ({path_str})");
+                } else {
+                    println!("Desktop shortcut: installed ({path_str})");
+                }
+            } else if is_zh {
+                println!("桌面快捷方式: 未安装");
+            } else {
+                println!("Desktop shortcut: not installed");
+            }
+            0
+        }
+        DashboardAction::InstallShortcut => {
+            let explicit_port = (args.port != DEFAULT_DASHBOARD_PORT).then_some(args.port);
+            match launcher::install_desktop_shortcuts(args.include_desktop, explicit_port) {
+                Ok(report) => {
+                    if is_zh {
+                        println!(
+                            "已安装 agy-pulse Dashboard 桌面快捷方式: {}",
+                            report.primary_path.display()
+                        );
+                        println!("现在可直接在系统应用菜单/桌面点击图标打开看板。");
+                    } else {
+                        println!(
+                            "Installed agy-pulse Dashboard desktop shortcut: {}",
+                            report.primary_path.display()
+                        );
+                        println!(
+                            "You can now launch the dashboard directly from your app menu or desktop icon."
+                        );
+                    }
+                    0
+                }
+                Err(err) => {
+                    eprintln!("agy-pulse dashboard error: {err}");
+                    1
+                }
+            }
+        }
+        DashboardAction::UninstallShortcut => {
+            let report = launcher::uninstall_desktop_shortcuts();
+            if !report.removed.is_empty() {
+                let joined: Vec<String> = report
+                    .removed
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                if is_zh {
+                    println!(
+                        "已移除 agy-pulse Dashboard 快捷方式 ({} 项): {}",
+                        report.removed.len(),
+                        joined.join(", ")
+                    );
+                } else {
+                    println!(
+                        "Removed agy-pulse Dashboard shortcut ({}): {}",
+                        report.removed.len(),
+                        joined.join(", ")
+                    );
+                }
+            } else if is_zh {
+                println!("未发现由 agy-pulse 创建的桌面快捷方式。");
+            } else {
+                println!("No agy-pulse Dashboard desktop shortcuts found to remove.");
+            }
+            0
+        }
+        DashboardAction::Serve => {
+            platform::install_shutdown_signal_handler();
+            let auto_open = should_auto_open(&args);
+            let app_mode = args.app_mode;
+            let idle_timeout_ms = args.idle_timeout_sec.saturating_mul(1000);
+            let cfg = DashboardServerConfig {
+                host: args.host,
+                port: args.port,
+                lang: resolved_lang,
+                no_sync: args.no_sync,
+                defer_initial_sync: args.background_serve,
+                idle_timeout_ms,
+                ..Default::default()
+            };
+
+            let mut server = match DashboardServer::start(cfg) {
+                Ok(s) => s,
+                Err(err) => {
+                    eprintln!("agy-pulse dashboard error: {err}");
+                    return 1;
+                }
+            };
+
+            let info = server.info().clone();
+            let owner_pid = std::process::id();
+
+            if args.background_serve {
+                let state = DashboardStateFile {
+                    app: DASHBOARD_APP_ID.to_string(),
+                    pid: owner_pid,
+                    port: info.port,
+                    host: info.host.clone(),
+                    url: info.url.clone(),
+                    idle_timeout_ms,
+                    started_at: info.started_at.clone(),
+                };
+                if let Err(err) = launcher::write_dashboard_state(&state) {
+                    eprintln!("agy-pulse dashboard warning: failed to write state file: {err}");
+                }
+                server.wait_until_stopped();
+                launcher::clear_dashboard_state_if_owner(owner_pid);
+                return 0;
+            }
+
+            if !args.no_sync
+                && let Some(ref report) = info.sync_report
+            {
+                if is_zh {
+                    println!(
+                        "agy-pulse 遥测账本已同步: 扫描 {} 个库，归档 {} 步 ({}ms)",
+                        report.total_dbs, report.steps_upserted, report.duration_ms
+                    );
+                } else {
+                    println!(
+                        "agy-pulse ledger synced: {} DBs scanned, {} steps upserted ({}ms)",
+                        report.total_dbs, report.steps_upserted, report.duration_ms
+                    );
+                }
+            }
+
+            if is_zh {
+                println!(
+                    "agy-pulse 本地看板已启动: {}（按 Ctrl+C 退出）",
+                    info.url
+                );
+            } else {
+                println!(
+                    "agy-pulse dashboard listening at {} (press Ctrl+C to stop)",
+                    info.url
+                );
+            }
+            let _ = io::stdout().flush();
+
+            if auto_open {
+                launcher::open_dashboard_window(&info.url, app_mode);
+            }
+
+            server.wait_until_stopped();
+            0
         }
     }
-
-    if is_zh {
-        println!(
-            "agy-pulse 本地看板已启动: {}（按 Ctrl+C 退出）",
-            info.url
-        );
-    } else {
-        println!(
-            "agy-pulse dashboard listening at {} (press Ctrl+C to stop)",
-            info.url
-        );
-    }
-    let _ = io::stdout().flush();
-
-    server.wait_until_stopped();
-    0
 }

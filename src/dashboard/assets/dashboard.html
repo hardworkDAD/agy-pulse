@@ -1898,20 +1898,59 @@
       });
     }
 
+    var clientId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : ('c-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10));
+    var keepaliveSource = null;
+    var disconnectSent = false;
+
+    function connectKeepalive() {
+      if (typeof EventSource !== 'function') return;
+      try {
+        keepaliveSource = new EventSource('/api/keepalive?client=' + encodeURIComponent(clientId));
+        keepaliveSource.onerror = function () {};
+      } catch (e) {}
+    }
+
+    function sendPing() {
+      fetch('/api/ping?client=' + encodeURIComponent(clientId), {
+        method: 'POST',
+        keepalive: true
+      }).catch(function () {});
+    }
+
+    function sendDisconnect() {
+      if (disconnectSent) return;
+      disconnectSent = true;
+      if (keepaliveSource) {
+        try { keepaliveSource.close(); } catch (e) {}
+        keepaliveSource = null;
+      }
+      var url = '/api/disconnect?client=' + encodeURIComponent(clientId);
+      if (navigator && typeof navigator.sendBeacon === 'function') {
+        try {
+          if (navigator.sendBeacon(url)) return;
+        } catch (e) {}
+      }
+      try {
+        fetch(url, { method: 'POST', keepalive: true }).catch(function () {});
+      } catch (e) {}
+    }
+
     applyTheme(state.theme);
     applyTranslations();
     bindEvents();
     fetchOverview();
+    connectKeepalive();
+    sendPing();
 
-    setInterval(function () {
-      if (document.visibilityState !== 'hidden') {
-        fetch('/api/ping', { method: 'POST', keepalive: true }).catch(function () {});
-      }
-    }, 60000);
+    setInterval(sendPing, 60000);
+
+    window.addEventListener('pagehide', sendDisconnect);
 
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible') {
-        fetch('/api/ping', { method: 'POST', keepalive: true }).catch(function () {});
+        sendPing();
         if (Date.now() - lastOverviewFetchAt > 30000) {
           fetchOverview();
         }

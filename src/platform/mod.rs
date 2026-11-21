@@ -5,10 +5,35 @@ mod windows;
 
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Supported desktop operating systems for launcher & shortcut path conventions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopOs {
+    Linux,
+    Macos,
+    Windows,
+}
+
+/// Return the current compilation target desktop OS family.
+pub fn current_desktop_os() -> DesktopOs {
+    #[cfg(target_os = "macos")]
+    {
+        DesktopOs::Macos
+    }
+    #[cfg(target_os = "windows")]
+    {
+        DesktopOs::Windows
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        DesktopOs::Linux
+    }
+}
 
 /// Terminal rendering capabilities probed from OS environment and TTY state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,5 +432,257 @@ pub fn run_command_with_timeout(
             }
             Err(_) => return None,
         }
+    }
+}
+
+/// Spawn a detached background child process with stdio closed, returning its PID.
+pub fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<u32> {
+    #[cfg(unix)]
+    {
+        unix::spawn_detached(program, args)
+    }
+    #[cfg(windows)]
+    {
+        windows::spawn_detached(program, args)
+    }
+}
+
+/// Check whether an OS process with the given PID currently exists.
+pub fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unix::is_process_alive(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::is_process_alive(pid)
+    }
+}
+
+/// Request graceful termination (SIGTERM on Unix, TerminateProcess on Windows) for a PID.
+pub fn terminate_process(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::terminate_process(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::terminate_process(pid)
+    }
+}
+
+/// Install lightweight SIGINT/SIGTERM shutdown handler for long-running server processes.
+pub fn install_shutdown_signal_handler() {
+    #[cfg(unix)]
+    unix::install_shutdown_signal_handler();
+    #[cfg(windows)]
+    windows::install_shutdown_signal_handler();
+}
+
+/// Return `true` if a process shutdown signal (SIGINT/SIGTERM) has been observed.
+pub fn shutdown_signal_requested() -> bool {
+    #[cfg(unix)]
+    {
+        unix::shutdown_signal_requested()
+    }
+    #[cfg(windows)]
+    {
+        windows::shutdown_signal_requested()
+    }
+}
+
+/// Set executable (`0755`) permissions on Unix; no-op on Windows.
+pub fn set_executable_0755(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::set_executable_0755(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::set_executable_0755(path)
+    }
+}
+
+/// Resolve an executable on `PATH` safely without searching relative directories such as `.`.
+pub fn resolve_safe_executable(name: &str) -> Option<PathBuf> {
+    let path_os = env::var_os("PATH")?;
+    let exts: &[&str] = if current_desktop_os() == DesktopOs::Windows {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+
+    for dir in env::split_paths(&path_os) {
+        if dir.as_os_str().is_empty() || dir == Path::new(".") || !dir.is_absolute() {
+            continue;
+        }
+        for ext in exts {
+            let candidate = dir.join(format!("{name}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve `$XDG_DATA_HOME` or fallback `$HOME/.local/share`.
+pub fn xdg_data_home() -> Option<PathBuf> {
+    if let Ok(val) = env::var("XDG_DATA_HOME") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    home_dir().map(|h| h.join(".local").join("share"))
+}
+
+/// Resolve Windows `%LOCALAPPDATA%` or fallback `%USERPROFILE%\AppData\Local`.
+pub fn windows_local_app_data() -> Option<PathBuf> {
+    for var in ["LOCALAPPDATA", "LocalAppData"] {
+        if let Ok(val) = env::var(var) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+    }
+    home_dir().map(|h| h.join("AppData").join("Local"))
+}
+
+/// Resolve Windows `%APPDATA%` or fallback `%USERPROFILE%\AppData\Roaming`.
+pub fn windows_app_data() -> Option<PathBuf> {
+    for var in ["APPDATA", "AppData"] {
+        if let Ok(val) = env::var(var) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+    }
+    home_dir().map(|h| h.join("AppData").join("Roaming"))
+}
+
+/// Probe installed Chromium-family browsers capable of `--app=<url>` standalone windows.
+pub fn detect_app_window_browser_path(os: DesktopOs) -> Option<(String, PathBuf)> {
+    match os {
+        DesktopOs::Macos => {
+            let mut dirs = vec![PathBuf::from("/Applications")];
+            if let Some(home) = home_dir() {
+                dirs.push(home.join("Applications"));
+            }
+            for app_name in [
+                "Google Chrome.app",
+                "Microsoft Edge.app",
+                "Brave Browser.app",
+                "Chromium.app",
+            ] {
+                for dir in &dirs {
+                    let app_path = dir.join(app_name);
+                    if app_path.exists() {
+                        let short = app_name.strip_suffix(".app").unwrap_or(app_name);
+                        return Some((short.to_string(), app_path));
+                    }
+                }
+            }
+            None
+        }
+        DesktopOs::Windows => {
+            let mut roots = Vec::new();
+            for var in [
+                "PROGRAMFILES",
+                "ProgramFiles",
+                "PROGRAMFILES(X86)",
+                "ProgramFiles(x86)",
+                "LOCALAPPDATA",
+                "LocalAppData",
+            ] {
+                if let Ok(val) = env::var(var) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        roots.push(PathBuf::from(trimmed));
+                    }
+                }
+            }
+            let browsers: [(&str, &[&str]); 3] = [
+                ("chrome", &["Google", "Chrome", "Application", "chrome.exe"]),
+                (
+                    "msedge",
+                    &["Microsoft", "Edge", "Application", "msedge.exe"],
+                ),
+                (
+                    "brave",
+                    &["BraveSoftware", "Brave-Browser", "Application", "brave.exe"],
+                ),
+            ];
+            for (name, segments) in browsers {
+                for root in &roots {
+                    let mut p = root.clone();
+                    for seg in segments {
+                        p.push(seg);
+                    }
+                    if p.is_file() {
+                        return Some((name.to_string(), p));
+                    }
+                }
+            }
+            None
+        }
+        DesktopOs::Linux => {
+            for name in [
+                "google-chrome",
+                "google-chrome-stable",
+                "chromium",
+                "chromium-browser",
+                "microsoft-edge",
+                "microsoft-edge-stable",
+                "brave-browser",
+                "vivaldi",
+            ] {
+                if let Some(resolved) = resolve_safe_executable(name) {
+                    return Some((name.to_string(), resolved));
+                }
+                let usr_bin = PathBuf::from(format!("/usr/bin/{name}"));
+                if usr_bin.is_file() {
+                    return Some((name.to_string(), usr_bin));
+                }
+            }
+            for (name, opt_path) in [
+                ("google-chrome", "/opt/google/chrome/google-chrome"),
+                ("microsoft-edge", "/opt/microsoft/msedge/microsoft-edge"),
+            ] {
+                let p = PathBuf::from(opt_path);
+                if p.is_file() {
+                    return Some((name.to_string(), p));
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Open a URL in the host operating system's default browser without blocking.
+pub fn open_url_default_browser(os: DesktopOs, url: &str) -> bool {
+    let res = match os {
+        DesktopOs::Macos => spawn_detached(Path::new("open"), &[url]),
+        DesktopOs::Windows => spawn_detached(Path::new("cmd"), &["/c", "start", "", url]),
+        DesktopOs::Linux => spawn_detached(Path::new("xdg-open"), &[url]),
+    };
+    res.is_ok()
+}
+
+/// Run a non-critical desktop integration helper silently (e.g. `update-desktop-database` or `powershell.exe`).
+pub fn run_silent_helper(program: &str, args: &[&str]) {
+    let Some(resolved) = resolve_safe_executable(program) else {
+        return;
+    };
+    if let Ok(mut child) = Command::new(resolved)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        let _ = child.wait();
     }
 }
