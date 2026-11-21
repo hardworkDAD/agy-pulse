@@ -1,0 +1,298 @@
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+use crate::domain::{
+    ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity, PulseSnapshot, TokenUsage,
+    WorkspaceInfo, resolve_model_display_name,
+};
+use crate::platform;
+
+use super::IngestResult;
+
+pub(super) fn parse_host_stdin(stdin_text: &str, fallback_cwd: &Path) -> IngestResult {
+    let trimmed = stdin_text.trim();
+    if trimmed.is_empty() {
+        return IngestResult {
+            snapshot: PulseSnapshot {
+                host: HostIdentity {
+                    username: platform::current_username(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            workspace_dir: fallback_cwd.to_path_buf(),
+            diagnostics: Vec::new(),
+        };
+    }
+
+    let root: Value = match serde_json::from_str::<Value>(trimmed) {
+        Ok(val) if val.is_object() => val,
+        Ok(_) => {
+            return IngestResult {
+                snapshot: PulseSnapshot {
+                    host: HostIdentity {
+                        username: platform::current_username(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                workspace_dir: fallback_cwd.to_path_buf(),
+                diagnostics: vec!["Host stdin JSON root must be an object".to_string()],
+            };
+        }
+        Err(err) => {
+            return IngestResult {
+                snapshot: PulseSnapshot {
+                    host: HostIdentity {
+                        username: platform::current_username(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                workspace_dir: fallback_cwd.to_path_buf(),
+                diagnostics: vec![format!("Failed to parse host stdin JSON: {err}")],
+            };
+        }
+    };
+
+    let workspace_dir = extract_workspace_dir(&root, fallback_cwd);
+    let conversation_id = extract_non_empty_str(root.get("conversation_id"));
+    let session_id = extract_non_empty_str(root.get("session_id"));
+    let transcript_path = extract_non_empty_str(root.get("transcript_path"));
+    let has_conversation_identity =
+        conversation_id.is_some() || session_id.is_some() || transcript_path.is_some();
+
+    let model = extract_model(&root);
+    let plan_tier = extract_non_empty_str(root.get("plan_tier"))
+        .or_else(|| extract_non_empty_str(root.get("tier")));
+    let cycle_mode = extract_non_empty_str(root.get("cycle_mode"));
+    let username = extract_non_empty_str(root.get("username"))
+        .or_else(platform::current_username);
+
+    let terminal_width = root
+        .get("terminal_width")
+        .and_then(Value::as_u64)
+        .filter(|&w| w > 0 && w <= u16::MAX as u64)
+        .map(|w| w as u16);
+
+    let task_count = root.get("task_count").and_then(Value::as_u64).unwrap_or(0);
+
+    let native_total_usd = extract_native_cost(&root);
+    let context = find_context_window(&root, 0).map(parse_context_window);
+
+    IngestResult {
+        snapshot: PulseSnapshot {
+            has_conversation_identity,
+            model,
+            host: HostIdentity {
+                conversation_id,
+                session_id,
+                plan_tier,
+                cycle_mode,
+                username,
+            },
+            workspace: WorkspaceInfo::default(),
+            context,
+            cost: CostSnapshot {
+                native_total_usd,
+                ..Default::default()
+            },
+            terminal_width,
+            task_count,
+            ..Default::default()
+        },
+        workspace_dir,
+        diagnostics: Vec::new(),
+    }
+}
+
+fn extract_workspace_dir(root: &Value, fallback_cwd: &Path) -> PathBuf {
+    if let Some(dir) = root
+        .get("workspace")
+        .and_then(|w| w.get("current_dir"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = root
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return PathBuf::from(dir);
+    }
+    fallback_cwd.to_path_buf()
+}
+
+fn extract_non_empty_str(val: Option<&Value>) -> Option<String> {
+    val.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn extract_model(root: &Value) -> Option<ModelIdentity> {
+    let top_effort = extract_non_empty_str(root.get("effort"))
+        .or_else(|| extract_non_empty_str(root.get("reasoning_effort")));
+
+    match root.get("model") {
+        Some(Value::Object(map)) => {
+            let id = extract_non_empty_str(map.get("id")).unwrap_or_default();
+            let raw_display = extract_non_empty_str(map.get("display_name"));
+            let effort = extract_non_empty_str(map.get("effort")).or(top_effort);
+            if id.is_empty() && raw_display.is_none() {
+                return None;
+            }
+            let display_name = if let Some(explicit) = raw_display.as_deref() {
+                resolve_model_display_name(&id, Some(explicit))
+            } else {
+                resolve_model_display_name(&id, None)
+            };
+            Some(ModelIdentity {
+                id,
+                display_name,
+                effort,
+            })
+        }
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(ModelIdentity {
+                    id: trimmed.to_string(),
+                    display_name: resolve_model_display_name(trimmed, None),
+                    effort: top_effort,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_native_cost(root: &Value) -> Option<f64> {
+    let candidates = [
+        root.get("cost").and_then(|c| c.get("total_cost_usd")),
+        root.get("cost").and_then(|c| c.get("total_usd")),
+        root.get("total_usd"),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(val) = candidate.as_f64()
+            && val.is_finite()
+            && val > 0.0
+        {
+            return Some(val);
+        }
+    }
+    None
+}
+
+fn is_context_window_obj(val: &Value) -> bool {
+    let Some(map) = val.as_object() else {
+        return false;
+    };
+    map.contains_key("total_input_tokens")
+        || map.contains_key("total_output_tokens")
+        || map.contains_key("context_window_size")
+        || map.contains_key("used_percentage")
+        || map.get("current_usage").is_some_and(Value::is_object)
+}
+
+fn find_context_window(val: &Value, depth: u8) -> Option<&Value> {
+    if depth > 4 {
+        return None;
+    }
+    let map = val.as_object()?;
+    if let Some(cw) = map.get("context_window")
+        && is_context_window_obj(cw)
+    {
+        return Some(cw);
+    }
+    if is_context_window_obj(val) {
+        return Some(val);
+    }
+    for child in map.values() {
+        if child.is_object()
+            && let Some(found) = find_context_window(child, depth + 1)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn as_u64_non_neg(val: Option<&Value>) -> Option<u64> {
+    let v = val?;
+    if let Some(u) = v.as_u64() {
+        return Some(u);
+    }
+    if let Some(f) = v.as_f64()
+        && f.is_finite()
+        && f >= 0.0
+    {
+        return Some(f.trunc() as u64);
+    }
+    None
+}
+
+fn parse_token_usage(val: &Value) -> Option<TokenUsage> {
+    let map = val.as_object()?;
+    let input_tokens = as_u64_non_neg(map.get("input_tokens")).unwrap_or(0);
+    let output_tokens = as_u64_non_neg(map.get("output_tokens")).unwrap_or(0);
+    let cache_read_input_tokens = as_u64_non_neg(map.get("cache_read_input_tokens"))
+        .or_else(|| as_u64_non_neg(map.get("cache_read_tokens")))
+        .unwrap_or(0);
+    let cache_creation_input_tokens = as_u64_non_neg(map.get("cache_creation_input_tokens"))
+        .or_else(|| as_u64_non_neg(map.get("cache_creation_tokens")))
+        .unwrap_or(0);
+    let cache_exclusive = map
+        .get("cacheExclusive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    Some(TokenUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+        cache_exclusive,
+    })
+}
+
+fn parse_context_window(cw: &Value) -> ContextWindowSnapshot {
+    let context_window_size = as_u64_non_neg(cw.get("context_window_size")).unwrap_or(0);
+    let used_percentage = cw
+        .get("used_percentage")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite() && *v >= 0.0);
+    let total_input_opt = as_u64_non_neg(cw.get("total_input_tokens"));
+    let has_total_input = total_input_opt.is_some();
+    let total_input_tokens = total_input_opt.unwrap_or(0);
+    let total_output_tokens = as_u64_non_neg(cw.get("total_output_tokens")).unwrap_or(0);
+
+    let total_cache_read_tokens = as_u64_non_neg(cw.get("total_cache_read_input_tokens"))
+        .or_else(|| as_u64_non_neg(cw.get("total_cache_read_tokens")))
+        .or_else(|| as_u64_non_neg(cw.get("cache_read_input_tokens")))
+        .or_else(|| as_u64_non_neg(cw.get("cache_read_tokens")));
+    let total_cache_creation_tokens = as_u64_non_neg(cw.get("total_cache_creation_input_tokens"))
+        .or_else(|| as_u64_non_neg(cw.get("total_cache_creation_tokens")))
+        .or_else(|| as_u64_non_neg(cw.get("cache_creation_input_tokens")))
+        .or_else(|| as_u64_non_neg(cw.get("cache_creation_tokens")));
+
+    let current_usage = cw.get("current_usage").and_then(parse_token_usage);
+
+    ContextWindowSnapshot {
+        context_window_size,
+        used_percentage,
+        total_input_tokens,
+        total_output_tokens,
+        total_cache_read_tokens,
+        total_cache_creation_tokens,
+        current_usage,
+        has_total_input,
+    }
+}
