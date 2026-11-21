@@ -16,8 +16,8 @@
 
 ## Verification & Checklist
 
-- [ ] `npm test` passes completely with zero failures
-- [ ] Zero external npm dependencies maintained (Node.js built-in modules only)
-- [ ] Any new `runtime/` files are registered in `scripts/bootstrap.js` (`RUNTIME_FILES`) and `scripts/deploy-local.sh` (or N/A)
+- [ ] `cargo clippy --all-targets -- -D warnings` passes with zero warnings
+- [ ] `cargo test` passes completely with zero failures
+- [ ] Zero off-host Antigravity / Google cloud requests or credential reads introduced (ADR-0002)
 - [ ] User-facing documentation and UI strings are synchronized in English and Simplified Chinese (or N/A)
 - [ ] No sensitive credentials, OAuth tokens, or unredacted personal logs are included

@@ -2,7 +2,7 @@
 
 [简体中文](./reference_zh.md) · [Back to README](../README.md) · [Docs Index](./README.md)
 
-Complete technical reference for `agy-pulse` CLI commands, flags, telemetry ledger, local Web Dashboard, configuration schema, environment variables, custom forks, local development, and repository layout.
+Complete technical reference for `agy-pulse` v2.0.0 CLI commands, flags, unified SQLite WAL **Ledger**, local Web **Dashboard**, configuration schema, environment variables, custom forks, local development, and repository layout.
 
 ---
 
@@ -14,7 +14,7 @@ Complete technical reference for `agy-pulse` CLI commands, flags, telemetry ledg
   - [Primary Commands](#primary-commands)
   - [`agypl stats` Options](#agypl-stats-options)
   - [`agypl dashboard` Actions & Options](#agypl-dashboard-actions--options)
-  - [Installer / Deploy / Uninstaller Flags](#installer--deploy--uninstaller-flags)
+  - [`agypl install` / `uninstall` / `update` Options](#agypl-install--uninstall--update-options)
 - [Permanent Telemetry Ledger & Web Dashboard (`stats` / `dashboard`)](#permanent-telemetry-ledger--web-dashboard-stats--dashboard)
 - [Uninstall Details](#uninstall-details)
 - [Configuration Reference](#configuration-reference)
@@ -23,20 +23,18 @@ Complete technical reference for `agy-pulse` CLI commands, flags, telemetry ledg
   - [Top-Level Configuration Fields](#top-level-configuration-fields)
   - [`display.*` Configuration Fields](#display-configuration-fields)
 - [Environment Variables](#environment-variables)
-  - [Paths & Installation](#paths--installation)
-  - [Repository, Self-Update & Bootstrap](#repository-self-update--bootstrap)
-  - [Quota, Display, Locale & Runtime](#quota-display-locale--runtime)
-- [Development & Legacy Migration](#development--legacy-migration)
+- [Development & Legacy v1 Migration](#development--legacy-v1-migration)
 - [File Structure](#file-structure)
 
 ---
 
 ## Display Modes (`display.quotaStyle`)
 
-- **`table`** (default): 2-column provider window overview (`Google 5h/week`, `Claude 5h/week`, and optional `Argon`) + bottom session cache & real-time context monitor. Missing quota windows render `--` instead of a misleading `100%`.
-- **`models`**: 2-column per-model quota breakdown with custom `columnWidth` (automatically adapts to narrow terminals and switches to single-column below 56 columns).
-- **`compact`**: Provider-grouped mini bars (`Google:`, `Anthropic:`, with OpenAI models grouped under `Anthropic`) and zero family-name collisions across 2026 models (`Carbon`, `Hydro`, `Argon`, `Neon`, `Orch-C`, `Orch-A`, `Orch-N`, etc.).
-- **`none`**: Disables the quota panel completely (including loading/unavailable placeholders).
+All provider **Quota** data is parsed strictly from the host `stdin` JSON payload (zero off-host Antigravity cloud requests per ADR-0002):
+
+- **`table`** (default): 2-column provider window overview (`Google 5h/week`, `Claude 5h/week`, and optional `Argon`) + bottom session cache & real-time **Compaction** monitor. Missing quota windows render `--` instead of a misleading `100%`. Legacy `v1` `"models"` values smoothly fall back to `"table"`.
+- **`compact`**: Single-line provider critical-window percentages (`Google: X% │ Claude: Y% │ Argon: Z%`).
+- **`none`**: Disables the quota panel completely.
 
 ---
 
@@ -46,34 +44,43 @@ Run in a normal shell (**NOT** inside an active `agy` session, since `agy` overw
 
 ### What the installer does
 
-1. Stages the declarative plugin (`agy plugin install`).
-2. Installs the pure Node.js runtime to `~/.gemini/antigravity-cli/agy-pulse-runtime/` (preserving and deep-merging your saved global `agy-pulse.config.json` across upgrades unless `--reset-config` is passed to `scripts/bootstrap.js`).
-3. Configures `statusLine.command` in `~/.gemini/antigravity-cli/settings.json` to invoke `runtime/bin/agy-pulse.js` (or `.cmd` shim on Windows), preserving existing `enabled` / `stack_with_default` flags.
-4. Registers global CLI commands **`agypl`** (primary) and **`agy-pulse`** (compatibility alias) in `~/.local/bin/` (or `%LOCALAPPDATA%\agy\bin\` on Windows; override via `AGY_PULSE_BIN_DIR`).
+1. Detects OS and CPU architecture (`linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`, or `windows-x86_64`), downloads the matching prebuilt archive and `SHA256SUMS`, and verifies the SHA-256 checksum.
+2. Installs native binaries **`agy-pulse`** and **`agypl`** to `~/.local/bin/` (Unix) or `%LOCALAPPDATA%\agy-pulse\bin\` (Windows; override via `AGY_PULSE_BIN_DIR`).
+3. Runs `agy-pulse install` to configure `statusLine.command` in `~/.gemini/antigravity-cli/settings.json` (preserving existing `enabled` / `stack_with_default` flags and backing up corrupt JSON to `.bak`), and cleans stale `v1` plugin artifacts.
+4. When `agy` is on `PATH`, runs `agy plugin install` to register static plugin manifests (`plugin.json`, `gemini-extension.json`, `skills/pulse-config/SKILL.md`).
 
-### Local checkout install
+### Prebuilt install (macOS / Linux / Windows)
 
-**macOS / Linux**:
 ```bash
-bash scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/hardworkDAD/agy-pulse/main/scripts/install.sh | bash
 ```
 
-**Windows PowerShell**:
 ```powershell
-.\scripts\install.ps1
+irm https://raw.githubusercontent.com/hardworkDAD/agy-pulse/main/scripts/install.ps1 | iex
+```
+
+### Source install (`cargo install` or local checkout)
+
+```bash
+cargo install --git https://github.com/hardworkDAD/agy-pulse
+agy-pulse install
+```
+
+Or from a local git clone:
+
+```bash
+bash scripts/deploy-local.sh
 ```
 
 ### Custom fork or mirror
 
-Override `AGY_PULSE_REPO` (or `AGY_PULSE_REPO_RAW` / `AGY_PULSE_REPO_URL`) before running the installer:
+Override `AGY_PULSE_REPO` or `AGY_PULSE_RELEASE_BASE_URL` before running the installer:
 
-**macOS / Linux**:
 ```bash
 export AGY_PULSE_REPO="yourname/agy-pulse"
 curl -fsSL "https://raw.githubusercontent.com/$AGY_PULSE_REPO/main/scripts/install.sh" | bash
 ```
 
-**Windows PowerShell**:
 ```powershell
 $env:AGY_PULSE_REPO = 'yourname/agy-pulse'
 irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.ps1" | iex
@@ -90,12 +97,13 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags.
 | Command / Invocation | Aliases | Description |
 |---|---|---|
 | `agypl stats [range] [options]` | `report`, `--stats` | Print CLI & Antigravity IDE telemetry summary in terminal |
-| `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | Start or manage offline local Web dashboard (`127.0.0.1:3789`, standalone app window & desktop icon) |
-| `agypl config` | `--config` | Launch interactive terminal configuration wizard |
-| `agypl diagnose` | `--diagnose` | Output JSON authentication & quota cache diagnostics |
-| `agypl update` | `--update` | Download and install latest runtime from configured repository |
-| `agypl help` | `--help`, `-h` | Show CLI usage and version |
-| `agy-pulse` *(no args)* | — | Read `agy` JSON from `stdin` (1.5s timeout) and render status line |
+| `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | Start or manage offline local Web **Dashboard** (`127.0.0.1:3789`, standalone app window & desktop icon) |
+| `agypl config` | `--config` | Launch interactive terminal configuration wizard with live **Statusline** preview |
+| `agypl install [--bin-dir <dir>]` | `--install` | Deploy `agy-pulse` & `agypl` binaries and register `statusLine` in host `settings.json` |
+| `agypl uninstall [--purge-ledger]` | `--uninstall` | Safely remove `statusLine`, binaries, shortcuts & caches (preserves **Ledger** by default) |
+| `agypl update [--force]` | `--update` | Check GitHub Releases, verify `SHA256SUMS`, and atomically self-update |
+| `agypl help` | `--help`, `-h` | Show CLI usage (`--version` / `-V` / `-v` / `version` prints version) |
+| `agy-pulse` *(no args)* | — | Read `agy` JSON from `stdin` (1500 ms timeout) and render **Statusline** |
 
 ### `agypl stats` Options
 
@@ -106,98 +114,88 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags.
 | `--today`, `--24h`, `--7d`, `--30d`, `--month`, `--all` | flag | — | Shortcut flags for preset ranges |
 | `--from <date>` / `--to <date>` | `YYYY-MM-DD` or epoch ms | *unset* | Custom range bounds (auto-selects `custom` if `--range` is omitted) |
 | `--granularity <val>` / `--by <val>` | `auto \| hour \| day \| week` | `auto` | Time series aggregation bucket |
-| `--source <val>` | `all \| cli \| ide` | `all` | Filter by source (`Antigravity CLI`, `Antigravity IDE`, or both) |
+| `--source <val>` | `all \| cli \| ide` | `all` | Filter by source (`cli`, `ide`, or both) |
 | `--model <val>` | model name or `all` | `all` | Filter by model name/family |
 | `--workspace <val>` / `--ws <val>` | path, name, or `all` | `all` | Filter by workspace |
-| `--no-subagents` / `--include-subagents` | flag | include | Exclude or include `/swarm` workers & subagent sessions |
+| `--no-subagents` / `--include-subagents` | flag | include | Exclude or include `/swarm` workers & subagent **Conversations** |
 | `--format <val>` | `table \| json \| csv` | `table` | Output format |
 | `--json` | flag | — | Shorthand for `--format json` |
 | `--csv[=kind]` | `timeseries \| models \| sessions` | `timeseries` | Shorthand for `--format csv` with optional export kind |
 | `--csv-kind <val>` / `--kind <val>` | `timeseries \| models \| sessions` | `timeseries` | Select CSV export dataset |
 | `--lang <val>` | `auto \| en \| zh` | `auto` | Output language |
-| `--no-sync` | flag | `false` | Skip read-only DB backfill and query existing ledger directly |
+| `--no-sync` | flag | `false` | Skip read-only DB backfill and query existing **Ledger** directly |
 | `-h`, `--help` | flag | — | Show `stats` help |
 
 ### `agypl dashboard` Actions & Options
 
 | Action / Option | Values / Format | Default | Description |
 |---|---|---|---|
-| *(no action)* | foreground server | `serve` | Run local dashboard in the foreground (`127.0.0.1:3789`) and open browser |
-| `open` | sub-action | — | Reuse or silently start background dashboard (600s idle exit) and open a standalone app window |
-| `stop` | sub-action | — | Stop the running background dashboard instance cleanly |
-| `status` | sub-action | — | Show background dashboard status (`url`, `pid`) and desktop shortcut state |
+| *(no action)* | foreground server | `serve` | Run local **Dashboard** in foreground (`127.0.0.1:3789`) and open browser |
+| `open` | sub-action | — | Reuse or silently start background server and open a standalone app window |
+| `stop` | sub-action | — | Stop the running background **Dashboard** instance cleanly |
+| `status` | sub-action | — | Show background **Dashboard** status (`url`, `pid`) and desktop shortcut state |
 | `install-shortcut` (`install-app`) | sub-action | — | Install a cross-platform desktop/app-launcher shortcut for terminal-free opening |
 | `uninstall-shortcut` (`uninstall-app`) | sub-action | — | Remove only `agy-pulse`-owned desktop shortcuts (fingerprint-verified) |
 | `--port <num>`, `-p <num>` | `0`–`65535` | `3789` | Bind loopback port (`0` picks random port; auto-falls back on conflict) |
 | `--no-open` / `--open` | flag | open | Disable or enable auto-opening the browser/window |
 | `--app` / `--browser` | flag | `--app` for `open`, `--browser` for `serve` | Open in a standalone Chromium app window (`--app=<url>`) or default browser |
-| `--background` | flag | `false` | Run server with `deferInitialSync` and idle auto-exit (default `600`s) |
-| `--idle-timeout <sec>` | non-negative integer | `600` (`open`/`--background`), `0` (`serve`) | Auto-exit after N seconds of inactivity (`0` disables idle exit) |
+| `--background` | flag | `false` | Run server in background daemon mode with page-lifecycle auto-exit |
+| `--idle-timeout <sec>` | non-negative integer | `600` (`open`/`--background`), `0` (`serve`) | Startup/orphan idle timeout when no page client is connected |
 | `--desktop` | flag | `false` | Also place a shortcut on `~/Desktop` during `install-shortcut` |
-| `--lang <val>`, `--zh`, `--en` | `auto \| en \| zh` | `auto` | Initial dashboard UI language |
-| `--no-sync` | flag | `false` | Skip startup DB backfill and serve existing ledger immediately |
+| `--lang <val>`, `--zh`, `--en` | `auto \| en \| zh` | `auto` | Initial **Dashboard** UI language |
+| `--no-sync` | flag | `false` | Skip startup DB backfill and serve existing **Ledger** immediately |
 
-Quick setup for terminal-free one-click opening:
-```bash
-agypl dashboard install-shortcut --desktop   # register OS app launcher (+ optional Desktop icon)
-agypl dashboard open                         # launch standalone app window on demand
-agypl dashboard status                       # inspect running instance & shortcut path
-agypl dashboard stop                         # stop background instance early
-```
+### `agypl install` / `uninstall` / `update` Options
 
-### Installer / Deploy / Uninstaller Flags
-
-| Script | Flag | Description |
+| Command | Flag | Description |
 |---|---|---|
-| `node scripts/bootstrap.js` | `--reset-config` | Reset saved global `agy-pulse.config.json` to defaults during install/upgrade |
-| `node scripts/bootstrap.js` | `--cleanup-self` | Remove temporary `bootstrap.js` copy inside `os.tmpdir()` after execution |
-| `node scripts/bootstrap.js` | `--delay-start` | Delay execution by 1s before installing (for self-update handoff) |
-| `bash scripts/deploy-local.sh` | `--sync-config` | Overwrite global `agy-pulse.config.json` with repo defaults during local deploy |
-| `node runtime/uninstall.js` | `--purge-ledger`, `--purge` | Also delete permanent telemetry ledgers (`agy-pulse-ledger.sqlite` / `.json`) |
+| `agypl install` | `--bin-dir <dir>` | Override binary deployment directory (default `~/.local/bin` or `%LOCALAPPDATA%\agy-pulse\bin`) |
+| `agypl uninstall` | `--purge-ledger`, `--purge` | Also remove `agy-pulse-ledger.sqlite` (preserved by default) |
+| `agypl uninstall` | `--bin-dir <dir>` | Also clean binaries from custom bin directory |
+| `agypl update` | `--force` | Re-download and replace binary even if remote version matches local version |
+| `bash scripts/deploy-local.sh` | `--offline`, `--bin-dir=<dir>` | Build release binaries locally (`cargo build --release`) and deploy |
 
 ---
 
 ## Permanent Telemetry Ledger & Web Dashboard (`stats` / `dashboard`)
 
-- **Zero-daemon collection (CLI + Antigravity IDE)**: While rendering the status line, `agy-pulse` silently performs a 15s-throttled incremental archive for the active CLI session (`agy-pulse-ledger.sqlite` via built-in `node:sqlite`, with automatic `agy-pulse-ledger.json` fallback). Running `stats` or `dashboard` automatically backfills both Antigravity CLI (`~/.gemini/antigravity-cli/conversations/*.db`) and Antigravity IDE (`~/.gemini/antigravity/conversations/*.db`) read-only (`?immutable=1` / WAL-safe temp copy) without touching source databases or affecting the live status bar.
-- **Permanent retention**: Recorded steps and session trees stay in your ledger even if old `conversations/*.db` files are pruned later.
-- **Offline Local Web Dashboard (`dashboard`)**: Binds strictly to `127.0.0.1` with Host/Origin validation, supports single-instance on-demand background launch (`agypl dashboard open`) with automatic idle exit (600s default), standalone Chromium app-window launch (`--app`), cross-platform desktop shortcut install/uninstall (`install-shortcut` / `uninstall-shortcut`), dark/light theme & `en`/`zh` toggles, `All / CLI / IDE` source filter pills, source cost share summary, preset + custom date range pickers, `hour`/`day`/`week` granularity, model/workspace/subagent filters, 6 KPI cards, interactive native SVG charts (stacked cost bars + cache hit rate & output speed dual-line trend), sortable per-model breakdown, searchable & expandable `/swarm` session tree with `CLI` / `IDE` source badges, and CSV/JSON export.
+- **Unified SQLite WAL Ledger (`agy-pulse-ledger.sqlite`)**: Built-in `rusqlite` (`bundled` SQLite with WAL mode and `busy_timeout`) stores all CLI and IDE **Conversation** steps, **Cascade** lineage, and monotonic rolling daily/7-day cost state (`0600` file permissions).
+- **Lock-free dual-source scanning**: `agy-pulse` incrementally syncs the active CLI **Conversation** during **Statusline** runs and scans both `~/.gemini/antigravity-cli/conversations/*.db` and `~/.gemini/antigravity/conversations/*.db` read-only (`?immutable=1` or temp-copied active WAL) during `stats` and `dashboard`.
+- **Persistent Keepalive Dashboard**: Binds strictly to `127.0.0.1`, validates `Host`/`Origin` + CSP headers, and uses `/api/keepalive` SSE streams + `/api/ping` + `pagehide` `/api/disconnect` beacons so minimized or backgrounded browser tabs stay connected indefinitely and exit only after all pages close.
 
 ---
 
 ## Uninstall Details
 
-**macOS / Linux**:
 ```bash
-bash uninstall.sh
+bash uninstall.sh        # macOS / Linux
 ```
 
-**Windows PowerShell**:
 ```powershell
-.\uninstall.ps1
+.\uninstall.ps1          # Windows PowerShell
 ```
 
-Removes the `agy-pulse` runtime directory, plugin installs, caches, logs, `agy-pulse-dashboard.json`, fingerprint-verified desktop shortcuts (`agypl dashboard uninstall-shortcut` / `removeDashboardShortcuts`), Windows shims, and clears `settings.json` `statusLine` (saving a `.bak` backup). Your permanent telemetry ledger (`agy-pulse-ledger.sqlite` / `agy-pulse-ledger.json`) is **preserved by default**; pass `--purge-ledger` (or `--purge`) to `node runtime/uninstall.js` if you want to remove it too.
+Or run `agypl uninstall` directly. Removes `agy-pulse` & `agypl` binaries, `settings.json` `statusLine` (saving `.bak`), fingerprint-verified desktop shortcuts, caches, logs, and plugin registrations. Your permanent telemetry **Ledger** (`agy-pulse-ledger.sqlite`) is **preserved by default**; pass `--purge-ledger` to remove it too.
 
 ---
 
 ## Configuration Reference
 
-Optional. Create `agy-pulse.config.json` in your workspace root to override defaults.
-
 ### Config Paths & Merge Precedence
 
-1. **Workspace local config** (highest priority): `./agy-pulse.config.json`
-2. **Global config**: `~/.gemini/antigravity-cli/agy-pulse-runtime/runtime/agy-pulse.config.json` (or `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`)
-3. **Built-in defaults** (`FULL_DEFAULT_CONFIG`, lowest priority)
+1. **Environment overrides**: `AGY_PULSE_LANGUAGE`
+2. **Workspace local config** (highest file priority): `./agy-pulse.config.json`
+3. **Global config**: `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (also discovers legacy `agy-pulse-runtime/runtime/agy-pulse.config.json`, or `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`)
+4. **Built-in defaults** (`DisplayConfig::builtin_defaults()`, lowest priority)
 
-`runtime/config.js` deep-merges `theme` (unless overridden by a string preset/color), `display`, `display.cacheHitThresholds`, `icons`, and `thresholds`.
+Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `repository`) are silently ignored during deserialization, and `"quotaStyle": "models"` smoothly maps to `"table"`.
 
 ### Full Default Configuration Example
 
 ```json
 {
   "enabled": true,
+  "language": "auto",
   "theme": {
     "primary": "green",
     "secondary": "gray",
@@ -215,13 +213,13 @@ Optional. Create `agy-pulse.config.json` in your workspace root to override defa
     "showTokenBar": false,
     "showContextBar": false,
     "showTurnCacheHitRate": false,
-    "showImageQuota": false,
     "showBreadcrumbs": false,
     "showGitBranch": false,
     "showUsername": false,
     "showCost": false,
     "showDailyCost": false,
     "showWeeklyCost": false,
+    "showRoutedCost": false,
     "breadcrumbCount": 3,
     "useNerdFonts": false,
     "columnWidth": 40
@@ -229,8 +227,7 @@ Optional. Create `agy-pulse.config.json` in your workspace root to override defa
   "thresholds": {
     "warning": 0.7,
     "critical": 0.9
-  },
-  "language": "auto"
+  }
 }
 ```
 
@@ -238,103 +235,80 @@ Optional. Create `agy-pulse.config.json` in your workspace root to override defa
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | `boolean` | `true` | Master switch; when `false`, status line exits silently with no output |
+| `enabled` | `boolean` | `true` | Master switch; when `false`, Statusline exits silently with no output |
 | `language` | `"auto" \| "en" \| "zh"` | `"auto"` | UI language (`"auto"` inspects `LC_ALL` / `LC_CTYPE` / `LANG`) |
-| `repository` | `string \| { url?, slug? }` | `package.json#repository` (`https://github.com/hardworkDAD/agy-pulse`) | GitHub `"owner/repo"` or URL used by `agypl update` and background update checks; falls back to `package.json#repository` when omitted or empty |
-| `theme` | `object \| string` | `{ primary: "green", secondary: "gray", warning: "yellow", critical: "red" }` | 4-key object (`green`, `gray`, `yellow`, `red`, `blue`, `magenta`, `cyan`), one of 4 string presets (`"Emerald Green"`, `"Ocean Blue"`, `"Cyberpunk Magenta"`, `"Amber Gold"`), or a single color name string overriding `primary` |
-| `thresholds` | `{ warning, critical }` | `{ warning: 0.7, critical: 0.9 }` | Quota warning/critical ratios (`0`–`1`). For the bottom context monitor bar, keeping default `0.7 / 0.9` uses `65%` yellow / `85%` red; setting custom values applies `warning * 100%` / `critical * 100%` to both quota and context monitor |
-| `icons` | `object` | *unset* | Optional icon overrides (`branch`, `plan`, `step`, `task`, `token`, `ctx`, `model`), truncated to max 8 chars and shallow-merged |
-| `endpoints` | `string[]` | *built-in defaults* | Advanced optional override for cloud quota endpoint URLs (lower priority than `AGY_PULSE_ENDPOINTS`) |
-| `interestingModels` | `string[]` | *auto-discovered* | Advanced optional override for model IDs queried in the quota table (lower priority than `AGY_PULSE_INTERESTING_MODELS`) |
+| `theme` | `object \| string` | `{ primary: "green", secondary: "gray", warning: "yellow", critical: "red" }` | 4-key object, preset (`"Emerald Green"`, `"Ocean Blue"`, `"Cyberpunk Magenta"`, `"Amber Gold"`), or single color name overriding `primary` |
+| `thresholds` | `{ warning, critical }` | `{ warning: 0.7, critical: 0.9 }` | Quota warning/critical ratios (`0`–`1`); context monitor uses `65%`/`85%` at defaults or `warning*100%`/`critical*100%` when customized |
+| `icons` | `object` | *unset* | Optional icon overrides (`branch`, `plan`, `step`, `task`, `token`, `ctx`, `model`, max 8 chars) |
 
 ### `display.*` Configuration Fields
 
-> Note: When calling `renderStatusLine()` directly without config, some flags (`showGitBranch`, `showTokenBar`, `showContextBar`, `showBreadcrumbs`, `showModel`) default to `true` via `!== false`, whereas the shipped `FULL_DEFAULT_CONFIG` & `runtime/agy-pulse.config.json` explicitly set them to `false` as shown below.
-
 | Field | Type | Default | Area | Description |
 |---|---|---|---|---|
-| `display.quotaStyle` | `"table" \| "models" \| "compact" \| "none"` | `"table"` | Quota panel | Quota panel layout (`"none"` hides panel completely) |
-| `display.showContextMonitor` | `boolean` | `true` | Bottom bar | Show real-time context window & compaction monitor line |
-| `display.showModelCache` | `boolean` | `true` | Session Cache | Show per-model cache hit breakdown line above context monitor (active by default when `showContextMonitor` is `true`) |
-| `display.showCurrentDir` | `boolean` | `true` | Line 1 | Show current working directory basename |
-| `display.showCycleMode` | `boolean` | `true` | Line 1 | Show interactive `agy` cycle mode badge (`auto`, `accept-edits`, `plan`, `best-of-n`, toggled via `Shift+Tab`) |
-| `display.showSpeed` | `boolean` | `true` | Line 1 | Show streaming weighted avg speed (`out: X.X tok/s (ttft Y.Ys)`) across recent 30 non-empty DBs plus up to 3 active child/`/swarm` model speeds |
+| `display.quotaStyle` | `"table" \| "compact" \| "none"` | `"table"` | Quota panel | Provider quota layout (`"models"` falls back to `"table"`) |
+| `display.showContextMonitor` | `boolean` | `true` | Bottom bar | Real-time context & **Compaction** monitor line |
+| `display.showModelCache` | `boolean` | `true` | Session Cache | Per-model cumulative cache hit breakdown line |
+| `display.showCurrentDir` | `boolean` | `true` | Line 1 | Current working directory basename |
+| `display.showCycleMode` | `boolean` | `true` | Line 1 | Interactive cycle mode badge (`auto`, `accept-edits`, `plan`, `best-of-n`) |
+| `display.showSpeed` | `boolean` | `true` | Line 1 | Main weighted output `tok/s` + TTFT and up to 3 active child model speeds |
 | `display.modelSpeedExpireMinutes` | `number` | `5` | Line 1 | Hide main/child model speed & TTFT after N idle minutes |
 | `display.modelSpeedExpireTurns` | `number` | `30` | Line 1 | Hide main/child model speed & TTFT after N idle turns |
-| `display.showModel` | `boolean` | `false` | Line 1 | Show active model name on Line 1 (off by default since bottom bar renders `◈ <Model (Effort)>`) |
-| `display.showTokenBar` | `boolean` | `false` | Line 2 | Show classic token breakdown bar |
-| `display.showContextBar` | `boolean` | `false` | Line 2 | Show classic context window progress bar |
-| `display.showTurnCacheHitRate` | `boolean` | `false` | Line 2 | Show per-turn cache hit rate badge |
-| `display.cacheHitThresholds` | `{ excellent?, partial? }` | `{ excellent: 80, partial: 50 }` | Line 2 | Cache hit badge thresholds (`>= excellent` bold green, `>= partial` yellow, `> 0` dim yellow, `0` dim gray; shallow-merged) |
-| `display.showImageQuota` | `boolean` | `false` | Line 2 | Show image generation quota bar |
-| `display.showBreadcrumbs` | `boolean` | `false` | Line 3 | Show recently touched file breadcrumbs |
-| `display.breadcrumbCount` | `number` | `3` | Line 3 | Max breadcrumb files shown (`config` wizard cycles `0, 1, 2, 3, 5`) |
-| `display.showGitBranch` | `boolean` | `false` | Line 1 | Show current Git branch (auto-hidden outside Git repositories) |
-| `display.showUsername` | `boolean` | `false` | Line 1 | Show resolved login email or custom `display.username` |
+| `display.showModel` | `boolean` | `false` | Line 1 | Active model name on Line 1 |
+| `display.showTokenBar` | `boolean` | `false` | Line 2 | Token breakdown bar (`in`, `out`, `cache`) |
+| `display.showContextBar` | `boolean` | `false` | Line 2 | Classic context progress bar |
+| `display.showTurnCacheHitRate` | `boolean` | `false` | Line 2 | Per-turn cache hit rate badge |
+| `display.cacheHitThresholds` | `{ excellent?, partial? }` | `{ excellent: 80, partial: 50 }` | Line 2 | Turn cache hit color thresholds |
+| `display.showBreadcrumbs` | `boolean` | `false` | Line 3 | Workspace memory file / breadcrumbs |
+| `display.breadcrumbCount` | `number` | `3` | Line 3 | Max breadcrumb items (`0, 1, 2, 3, 5`) |
+| `display.showGitBranch` | `boolean` | `false` | Line 1 | Current Git branch (hidden outside Git repos) |
+| `display.showUsername` | `boolean` | `false` | Line 1 | Host stdin username or custom `display.username` |
 | `display.username` | `string` | *unset* | Line 1 | Custom username override when `showUsername` is `true` |
-| `display.showCost` | `boolean` | `false` | Line 1 | Show current session USD total (also shown on bottom monitor bar) |
-| `display.showDailyCost` | `boolean` | `false` | Line 1 | Show today's USD cost (`daily-cost.json`) |
-| `display.showWeeklyCost` | `boolean` | `false` | Line 1 | Show 7-day rolling USD cost |
-| `display.showRoutedCost` | `boolean` | `false` | Cost calc | For Bedrock (`anthropic.*` / `us.anthropic.*` / `eu.anthropic.*`) & Vertex (`claude-*@*`) routed models, `false` ignores CLI native cost and estimates from tokens; `true` trusts native routed cost |
+| `display.showCost` | `boolean` | `false` | Line 1 | Current **Cascade** USD total |
+| `display.showDailyCost` | `boolean` | `false` | Line 1 | Today's cumulative USD cost from **Ledger** |
+| `display.showWeeklyCost` | `boolean` | `false` | Line 1 | 7-day rolling USD cost from **Ledger** |
+| `display.showRoutedCost` | `boolean` | `false` | Cost calc | Trust native routed cost for Bedrock/Vertex models when `true` |
 | `display.useNerdFonts` | `boolean` | `false` | Icons | Use Nerd Font glyphs |
-| `display.unicode` | `boolean` | *omitted (auto)* | Charset | Omit for terminal UTF-8 auto-detection; set `true` to force Unicode or `false` to force ASCII |
-| `display.columnWidth` | `number` | `40` | Quota panel | Max column width in `table` / `models` layouts |
-| `display.terminalWidth` | `number` | *unset (auto)* | Layout | Explicit column width cap; precedence: `agyData.terminal_width > display.terminalWidth > COLUMNS > TTY` |
+| `display.unicode` | `boolean` | *omitted (auto)* | Charset | Omit for auto-detect; `true` forces Unicode; `false` forces ASCII |
+| `display.columnWidth` | `number` | `40` | Quota panel | Column width hint |
+| `display.terminalWidth` | `number` | *unset (auto)* | Layout | Explicit terminal width cap (`terminal_width > display.terminalWidth > COLUMNS > TTY`) |
 
 ---
 
 ## Environment Variables
 
-### Paths & Installation
-
 | Variable | Purpose |
 |---|---|
 | `AGY_PULSE_DATA_DIR` | Override Antigravity CLI data directory (`~/.gemini/antigravity-cli` by default) |
-| `AGY_PULSE_IDE_DATA_DIR` | Override Antigravity IDE data directory (`~/.gemini/antigravity` by default) |
-| `AGY_PULSE_GLOBAL_CONFIG_DIR` | Override directory containing global `agy-pulse.config.json` (defaults to `runtime/`) |
-| `AGY_PULSE_BIN_DIR` | Override global CLI shim directory (`~/.local/bin` on Unix, `%LOCALAPPDATA%\agy\bin` on Windows) |
-| `AGY_PULSE_NODE` | Custom Node.js binary path for legacy `statusline-combined.sh` shim |
-| `AGY_PULSE_PROFILE_PATH` | Override PowerShell profile path for `scripts/configure-utf8.ps1` |
-| `AGY_BIN` | Override `agy` executable path for `scripts/diagnose-auth.js` and `scripts/verify-display.js` |
-
-### Repository, Self-Update & Bootstrap
-
-| Variable | Purpose |
-|---|---|
-| `AGY_PULSE_REPO` | Override `owner/repo` slug for remote install, bootstrap, and `--update` (default `hardworkDAD/agy-pulse`) |
-| `AGY_PULSE_REPO_RAW` | Custom raw GitHub base URL for forks/mirrors |
-| `AGY_PULSE_REPO_URL` | Custom Git clone URL for `agy plugin install` |
-| `AGY_PULSE_BOOTSTRAP_URL` | Custom `bootstrap.js` URL for `agypl update` |
-| `AGY_PULSE_UPDATE_URL` | Custom `package.json` URL for background update checker |
-| `AGY_PULSE_SETUP_SOURCE_DIR` | Local source directory override for `scripts/bootstrap.js` |
-| `AGY_PULSE_SETUP_SOURCE_BASE` | Fallback raw source base URL for `scripts/bootstrap.js` |
-
-### Quota, Display, Locale & Runtime
-
-| Variable | Purpose |
-|---|---|
-| `AGY_PULSE_ENDPOINTS` | Comma-separated cloud quota endpoint URLs |
-| `AGY_PULSE_INTERESTING_MODELS` | Comma-separated model IDs to include in quota table |
+| `AGY_PULSE_IDE_DATA_DIR` | Override Antigravity IDE data directory (`~/.gemini/antigravity`; empty when `AGY_PULSE_DATA_DIR` is set alone for sandbox isolation) |
+| `AGY_PULSE_GLOBAL_CONFIG_DIR` | Override global `agy-pulse.config.json` directory |
+| `AGY_PULSE_BIN_DIR` | Override binary install directory (`~/.local/bin` on Unix, `%LOCALAPPDATA%\agy-pulse\bin` on Windows) |
+| `AGY_PULSE_REPO` | Override `owner/repo` slug for install and `agypl update` (default `hardworkDAD/agy-pulse`) |
+| `AGY_PULSE_REPO_URL` | Custom Git clone URL for `agy plugin install` in `install.sh` / `install.ps1` |
+| `AGY_PULSE_RELEASE_BASE_URL` | Override GitHub Release download base URL (mirrors or local `http://127.0.0.1` test server) |
+| `AGY_PULSE_UPDATE_URL` | Override update check metadata JSON URL |
+| `AGY_PULSE_DISABLE_UPDATE_CHECK` | Set `1` to disable 24h background update checks on Statusline runs |
 | `AGY_PULSE_FORCE_ASCII` | Set `1` to force ASCII fallback |
 | `AGY_PULSE_FORCE_UNICODE` | Set `1` to force Unicode output |
-| `AGY_PULSE_NO_OPEN` | Set `1` to prevent `agypl dashboard` from auto-opening a browser |
-| `AGY_PULSE_DASHBOARD_IDLE_SEC` | Override default idle auto-exit timeout in seconds for `agypl dashboard open` / `--background` (default `600`) |
-| `NODE_USE_ENV_PROXY` | Automatically set to `'1'` in background quota refresh subprocess so Node honors `HTTP_PROXY`/`HTTPS_PROXY` (can be overridden) |
-| `COLUMNS` | Fallback terminal column width when `agyData.terminal_width` and `display.terminalWidth` are unset |
+| `AGY_PULSE_LANGUAGE` | Force UI language (`en`, `zh`, `auto`) |
+| `AGY_PULSE_NO_OPEN` | Set `1` to prevent `agypl dashboard` from opening a browser |
+| `AGY_PULSE_DASHBOARD_IDLE_SEC` | Override background orphan idle timeout in seconds (default `600`) |
+| `AGY_PULSE_DASHBOARD_CLOSE_GRACE_MS` | Override close-grace window in milliseconds after the last page disconnects |
+| `AGY_PULSE_PROFILE_PATH` | Override PowerShell profile path for `scripts/configure-utf8.ps1` |
+| `COLUMNS` | Fallback terminal column width |
 | `NO_COLOR` | Disable ANSI colors in `agypl stats` output |
-| `LC_ALL` / `LC_CTYPE` / `LANG` | Used to auto-detect terminal UTF-8 support and `zh`/`en` language when `language` is `"auto"` |
+| `LC_ALL` / `LC_CTYPE` / `LANG` | Auto-detect terminal UTF-8 support and `zh`/`en` language |
 
 ---
 
-## Development & Legacy Migration
+## Development & Legacy v1 Migration
 
-For local runtime development or migrating an older dual-process `statusline-combined.sh` setup to single-process `agy-pulse.js` (preserving existing config unless `--sync-config` is passed):
+Upgrading from `v1.0.0` (Node.js) automatically preserves your saved `agy-pulse.config.json` and replaces `settings.json` `statusLine.command` with the native `agy-pulse` binary. Historical usage is rebuilt directly by scanning CLI and IDE `conversations/*.db` archives into `agy-pulse-ledger.sqlite`.
 
 ```bash
+cargo clippy --all-targets -- -D warnings
+cargo test
 bash scripts/deploy-local.sh
 ```
-
-`deploy-local.sh` updates `~/.gemini/antigravity-cli/agy-pulse-runtime/`, upgrades any legacy `statusline-combined.sh` into a single-process `exec` forwarder, updates `settings.json` (backing up corrupt JSON to `.bak`), cleans stale plugin files, and syncs `skills/pulse-config/SKILL.md`.
 
 ---
 
@@ -342,44 +316,36 @@ bash scripts/deploy-local.sh
 
 ```
 agy-pulse/
+├── Cargo.toml                         # Rust Edition 2024 crate & bundled dependencies
+├── Cargo.lock                         # Locked dependency graph
+├── GLOSSARY.md                        # Canonical domain terminology
 ├── LICENSE                            # Standard MIT License
 ├── NOTICE                             # Open-source attribution & reference notices
-├── package.json                       # Package metadata, repository & test/CLI scripts
 ├── plugin.json                        # {"name":"agy-pulse"}
-├── gemini-extension.json              # agy remote-install manifest (v1.0.0)
-├── runtime/
-│   ├── brand.js                       # Brand constants & repository slug resolver
-│   ├── compaction.js                  # Pure-JS Protobuf wire decoder, SQLite compaction limit, 30-DB model perf & session cost tree
-│   ├── bin/
-│   │   └── agy-pulse.js / .cmd        # statusLine & CLI entrypoint
-│   ├── config-wizard.js               # Interactive terminal config wizard (--config)
-│   ├── config.js                      # Deep-merging config loader & atomic writer
-│   ├── cost.js                        # ACV-aligned model pricing table (>200k tiers) & unified session cost
-│   ├── daily-cost.js                  # Lock-safe daily & 7-day rolling cost ledger
-│   ├── dashboard.js                   # Local 127.0.0.1 HTTP telemetry dashboard server (--dashboard)
-│   ├── dashboard-launcher.js          # Single-instance daemon, app-window & desktop shortcut launcher
-│   ├── dashboard-ui.js                # Zero-CDN bilingual dark/light SVG dashboard SPA
-│   ├── encoding.js                    # Terminal UTF-8 / codepage detector
-│   ├── ledger.js                      # Permanent node:sqlite/JSON telemetry ledger & read-only DB scanner
-│   ├── parser.js                      # Incremental byte-offset transcript scanner & metadata
-│   ├── paths.js                       # Cross-platform root & safe executable resolver
-│   ├── quota.js                       # SWR quota orchestrator
-│   ├── quota/                         # token · cache · cloud · models
-│   ├── renderer.js                    # Multi-line status line renderer
-│   ├── renderer/                      # context-monitor · format · lang · quota-render
-│   ├── speed.js                       # Output tok/s & TTFT formatter with active-turn latching
-│   ├── stats.js                       # CLI telemetry table, ASCII trend & CSV/JSON reporter (--stats)
-│   ├── statusline-installer.js        # settings.json updater & Windows .cmd/.bat shims
-│   ├── uninstall.js                   # Full uninstaller for agy-pulse
-│   └── update-checker.js              # Semver-safe background update checker
+├── gemini-extension.json              # agy plugin manifest (v2.0.0)
+├── release.sh                         # Official local & tag release helper
+├── uninstall.sh / uninstall.ps1       # Zero-Node cross-platform uninstallers
+├── .github/workflows/
+│   ├── ci.yml                         # 3-OS Clippy + release build + full test suite
+│   └── release.yml                    # 5-target prebuilt archives + unified SHA256SUMS
+├── src/
+│   ├── lib.rs                         # #![deny(clippy::unwrap_used, clippy::expect_used)] + run_cli()
+│   ├── main.rs                        # Primary `agy-pulse` binary entrypoint
+│   ├── bin/agypl.rs                   # Short `agypl` binary entrypoint
+│   ├── domain/                        # Pure in-memory models, pricing, accounting, quota
+│   ├── ingest/                        # HostReader: stdin, transcript, lock-free .db, protobuf, workspace
+│   ├── ledger/                        # Unified SQLite WAL Ledger, sync, query & `stats`
+│   ├── render/                        # Pure in-memory layout, context bar, quota table, width, i18n
+│   ├── config/                        # Deep-merge config loader & interactive raw-TTY wizard
+│   ├── dashboard/                     # 127.0.0.1 HTTP server, SSE keepalive, launcher & embedded SPA
+│   ├── ops/                           # Native installer, safe uninstaller & SHA-256 self-updater
+│   └── platform/                      # Unix / Windows OS abstraction boundary
 ├── scripts/
-│   ├── install.sh / install.ps1       # One-command installers
-│   ├── bootstrap.sh / bootstrap.js    # Atomic runtime installer
-│   ├── deploy-local.sh                # Local deploy & legacy combined-script migrator
-│   ├── configure-utf8.ps1             # Windows UTF-8 helper
-│   ├── verify-display.js              # E2E verifier
-│   └── diagnose-auth.js               # Auth & token cache diagnostic
+│   ├── install.sh / install.ps1       # Prebuilt release archive installers with SHA-256 check
+│   ├── deploy-local.sh                # Local Cargo release build + deploy + smoke check
+│   └── configure-utf8.ps1             # Windows UTF-8 PowerShell & Git helper
 ├── skills/pulse-config/SKILL.md       # Agent config skill
-├── docs/                              # Architecture, module & reference documentation (en / zh)
-└── tests/unit/                        # Modular unit tests (node --test)
+├── docs/                              # Architecture, ADRs, module & reference docs (en / zh)
+└── tests/
+    └── t01..t10_*.rs                  # Black-box integration, parity & packaging test suites
 ```

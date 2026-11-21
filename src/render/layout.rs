@@ -614,10 +614,9 @@ pub fn render_statusline(
         format_tokens(token_total)
     } else {
         format!(
-            "{} {}({}{RESET}{}{})",
+            "{} {}({RESET}{}{})",
             format_tokens(token_total),
             palette.secondary,
-            RESET,
             detail_parts.join(", "),
             palette.secondary,
         )

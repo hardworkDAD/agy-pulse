@@ -1,10 +1,10 @@
 # agy-pulse
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-![零第三方依赖](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)
-![Node.js >= 22.5](https://img.shields.io/badge/Node.js-%3E%3D22.5-339933.svg)
+![Rust 原生单二进制](https://img.shields.io/badge/Runtime-Native%20Rust-orange.svg)
+![零运行时依赖](https://img.shields.io/badge/Dependencies-Zero%20Runtime-brightgreen.svg)
 
-> **Antigravity CLI (`agy`) 全能单进程状态栏、实时上下文与压缩上限监控、永久遥测账本（`stats` / `dashboard`）与云端配额追踪插件。**
+> **Antigravity CLI (`agy`) 原生单二进制 Rust 状态栏、实时上下文与压缩上限监控、统一 SQLite WAL 遥测账本（`stats` / `dashboard`）与合规模型配额面板。**
 
 [English](./README.md) · [完整参考手册](./docs/reference_zh.md)
 
@@ -19,36 +19,42 @@ my-project │ Google AI Pro │ plan │ 输出: 42.6 tok/s (首字 0.8s)
 ◈ Gemini 4 Carbon (High) · 上下文 ████▓······· 38.4% (196.6K/512K) · 压缩×1(峰480K) · 缓存 82% (160K) · 输出 12.4K · 费用 $0.12
 ```
 
-内置纯离线本地 Web 看板（`agypl dashboard`）及 4 种配额显示模式（`table`、`models`、`compact`、`none`），非 UTF-8 终端自动降级纯 ASCII；详见[完整参考手册](./docs/reference_zh.md#配额显示模式displayquotastyle)。
+内置纯离线本地**网页看板**（`agypl dashboard`）及 3 种**模型配额**显示模式（`table`、`compact`、`none`），非 UTF-8 终端自动降级纯 ASCII；详见[完整参考手册](./docs/reference_zh.md#配额显示模式displayquotastyle)。
 
 ## 核心特性
 
-- **零外部依赖单进程**：纯 Node.js 运行（推荐 >= 22.5 使用内置 `node:sqlite`，Node 20 自动降级为 JSON 账本），无任何第三方 npm 依赖，SWR 配额刷新不阻塞状态栏热路径。
-- **实时上下文与压缩上限监控**：原生 SQLite Protobuf 解码服务端压缩上限、分模型累计缓存命中，达到 85%+ 红色告警 `即将触发压缩`。
-- **云端配额、费用与流式速率追踪**：聚合厂商/模型配额、统一费率估算、加权 `tok/s` 与首字延迟，以及活跃 `/swarm` 子代理速率。
-- **永久 SQLite 账本与免终端桌面看板**：内置 `node:sqlite` 账本合并归档 CLI 与 Antigravity IDE 遥测，支持 `agypl dashboard open` 一键独立窗口直开。
-- **纯本地隐私安全与跨平台**：所有数据仅留存本地（`127.0.0.1` 回环监听、只读扫描源库），原生支持 macOS、Linux 与 Windows。
+- **原生单二进制 Rust（~4ms 冷启动、零 Node 依赖）**：编译为单一静态原生可执行文件（`agy-pulse` / `agypl`），内嵌 SQLite，彻底告别 Node.js、Python 或系统命令行工具依赖，具备 1.5s 硬超时兜底。
+- **零场外反重力请求，严守合规红线**：物理移除系统钥匙串/OAuth 令牌提取与云端配额请求，运行期绝不向反重力或模型厂商服务端发起任何场外请求；**模型配额**与套餐等级 100% 消费宿主 `stdin` 合法传入的数据。
+- **实时上下文与上下文压缩监控**：无锁只读扫描宿主 SQLite `.db` 与 Protobuf 服务端**上下文压缩**上限（`?immutable=1` / 活跃 WAL 临时副本），`CHECKPOINT` 压缩后保留历史峰值水位，支持分模型累计缓存命中行与 `>=85%` `即将触发压缩` 红色告警。
+- **统一计费口径与任务树归拢**：**状态栏**与**网页看板**共享全局唯一字数归一化与费率公式（完整计入 `f4.f1` 系统提示词、缓存读写与 >200k 长上下文阶梯定价），自动归拢**任务树（Cascade）**内主**单窗对话**与全部子代理明细。
+- **统一 SQLite WAL 账本与长效在线网页看板**：内嵌 SQLite WAL **账本**（`agy-pulse-ledger.sqlite`）合并归档 CLI 与 Antigravity IDE 遥测；`agypl dashboard open` 启动严格绑定 `127.0.0.1` 的独立小窗**网页看板**，窗口最小化或切至后台标签页始终保持在线不断连，仅在所有打开页面真正关闭后自动退出回收。
 
 ## 快速开始
 
 在普通终端执行（**不要**在已打开的 `agy` 会话内执行，因 `agy` 退出时会覆写 `settings.json`）：
 
 ```bash
-# macOS / Linux 一键远程安装
+# macOS / Linux 一键预编译安装（支持 x86_64 与 aarch64）
 curl -fsSL https://raw.githubusercontent.com/hardworkDAD/agy-pulse/main/scripts/install.sh | bash
 ```
 
 ```powershell
-# Windows PowerShell 一键远程安装
+# Windows x64 PowerShell 一键预编译安装
 irm https://raw.githubusercontent.com/hardworkDAD/agy-pulse/main/scripts/install.ps1 | iex
 ```
 
-本地克隆仓库可运行 `bash scripts/deploy-local.sh`（或 `bash scripts/install.sh` / `.\scripts\install.ps1`）。自建 Fork 或镜像源（`AGY_PULSE_REPO`）请见[完整参考手册](./docs/reference_zh.md#安装细节与自建-fork--镜像源)。
-
-免终端一键安装桌面图标并直开本地 Web 看板：
+也可通过 Cargo 从源码安装（`cargo install --git https://github.com/hardworkDAD/agy-pulse && agy-pulse install`），或在本地克隆仓库执行：
 
 ```bash
-agypl dashboard install-shortcut --desktop   # 安装应用启动器图标（可选同步放桌面）
+bash scripts/deploy-local.sh
+```
+
+官方 GitHub Releases 覆盖五大平台预编译产物（`linux-x86_64` musl 静态版、`linux-aarch64` musl 静态版、`macos-x86_64`、`macos-aarch64`、`windows-x86_64`），附带统一 `SHA256SUMS` 校验。自建 Fork 或镜像源（`AGY_PULSE_REPO` / `AGY_PULSE_RELEASE_BASE_URL`）请见[完整参考手册](./docs/reference_zh.md#安装细节与自建-fork--镜像源)。
+
+免终端一键安装桌面图标并直开本地**网页看板**：
+
+```bash
+agypl dashboard install-shortcut --desktop   # 安装系统应用启动器图标（可选同步放桌面）
 agypl dashboard open                         # 静默拉起后台并用独立 App 窗口打开
 ```
 
@@ -58,19 +64,20 @@ agypl dashboard open                         # 静默拉起后台并用独立 Ap
 
 | 命令 | 兼容别名 | 用途说明 |
 |---|---|---|
-| `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | 启动或管理本地离线 Web 看板（`127.0.0.1:3789`，支持桌面图标与独立窗口） |
+| `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | 启动或管理本地离线**网页看板**（`127.0.0.1:3789`，支持桌面图标、长效保活与独立窗口） |
 | `agypl stats [range] [options]` | `report`, `--stats` | 输出 CLI 与 Antigravity IDE 终端遥测速查报表 |
-| `agypl config` | `--config` | 打开交互式终端配置向导 |
-| `agypl diagnose` | `--diagnose` | 输出 JSON 认证与配额缓存诊断信息 |
-| `agypl update` | `--update` | 从配置仓库在线检查并自更新运行时 |
-| `agypl help` | `--help`, `-h` | 显示 CLI 帮助与当前版本号 |
-| `agy-pulse` *(stdin)* | — | 从 `stdin` 读取 `agy` JSON（1.5s 超时）并渲染状态栏 |
+| `agypl config` | `--config` | 打开交互式终端配置向导（支持实时**状态栏**预览与原子保存） |
+| `agypl install [--bin-dir <dir>]` | `--install` | 部署原生 `agy-pulse` / `agypl` 二进制并向宿主 `settings.json` 注册 `statusLine` |
+| `agypl uninstall [--purge-ledger]` | `--uninstall` | 安全移除 `statusLine` 注册、二进制、快捷方式与缓存（默认保留**账本**） |
+| `agypl update [--force]` | `--update` | 检查 GitHub Releases 最新版本，校验 `SHA256SUMS` 并原子自更新 |
+| `agypl help` | `--help`, `-h` | 显示 CLI 帮助与当前版本号（`--version`, `-V`） |
+| `agy-pulse` *(stdin)* | — | 从 `stdin` 读取 `agy` JSON（1.5s 超时）并渲染**状态栏** |
 
-`stats` 全部 16 项参数、`dashboard` 全部 14 项动作与参数及脚本选项见[完整参考手册](./docs/reference_zh.md#cli-命令与参数全表)。
+`stats` 全部参数、`dashboard` 全部子动作与参数及脚本选项见[完整参考手册](./docs/reference_zh.md#cli-命令与参数全表)。
 
 ## 配置
 
-运行 `agypl config` 打开交互向导，或在工作区创建 `./agy-pulse.config.json` / 编辑全局 `~/.gemini/antigravity-cli/agy-pulse-runtime/runtime/agy-pulse.config.json`：
+运行 `agypl config` 打开交互向导，或在工作区创建 `./agy-pulse.config.json` / 编辑全局 `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json`：
 
 ```json
 {
@@ -102,7 +109,7 @@ agypl dashboard open                         # 静默拉起后台并用独立 Ap
 }
 ```
 
-全部配置项与 24 个环境变量详情请参阅[完整参考手册](./docs/reference_zh.md#完整配置项参考)。
+全部配置项与环境变量详情请参阅[完整参考手册](./docs/reference_zh.md#完整配置项参考)。
 
 ## 卸载
 
@@ -114,27 +121,34 @@ bash uninstall.sh        # macOS / Linux
 .\uninstall.ps1          # Windows PowerShell
 ```
 
-默认**保留**永久遥测账本（`agy-pulse-ledger.sqlite` / `.json`）；如需一并删除，可在执行 `node runtime/uninstall.js` 时传入 `--purge-ledger`。
+或直接执行 `agypl uninstall`。默认**保留**永久遥测**账本**（`agy-pulse-ledger.sqlite`）；如需一并删除，可传入 `--purge-ledger`。
 
 ## 文档导航
 
 - [完整参考手册 (中文)](./docs/reference_zh.md) · [Reference Manual (English)](./docs/reference.md) — 全量 CLI 参数、配置项、环境变量与目录树
-- [系统架构 (中文)](./docs/architecture_zh.md) · [Architecture (English)](./docs/architecture.md) — 两层设计、数据流与模块依赖图
-- [模块参考](./docs/module-reference.md) — 各模块 API、函数签名与契约行为
-- [变更日志](./docs/logs/CHANGELOG.md) · [文档索引](./docs/README.md) — 版本历史与维护者索引
+- [系统架构 (中文)](./docs/architecture_zh.md) · [Architecture (English)](./docs/architecture.md) — Rust 深模块架构、数据流与 ADR 决策记录
+- [模块参考](./docs/module-reference.md) — 各模块公开接口、不变量与行为契约
+- [变更日志](./docs/logs/CHANGELOG.md) · [文档索引](./docs/README.md) — `v2.0.0` 变更明细与维护者索引
 
 ## 参考项目与致谢
 
 | 项目 | 仓库地址 | 参考与启发维度 |
 |---|---|---|
 | `zzusec/agy-statusline` | https://github.com/zzusec/agy-statusline | 实时上下文窗口进度条、Protobuf 服务端压缩上限解码、费用监控与大写 `K`/`M` 格式化风格 |
-| `icebear0828/agy-hud` | https://github.com/icebear0828/agy-hud | Antigravity CLI 多行 HUD 布局、云端配额面板与会话遥测思路 |
+| `icebear0828/agy-hud` | https://github.com/icebear0828/agy-hud | Antigravity CLI 多行布局、配额面板与会话遥测思路 |
 | `elviscjn-cjn/antigravity-context-viewer` | https://github.com/elviscjn-cjn/antigravity-context-viewer | `gen_metadata` Protobuf `timeToFirstToken` / `streamingDuration` 解码、分模型流式速率统计与模型费率对齐参考 |
 
 以上项目的版权与许可均归原项目作者所有；`agy-pulse` 基于 MIT 协议完全开源，详细归属与致谢说明见 [NOTICE](./NOTICE)。
 
 ## 参与贡献与开源协议
 
-运行 `npm test` 验证单元测试，欢迎提交 Issue 与 Pull Request——请参阅 [贡献指南](./CONTRIBUTING.md)、[行为准则](./CODE_OF_CONDUCT.md) 与 [安全策略](./SECURITY.md)。
+运行静态检查与测试套件：
+
+```bash
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+欢迎提交 Issue 与 Pull Request——请参阅 [贡献指南](./CONTRIBUTING.md)、[行为准则](./CODE_OF_CONDUCT.md) 与 [安全策略](./SECURITY.md)。
 
 本项目采用 [MIT License](./LICENSE) 开源；第三方项目归属与致谢声明见 [NOTICE](./NOTICE)。

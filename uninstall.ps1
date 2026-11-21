@@ -1,6 +1,6 @@
-# Remove agy-pulse from this machine (Windows).
-# 1. Prefer native v2 binary (`agypl.exe uninstall` / `agy-pulse.exe uninstall`), forwarding args such as --purge-ledger.
-# 2. Fallback to legacy v1 runtime\uninstall.js if no native binary is installed.
+# Remove agy-pulse from this machine (Windows, zero Node.js dependency).
+# Runs native `agypl.exe uninstall` / `agy-pulse.exe uninstall` (forwarding flags such as --purge-ledger),
+# then cleans up the agy plugin registration & plugin directory.
 $ErrorActionPreference = 'Continue'
 
 $NativeCandidates = @()
@@ -20,45 +20,43 @@ if (-not $NativeBin) {
     if ($Cmd) { $NativeBin = $Cmd.Source }
 }
 
+$UninstallExit = 0
 if ($NativeBin) {
     & $NativeBin uninstall @args
-    exit $LASTEXITCODE
+    $UninstallExit = $LASTEXITCODE
+} else {
+    Write-Error "agy-pulse uninstall: native binary not found - skipping settings & cache cleanup"
 }
 
-$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$RuntimeCandidates = @()
-if ($env:AGY_PULSE_DATA_DIR) {
-    $RuntimeCandidates += (Join-Path $env:AGY_PULSE_DATA_DIR 'agy-pulse-runtime\runtime\uninstall.js')
-}
+$PluginDirs = @()
 if ($env:USERPROFILE) {
-    $RuntimeCandidates += (Join-Path $env:USERPROFILE '.gemini\antigravity-cli\agy-pulse-runtime\runtime\uninstall.js')
+    $PluginDirs += (Join-Path $env:USERPROFILE '.gemini\config\plugins\agy-pulse')
+}
+if ($env:XDG_CONFIG_HOME) {
+    $PluginDirs += (Join-Path $env:XDG_CONFIG_HOME 'gemini\plugins\agy-pulse')
 }
 if ($env:APPDATA) {
-    $RuntimeCandidates += (Join-Path $env:APPDATA 'antigravity-cli\agy-pulse-runtime\runtime\uninstall.js')
-}
-if ($env:LOCALAPPDATA) {
-    $RuntimeCandidates += (Join-Path $env:LOCALAPPDATA 'antigravity-cli\agy-pulse-runtime\runtime\uninstall.js')
-}
-$RuntimeCandidates += (Join-Path $ScriptDir 'runtime\uninstall.js')
-
-$Runtime = $RuntimeCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-$PluginDir = Join-Path $env:USERPROFILE '.gemini\config\plugins\agy-pulse'
-
-if ((Get-Command node -ErrorAction SilentlyContinue) -and $Runtime) {
-    node $Runtime @args
-} else {
-    Write-Error "agy-pulse uninstall: binary and legacy runtime not found - skipping settings cleanup"
+    $PluginDirs += (Join-Path $env:APPDATA 'gemini\plugins\agy-pulse')
 }
 
 if (Get-Command agy -ErrorAction SilentlyContinue) {
     agy plugin uninstall agy-pulse
     if ($LASTEXITCODE -ne 0) {
         Write-Error "agy-pulse uninstall: 'agy plugin uninstall agy-pulse' failed - removing plugin dir directly"
-        Remove-Item $PluginDir -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($dir in $PluginDirs) {
+            if ($dir -and (Test-Path $dir)) {
+                Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 } else {
     Write-Error "agy-pulse uninstall: agy CLI not on PATH - removing plugin dir directly"
-    Remove-Item $PluginDir -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($dir in $PluginDirs) {
+        if ($dir -and (Test-Path $dir)) {
+            Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Write-Host "agy-pulse uninstall complete"
+exit $UninstallExit

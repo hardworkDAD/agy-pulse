@@ -1,133 +1,73 @@
 # agy-pulse Module Reference
 
-> All paths are relative to the runtime install root:  
-> `~/.gemini/antigravity-cli/agy-pulse-runtime/`
+> **Version:** 2.0.0 — Deep-Module Contracts (`src/lib.rs` enforces `#![deny(clippy::unwrap_used, clippy::expect_used)]`)
 
 ---
 
-## `runtime/brand.js` — Brand & Repository Constants
+## `src/lib.rs`, `src/main.rs` & `src/bin/agypl.rs` — CLI Dispatch & Statusline Guard
 
-Exports:
-- `BRAND_NAME = 'agy-pulse'`
-- `PACKAGE_VERSION = '1.0.0'`
-- `CONFIG_FILENAMES = ['agy-pulse.config.json']`
-- `RUNTIME_DIR_NAME = 'agy-pulse-runtime'`
-- `resolveRepoSlug(config, env = process.env)` — resolves `owner/repo` from `env.AGY_PULSE_REPO || config?.repository || null` (never falls back to an upstream repository).
-- `getRawGitHubUrl(repoSlug, branch = 'main', filePath = 'package.json')` — returns raw GitHub URL or `null`.
+- `run_cli() -> i32`:
+  - Dispatches `--version`/`-V`/`-v`/`version`, `dashboard`/`dash`/`ui`/`--dashboard`, `stats`/`report`/`--stats`, `config`/`--config`, `install`/`--install`, `uninstall`/`--uninstall`, `update`/`--update`, `--check-update-bg`, and `help`/`--help`/`-h`.
+  - Default stdin mode executes inside `std::panic::catch_unwind` with a **1500 ms** hard `read_stdin_with_timeout`, logs diagnostics safely to `agy-pulse-error.log` (symlink-checked `0600`), and always exits `0`.
 
 ---
 
-## `runtime/bin/agy-pulse.js` — Entrypoint
+## `src/domain/` — Pure In-Memory Domain Kernel (Zero I/O)
 
-**Role:** Registered as `statusLine.command` in `settings.json`. Launched by `agy` once per agent step.
-
-- `--stats` → delegates to `stats.js::runStatsCli(process.argv.slice(2))` and exits with its returned `exitCode`.
-- `--dashboard` → delegates to `dashboard.js::startDashboardCli(process.argv.slice(2))` to start the local `127.0.0.1` web dashboard.
-- `--help` / `-h` → outputs CLI subcommand help (`buildCliHelpText()`) and exits `0`.
-- `--config` → delegates to `config-wizard.js::startWizard()`.
-- `--diagnose` → delegates to `scripts/diagnose-auth.js::buildAuthDiagnostic()`, outputs JSON diagnostic report, and exits `0`.
-- `--update` → delegates to `handleSelfUpdate()` using `loadConfig(process.cwd())`, `resolveRepoSlug()`, `http`/`https` download with safe redirects (max 5, no `https -> http` downgrade), derives `AGY_PULSE_REPO_RAW` from query/subpath `AGY_PULSE_BOOTSTRAP_URL`, awaits `bootstrap.js --cleanup-self` exit code, and forwards real exit status.
-- Default stdin mode:
-  - 1500 ms hard timeout fallback.
-  - Resolves `targetCwd = agyData?.workspace?.current_dir || agyData?.cwd || process.cwd()`.
-  - Runs `Promise.all([getSessionState(transcriptPath, targetCwd), loadConfig(targetCwd), getQuota({ fast: true }), getCachedTier()])`.
-  - Exits cleanly with no `stdout` when `config?.enabled === false` (still triggers `maybeCheckUpdates(targetCwd)`).
-  - Pre-warms `daily-cost.json` via `getCostTotals(...)` whenever a real session identifier or existing transcript exists, attaching `state.costTotals`.
-  - Reads `agy-pulse-update-status.json` via `readUpdateInfo()`, filtering out stale versions where `!isNewerVersion(status.latestVersion, installedVersion)`.
-  - Merges live `agyData.quota` via `parseAgyQuota` + per-provider window merge (`mergeProviderQuota`) + `enrichModelsWithQuotaSummary`, preserving non-enumerable `unavailableReason`.
-  - Calls `renderStatusLine(...)`, writes to `stdout`, silently triggers 15s-throttled `ledger.js::syncSingleConversationToLedger(convId, { childConversationIds })` inside `try/catch` via lazy `require('../ledger.js')` when a session ID (`agyData?.conversation_id` or `/brain/<uuid>/`) is present, atomically updates `agy-pulse-update-status.json`, and spawns `update-checker.js <targetCwd>` once per 24h.
-  - `detectLiveTerminalColumns()` preserves exact 80-column widths (`cols > 82 ? cols - 3 : cols`) so standard 80-col terminals keep the bottom `◈ <Model>` badge visible.
-  - Errors are logged safely to `agy-pulse-error.log` (symlink-checked, mode `0o600`) and process exits `0`.
+- **`model.rs`**: Canonical domain structs aligned to `GLOSSARY.md` (`PulseSnapshot`, `HostIdentity`, `ModelIdentity`, `ContextWindowSnapshot`, `CostSnapshot`, `TokenUsage`, `ProviderQuotaSummary`, `ProviderQuota`, `QuotaWindow`, `ChildModelSpeed`, `TurnCacheMetrics`, `WorkspaceMetadata`).
+- **`pricing.rs`**: `lookup_pricing(model)` & `calculate_token_cost(model, tokens, cache_inclusive, is_cumulative)` supporting Claude 4.5/4.6/5.5, Gemini 3.x/4 Carbon/Hydrogen/Argon/Neon, Orchestrator, DeepSeek, OpenAI o-series/GPT, and `>200k` long-context pricing tiers.
+- **`accounting.rs`**: Single source of truth for `model_includes_cache_in_input`, `is_usage_cache_inclusive`, `calculate_turn_cache_metrics`, `resolve_cascade_cost_usd`, `compact_model_name`, `resolve_model_display_name`, and `format_usd`.
+- **`quota.rs`**: Pure functions `parse_iso8601_to_epoch_ms`, `is_quota_window_expired`, `prune_expired_provider_quota`, `pick_critical_window`, `has_valid_provider_quota`, `format_quota_percent`, `format_reset_duration`, `format_reset_countdown`, and `is_openai_provider_key`.
 
 ---
 
-## `runtime/compaction.js` — Protobuf Wire, SQLite Compaction Limit & 30-DB Model Perf
+## `src/ingest/` — Lock-Free Read-Only Host Ingestion (`HostReader`)
 
-- `decodeVarint(buf, offset = 0)` — uses `BigInt` shifts to prevent 32-bit signed overflow.
-- `pbGetSub(buf, fieldNum)`, `pbGetAllSub(buf, fieldNum)`, `pbGetVarint(buf, fieldNum)`, `pbGetString(buf, fieldNum)`, `pbGetDurationSec(buf, fieldNum)`.
-- `extractCompactionLimitFromGenMetadata(buf)` — traverses `f1 -> f9 -> f10 -> f4` (`[16000, 10000000]`).
-- `extractCompactionLimitFromExecutorMetadata(buf)` — traverses `f10 -> f2 -> f5` (`[16000, 10000000]`).
-- `extractGenMetadataTelemetry(buf)` / `extractModelPerfFromGenMetadata(buf)` — extracts per-generation `inputTokens` (`f1.f4.f2`), `outputTokens` (`f1.f4.f3`), `cacheReadTokens` (`f1.f4.f5`), `ttftSec` (`f1.f11`), `streamSec` (`f1.f12`), compact model key + full `stepModel` (`f21 || f19 || f20[model_enum]`), and session lineage (`f20[parent_cascade_id]`, `f20[root_cascade_id]`).
-- `querySqliteCompactionLimit(dbPath)`, `querySqliteModelTelemetry(dbPath, options)` & `querySqliteModelPerf(dbPath, options)` — opens read-only via `node:sqlite` `DatabaseSync` with temp-copy/`sqlite3` CLI fallback; filters `<0.05s` streaming noise and `>600s` TTFT outliers while keeping per-model token & USD ledgers for every generation step.
-- `resolveServerCompactionLimit(options)` — caches limits keyed by `${dbSize}:${dbMtimeMs}:${walSize}:${walMtimeMs}` in `agy-pulse-compaction-cache.json` (`_db_limits`, capped at 24), with cold-start fallback across the 5 newest `conversations/*.db` files and final `512000` default.
-- `resolveModelPerfStats(options)` / `resolveSessionCostTree(options)` — aggregates pure streaming weighted average speed (`∑outputTokens / ∑streamingDuration`), arithmetic average TTFT, and `lastUpdatedMs` (merged with `options.currentSessionModelLastActiveMs`) across the 30 most recent `conversations/*.db` files (always including `activeDbPath` if present), plus per-model cost/token breakdowns across the entire session tree (main + active/killed `/swarm` & subagent DBs matched via `childConversationIds` and `parent_cascade_id`/`root_cascade_id`), caching `schemaVer: 2` per-DB stats in `_db_perf` (capped at 64) and `_persisted_child_speeds` in `agy-pulse-compaction-cache.json`.
-
----
-
-## `runtime/parser.js` — Incremental Session State
-
-`getSessionState(transcriptPath, cwd, options)` performs incremental byte-offset scanning cached at `transcript-cache/<sha256>.json` (`TRANSCRIPT_CACHE_VERSION = 9`):
-- Returns `branch: string | null` (`null` for non-Git directories).
-- Tracks `compactionCount` (`type === 'CHECKPOINT'`), `totalInputTokens`, `totalOutputTokens`, `totalCacheReadTokens`, `totalCacheCreationTokens`, `lastTurnUsage`, `turnHistoryMaxByMode: { inclusivePeak, exclusivePeak }`, `serverCompactionLimit`, `modelPerf`, `modelLastActiveMs`, and `costBreakdown` (`{ totalCostUsd, mainCostUsd, childrenCostUsd, childSessionCount, byModel, source }`, preferring SQLite session cost trees with transcript catch-up and pure-transcript fallback).
-- Handles nested `context_window` as well as top-level `PLANNER_RESPONSE` token fields.
-- Closes `PLANNER_RESPONSE` durations cleanly on `SYSTEM_MESSAGE`, invalid timestamps, or `USER_INPUT`, marking interrupted open turns (`interrupted: true`) so `speed.js` never uses stale `now - startMs` spans.
-- Tracks all registered `/swarm` workers and `invoke_subagent` child sessions (`childAgents`, persisting across `killed`, `SYSTEM_MESSAGE` stop, `USER_INPUT` turns, and idle gaps), tail-reading up to 64 KB of sibling transcripts via `readChildTailTelemetry()` / `resolveChildModelSpeeds()` to aggregate per-model deduplicated rolling speeds (`childModelSpeeds`, capped at top 3 recent models, persisted in `transcript-cache` `v9` and `_persisted_child_speeds` when child logs are cleaned up, with fallback to `modelPerf[model].avgSpeed` when `modelHint` is present) and pruning models idle beyond `MAX_MODEL_IDLE_TURNS` (30 turns) or `MAX_MODEL_IDLE_MS` (5 minutes).
+- **`mod.rs`**: Narrow public facade `HostReader::read_live_pulse(&stdin, &fallback_cwd) -> IngestResult` and `HostReader::read_conversation_db(db_path) -> Option<ConversationDbRecord>` (never leaks `rusqlite::Connection` or raw Protobuf blobs).
+- **`stdin.rs`**: Parses heterogeneous host JSON (`model`, `workspace.current_dir`/`cwd`, `plan_tier`, `cycle_mode`, `context_window`, `cost`, `quota` keys `gemini-5h`/`gemini-weekly`/`anthropic-5h`/`claude-5h`/`3p-5h`/`argon*`).
+- **`transcript.rs`**: Byte-offset incremental scanning of `transcript.jsonl` (up to 64 MB, `TRANSCRIPT_CACHE_VERSION = 10`) with `transcript_full.jsonl` `truncated_fields` backfill, `CHECKPOINT` compaction detection & `inclusivePeak`/`exclusivePeak` tracking, child/swarm model speed tracking, and `429` image quota exhaustion detection.
+- **`sqlite_ro.rs` & `proto_wire.rs` & `db_telemetry.rs`**:
+  - Opens static host `.db` files via `?immutable=1` and active `-wal` databases by copying `.db` + `-wal` + `-shm` into an isolated `TempDir`.
+  - Decodes `gen_metadata` (`f1.f9.f10.f4` compaction ceiling, `f4.f1` `systemPromptTokens`, `f4.f2` raw input, `f4.f3` output, `f4.f5` cache read, `f1.f11` TTFT, `f1.f12` stream duration, `f20` parent/root lineage) and `executor_metadata` (`f10.f2.f5`), aggregating recent 30-DB weighted speeds and **Cascade** cost trees.
+- **`workspace.rs`**: Pure-file `.git/HEAD` & `.git` worktree pointer resolution (timeout-bounded `git` fallback only for reftable), plus offline counts of memory files, rule `.md` files, git hooks, and MCP server entries.
 
 ---
 
-## `runtime/renderer.js`, `runtime/speed.js` & `runtime/renderer/` — Status Line & Context Monitor
+## `src/ledger/` — Unified SQLite WAL Ledger & `stats` (`LedgerStore`)
 
-### `runtime/renderer.js`
-- `formatCycleModeSegment(cycleMode, { bold, reset })` — formats `agyData.cycle_mode` with theme-independent fixed semantic ANSI colors (`auto` → yellow, `accept-edits` → green, `plan` → bright blue `\x1b[94m`, `bestn` → `best-of-n` magenta, unknown non-empty → sanitized 24-char cyan) and preserves the badge immediately after `planSeg` on Line 1 ahead of narrow-terminal degradation steps when `display.showCycleMode !== false`.
-
-### `runtime/speed.js`
-- `getOutputSpeed(agyData, rootDir, state, now)` — calculates output `tok/s` from paired deltas of the host's cumulative output and API time counters, or the output and timing of one planner response. An open response uses a 500ms–120s sampling window.
-- `formatTtft(ttftSec, lang)` — formats TTFT as `<N>ms` when `<1s` and `<N.N>s` when `>=1s` (`ttft` in `en`, `首字` in `zh`).
-- `formatChildModelSpeeds(childModelSpeeds, options)` — formats child/non-main model badges, enriching with `modelPerf[model]` (`avgSpeed` + `avgTtftSec`) when available (`⚡ Hydro: X.X tok/s (首字 Y.Ys)` / `[sub] Hydro: X.X tok/s (ttft Y.Ys)`).
-- `renderer.js` Line 1 prioritizes `state.modelPerf[mainModelKey].avgSpeed` (falling back to `outputSpeed`), appends `(${formatTtft(avgTtftSec, lang)})`, merges `state.childModelSpeeds` with non-main `state.modelPerf` entries (sorted by `lastUpdatedMs` descending, capped at `MAX_CHILD_MODELS_DISPLAY = 3`) when `showSpeed` is enabled, and hides both main and child model speeds/TTFT when idle beyond `modelSpeedExpireTurns` (default `30`) or `modelSpeedExpireMinutes` (default `5`).
-
-### `runtime/renderer/context-monitor.js`
-- `formatMonitorTokens(n)` — base-1000 uppercase `K`/`M` formatter.
-- `buildSmoothBar(pct, width = 12, unicode = true)` — 5-level smooth bar (`█▓▒░·` in UTF-8, `#=-.` in ASCII).
-- `renderModelCacheLine({ state, agyData, config, colors, unicode, lang })` — renders the dedicated per-model session cache hit line (`⟳ 累计缓存 · Carbon 86% (命中 38.8M / 总入 45.2M) · ...` / `⟳ Session Cache · ...`) immediately above `renderContextMonitorLine`, preferring `state.costBreakdown.byModel` with current-turn fallback and 6-step responsive width degradation.
-- `renderContextMonitorLine({ state, agyData, config, colors, unicode, lang, sessionCostUsd })`:
-  - Renders `◈ <Model (Effort)> · Ctx <bar> <pct>% (<active>/<limit>) · Compacted×N(peak X) · Cache X% (Y) · Out Z · Cost $W · Compaction imminent` (localized in `en` and `zh`).
-  - Falls back to `state.lastTurnUsage` when `current_usage` is missing, `{}`, or all zero.
-  - Normalizes cache-inclusive vs cache-exclusive inputs via `modelIncludesCacheInInput` and picks `inclusivePeak` / `exclusivePeak` accordingly.
-
-### `runtime/renderer/format.js`
-- `TIER_ABBREVS` includes `XHigh: 'XH'`, `Thinking: 'Th'`, `High: 'H'`, `Medium: 'M'`, `Low: 'L'`.
-- `ABBREVIATION_RULES` & `COMPACT_NAME_RULES` cover 2026 models (`Gemini 4 Carbon/Hydrogen/Argon`, `Gemini 3.8 Flash`, `Orchestrator (Carbon/Argon)`, `Claude Opus/Sonnet 4.6`, `GPT-OSS 120B`) without family collisions.
-- `modelIncludesCacheInInput(nameOrId)` covers `claude|anthropic|sonnet|opus|haiku|gemini|carbon|hydrogen|argon|orchestrator|gpt|deepseek|o1-|o3-|o4-`.
-- `calculateTurnCacheMetrics(usage, rawModelName)` uses `rawModelName` and `modelIncludesCacheInInput` to avoid misclassifying exclusive models.
-- `getDisplayWidth` & `truncateToDisplayWidth` align wide CJK/emoji characters cleanly.
-
-### `runtime/renderer/quota-render.js`
-- `renderProviderQuotaTable`: renders `--` for missing windows instead of fake `100%`, skips `~now` for elapsed `resetTime`, and scales divider width dynamically with `columnWidth`.
+- **`mod.rs` & `schema.rs`**: Manages `agy-pulse-ledger.sqlite` (`rusqlite` bundled + WAL + `busy_timeout`, `0600` file permissions) and dispatches `agypl stats`.
+- **`sync.rs`**: Dual-source read-only scanning of CLI (`get_antigravity_roots()`) and IDE (`get_antigravity_ide_roots()`) `conversations/*.db` via `HostReader::read_conversation_db`, plus monotonic compaction-safe `record_rolling_costs()` for `today_usd` and `week_usd`.
+- **`query.rs` & `stats_report.rs`**: Multi-dimensional filtering (`today`/`24h`/`7d`/`30d`/`month`/`all`/`custom`, `hour`/`day`/`week`, `all`/`cli`/`ide`, model, workspace, subagent toggle), **Cascade** root aggregation, and ANSI/JSON/CSV output.
 
 ---
 
-## `runtime/config.js` & `runtime/config-wizard.js`
+## `src/render/` — Pure In-Memory Statusline Renderer (Zero I/O)
 
-- `FULL_DEFAULT_CONFIG`: enables `display.showContextMonitor: true`, `display.showModelCache: true`, `showCurrentDir: true`, `showCycleMode: true`, `showSpeed: true`, and keeps `display.unicode` unset for automatic `encoding.js` detection.
-- `loadConfig(cwd)` resolves `<cwd>/agy-pulse.config.json` → bundled config and deep-merges `theme`, `display`, `display.cacheHitThresholds`, `icons`, and `thresholds`.
-- `saveConfig(config, isGlobal, cwd)` writes atomically via temp file + `renameSync`.
-- `config-wizard.js` supports `j`/`k`/`↑`/`↓`, `1-9`/`0`, `s` (save), `q`/`Esc` (cancel), `quotaStyle` (`table`/`compact`/`models`/`none`), `breadcrumbCount` (`0`/`1`/`2`/`3`/`5`), `language` (`auto`/`en`/`zh`), `showContextMonitor`, `showModelCache`, `showCycleMode`, `showModel`, `showContextBar`, `showTurnCacheHitRate`, `showImageQuota`, scope-isolated saving via `buildConfigForScopeSave`, and small-height terminal viewport scrolling (`▲`/`▼`).
-
----
-
-## `runtime/paths.js`, `runtime/statusline-installer.js`, `runtime/uninstall.js`, `runtime/update-checker.js`
-
-- `paths.js`: accepts `(env, homeDir)` overrides, honors `AGY_PULSE_DATA_DIR` for CLI roots (`getAntigravityRoots`), and provides `getAntigravityIdeRoots(env, homeDir)` (honoring `AGY_PULSE_IDE_DATA_DIR`, returning `[]` when `AGY_PULSE_DATA_DIR` is set alone for sandbox isolation, and defaulting to `~/.gemini/antigravity` plus XDG/AppData fallbacks).
-- `statusline-installer.js`: configures `settings.json` to invoke `agy-pulse.js` (or `.cmd` on Windows with `%LocalAppData%\Programs\nodejs\node.exe` & `%ProgramFiles%\nodejs\node.exe` fallbacks), backs up corrupt `settings.json` to `.bak`, preserves `enabled` and `stack_with_default`, and generates `AGY_PULSE_NODE` / `AGY_STATUSLINE_NODE` aware `statusline-combined.sh` shims.
-- `uninstall.js`: cleans `agy-pulse-runtime`, primary & secondary `settings.json` `statusLine` entries, `plugin_data/agy-pulse`, `statusline-combined.sh`, `agy-pulse-dashboard.json`, caches, tmp mirrors/artifacts (`agy-pulse-db-*`, `agy-pulse-bootstrap-*`), Windows shims, and fingerprint-verified desktop shortcuts (`removeDashboardShortcuts`). Preserves permanent telemetry ledgers (`agy-pulse-ledger.sqlite` / `agy-pulse-ledger.json`) by default unless `--purge-ledger` / `--purge` (`options.purgeLedger`) is passed.
-- `update-checker.js`: SemVer 2.0 prerelease comparison (`compareSemver` / `isNewerVersion`), `http`/`https` safe redirects (max 5), `options.cwd || process.argv[2] || process.cwd()` config lookup, request timeout destruction, stale `updateAvailable` cleanup on check errors, and `resolveRepoSlug` integration.
-- `scripts/bootstrap.js`: atomic runtime replacement (including `ledger.js`, `stats.js`, `dashboard-launcher.js`, `dashboard.js`, `dashboard-ui.js`, and `scripts/diagnose-auth.js`) preserving saved global `agy-pulse.config.json` (unless `--reset-config`), `AGY_PULSE_DATA_DIR` support, `{ roots }` scoped `refreshQuotaCache`, stale `agy-pulse-update-status.json` & `skills/hud-config` cleanup, and `--cleanup-self` temp cleanup.
+- **`mod.rs` & `layout.rs`**: Public entrypoint `render_statusline(&PulseSnapshot, &PulseConfig, &TerminalCaps, LanguageSetting) -> String`. Handles 9-step Line 1 narrow-terminal degradation, Line 2 tokens/cache/context bar, Line 3 workspace metadata, and ANSI-safe truncation.
+- **`quota_table.rs`**: Renders 2-column provider quota table (`Google 5h/week`, `Claude 5h/week`, optional `Argon`/extras, filtering OpenAI) or `compact` single-line summary.
+- **`context_bar.rs`**: Renders `Session Cache` (`render_model_cache_line`) and the 5-level smooth **Compaction** monitor (`render_context_monitor_line`) with 11-step narrow-width degradation.
+- **`width.rs` & `i18n.rs`**: `unicode-width` CJK/emoji display width calculation, ANSI-preserving truncation, control-sequence sanitization, theme palettes, and `en`/`zh` copy.
 
 ---
 
-## `runtime/ledger.js`, `runtime/stats.js`, `runtime/dashboard-launcher.js`, `runtime/dashboard.js` & `runtime/dashboard-ui.js` — Permanent Telemetry Ledger, CLI Stats & Local Web Dashboard
+## `src/config/` — Configuration & Interactive Raw-TTY Wizard
 
-- **`runtime/ledger.js`**:
-  - Stores permanent per-step telemetry and session lineage (`schema_version = '2'` with `source` column `'cli' | 'ide'` and idempotent v1→v2 SQLite/JSON migration) in `<DATA_DIR>/agy-pulse-ledger.sqlite` via built-in `node:sqlite` `DatabaseSync` (`WAL` mode, `0o700` dir / `0o600` file, automatic fallback to `agy-pulse-ledger.json` when `node:sqlite` is unavailable).
-  - Read-only combined scanning of Antigravity CLI (`getAntigravityRoots`) and Antigravity IDE (`getAntigravityIdeRoots`) `conversations/*.db` via `resolveLedgerSourceRoots` (`?immutable=1` when no non-empty `-wal`, or temp-copying `.db` + `-wal` + `-shm` when `-wal` is active), extracting step timestamps (`steps.metadata` tag 1), workspace/branch/createdAt (`trajectory_metadata_blob`), and per-generation telemetry (`gen_metadata`), reusing `compaction.js` and `cost.js`. `queryLedger` supports `filter.source` (`'all' | 'cli' | 'ide'`) and returns `meta.source`, `meta.availableSources`, `bySource`, and per-session `source` (`formatLedgerCsv(..., 'sessions')` includes `source` after `rootConversationId`).
-  - Exports `DEFAULT_LEDGER_FILENAME`, `FALLBACK_LEDGER_FILENAME`, `SYNC_THROTTLE_MS`, `normalizeSource`, `normalizeSourceFilter`, `resolveLedgerPath`, `resolveLedgerSourceRoots`, `resolveTimeRange`, `syncSingleConversationToLedger` (15s throttled, CLI-only), `syncAllConversationsToLedger`, `queryLedger`, `formatLedgerCsv`, `extractStepTimestampMs`, `extractTrajectoryMeta`, and `extractStepIndicesFromGenMetadata`.
-- **`runtime/stats.js`**:
-  - Implements `--stats` (`parseStatsArgs`, `renderStatsText`, `runStatsCli`) with range/granularity/source (`--source <all|cli|ide>`)/model/workspace/subagent filters, bilingual ANSI summary tables (`bySource` distribution + `[CLI]`/`[IDE]` session tags) + ASCII timeseries bars, and `--json` / `--csv` output.
-- **`runtime/dashboard-launcher.js`**:
-  - Manages single-instance background dashboard discovery, silent on-demand spawn/stop, standalone app-mode Chromium window launch (`--app=<url>`), and cross-platform desktop shortcut installation/removal (`agy-pulse-dashboard-shortcut` fingerprint guarded).
-  - Exports constants (`DASHBOARD_APP_ID`, `DASHBOARD_STATE_FILENAME`, `DASHBOARD_SHORTCUT_MARKER`, `DEFAULT_IDLE_TIMEOUT_SEC`, `DEFAULT_IDLE_TIMEOUT_MS`, `DASHBOARD_ICON_SVG`), state helpers (`getDashboardStatePath`, `readDashboardState`, `writeDashboardState`, `clearDashboardStateIfOwner`), lifecycle helpers (`probeDashboardHealth`, `findRunningDashboard`, `ensureBackgroundDashboard`, `stopBackgroundDashboard`), window helpers (`findAppWindowBrowser`, `openDashboardWindow`), and shortcut helpers (`getDesktopShortcutPaths`, `isOurShortcutContent`, `installDesktopShortcut`, `uninstallDesktopShortcut`, `getDesktopShortcutStatus`).
-- **`runtime/dashboard.js` & `runtime/dashboard-ui.js`**:
-  - `dashboard.js` (`DEFAULT_DASHBOARD_PORT = 3789`, `parseDashboardArgs`, `createDashboardServer`, `startDashboardCli`) binds strictly to `127.0.0.1` (auto-falling back to port `0` on `EADDRINUSE`), validates `Host` and `Origin` headers, parses `source` (`all | cli | ide`) in `parseOverviewFilter`, and serves `GET /`, `GET /api/overview`, `GET /api/health` (without resetting idle timeout), `POST /api/ping`, `POST /api/sync`, `GET /api/export.csv`, `GET /api/export.json`, `GET /icon.svg`, and `GET /manifest.webmanifest`.
-  - Supports `open`, `stop`, `status`, `install-shortcut` (`install-app`), and `uninstall-shortcut` (`uninstall-app`) actions alongside `--app`/`--browser`, `--background`/`--serve-background`, `--idle-timeout` (default `600`s for background/open, `0` for foreground `serve`, overridable via `AGY_PULSE_DASHBOARD_IDLE_SEC`), `--desktop`, `deferInitialSync`, throttled single-flight `autoSyncIntervalMs` on `/api/overview`, and `onIdleClose` state cleanup.
-  - `dashboard-ui.js` renders a zero-CDN bilingual dark/light SPA with same-origin `/icon.svg` and `/manifest.webmanifest` links, periodic `POST /api/ping` keepalive (60s when visible) + `visibilitychange` stale-overview refresh (>30s), date range presets & custom date pickers, `#source-pills` (`All / CLI / IDE`) filter, `#source-summary-bar` breakdown, `hour`/`day`/`week` granularity, model/workspace/subagent filters, 6 KPI cards, 2 interactive native SVG charts, a sortable per-model breakdown table, and a searchable/expandable `/swarm` session tree table with `CLI` / `IDE` source badges.
+- **`mod.rs`**: Deep-merges `PulseConfig::default()` → global `agy-pulse.config.json` → workspace `./agy-pulse.config.json` → `AGY_PULSE_LANGUAGE`. Ignores retired `v1` keys and maps legacy `quotaStyle: "models"` to `Table`.
+- **`wizard.rs`**: Interactive terminal wizard (`agypl config`) with live `render_statusline` preview, scope-isolated atomic saving, and safe non-TTY fallback.
+
+---
+
+## `src/dashboard/` — Local Web Dashboard, Persistent Keepalive & Shortcuts
+
+- **`server.rs` & `http_wire.rs` & `assets/dashboard.html`**: Binds `127.0.0.1` (`3789` with ephemeral fallback), validates `Host`/`Origin`, emits CSP headers, and serves embedded single-page HTML + `/api/overview`, `/api/sync`, `/api/health`, `/api/keepalive` (SSE), `/api/ping`, `/api/disconnect`, `/api/export.csv`, `/api/export.json`, `/icon.svg`, and `/manifest.webmanifest`.
+- **`keepalive.rs`**: Tracks active page instances across SSE connections and ping leases; stays online while minimized/backgrounded and shuts down cleanly after close grace when the last page closes.
+- **`launcher.rs`**: Single-instance daemon state (`agy-pulse-dashboard.json`), Chromium `--app=<url>` detection, and fingerprint-guarded desktop shortcuts (`install-shortcut` / `uninstall-shortcut`).
+
+---
+
+## `src/ops/` & `src/platform/` — Operations & OS Isolation
+
+- **`ops/installer.rs`**: Deploys `agy-pulse` & `agypl` into `AGY_PULSE_BIN_DIR` (`~/.local/bin` or `%LOCALAPPDATA%\agy-pulse\bin`), atomically updates `settings.json` `statusLine` (backing up corrupt JSON to `.bak`), and cleans stale `v1` plugin artifacts without ever writing to official `agy` program directories.
+- **`ops/uninstall.rs`**: Stops running dashboard daemon, removes fingerprint-matching shortcuts, clears `agy-pulse`-owned `statusLine` entries (protecting foreign statuslines), cleans caches/binaries, and preserves `agy-pulse-ledger.sqlite` unless `--purge-ledger` is passed.
+- **`ops/updater.rs`**: Enforces `https://` (loopback `http://` only for tests), forbids `https -> http` redirect downgrades, verifies `SHA256SUMS`, and atomically self-replaces `agy-pulse` and `agypl` (including Windows `.exe.old` swap).
+- **`platform/`**: Isolates Unix (`unix.rs`) and Windows (`windows.rs`) terminal raw mode, TTY width/locale probing, detached spawning, process signaling, and atomic binary replacement.

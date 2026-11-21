@@ -1,22 +1,41 @@
-﻿# One-command installer for agy-pulse (Windows PowerShell).
-# Equivalent of install.sh for Unix — does:
-#   1. agy plugin install (or upgrade) from local repo or AGY_PULSE_REPO_URL / AGY_PULSE_REPO
-#   2. bootstrap runtime + configure settings.json statusLine
+﻿# One-command native installer for agy-pulse v2.0.0 (Windows PowerShell, zero Node.js dependency).
+# Downloads agy-pulse-windows-x86_64.zip + SHA256SUMS, verifies SHA-256,
+# installs agy-pulse.exe and agypl.exe into AGY_PULSE_BIN_DIR
+# (default %LOCALAPPDATA%\agy-pulse\bin), registers host settings.json via
+# `agy-pulse.exe install`, and syncs plugin manifest when `agy` is available.
 #
 # Run from a normal shell — NOT from inside an active `agy` session
 # (agy rewrites settings.json from in-memory state on exit).
 #
 # Env:
-#   AGY_PULSE_REPO      owner/repo slug (e.g. hardworkDAD/agy-pulse)
-#   AGY_PULSE_REPO_RAW  override raw GitHub base URL (forks / mirrors)
-#   AGY_PULSE_REPO_URL  override git URL for `agy plugin install`
+#   AGY_PULSE_REPO              owner/repo slug (default: hardworkDAD/agy-pulse)
+#   AGY_PULSE_REPO_URL          override git URL for `agy plugin install`
+#   AGY_PULSE_RELEASE_BASE_URL  override release download base URL (mirrors / local test servers)
+#   AGY_PULSE_BIN_DIR           override target bin directory (default: %LOCALAPPDATA%\agy-pulse\bin)
 $ErrorActionPreference = 'Stop'
 
 $DefaultRepoSlug = 'hardworkDAD/agy-pulse'
-$RepoSlug = if ($env:AGY_PULSE_REPO) { $env:AGY_PULSE_REPO } else { '' }
-$RepoRaw = if ($env:AGY_PULSE_REPO_RAW) { $env:AGY_PULSE_REPO_RAW } elseif ($RepoSlug) { "https://raw.githubusercontent.com/$RepoSlug/main" } else { '' }
-$RepoUrl = if ($env:AGY_PULSE_REPO_URL) { $env:AGY_PULSE_REPO_URL } elseif ($RepoSlug) { "https://github.com/$RepoSlug.git" } else { '' }
-$HasExplicitRepo = [bool]($RepoSlug -or $RepoRaw -or $RepoUrl)
+$RepoSlug = if ($env:AGY_PULSE_REPO) { $env:AGY_PULSE_REPO } else { $DefaultRepoSlug }
+$RepoUrl = if ($env:AGY_PULSE_REPO_URL) { $env:AGY_PULSE_REPO_URL } else { "https://github.com/$RepoSlug.git" }
+$ReleaseBaseUrl = if ($env:AGY_PULSE_RELEASE_BASE_URL) {
+    $env:AGY_PULSE_RELEASE_BASE_URL.TrimEnd('/')
+} else {
+    "https://github.com/$RepoSlug/releases/latest/download"
+}
+
+$Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+if ($Arch -ne 'X64' -and $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
+    Write-Error "agy-pulse: unsupported Windows CPU architecture: $Arch ($env:PROCESSOR_ARCHITECTURE). Only x86_64 (X64) is supported."
+    exit 1
+}
+
+$BinDir = if ($env:AGY_PULSE_BIN_DIR) {
+    $env:AGY_PULSE_BIN_DIR
+} elseif ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA 'agy-pulse\bin'
+} else {
+    Join-Path $env:USERPROFILE 'AppData\Local\agy-pulse\bin'
+}
 
 $ScriptDir = if ($PSScriptRoot) {
     $PSScriptRoot
@@ -27,70 +46,92 @@ $ScriptDir = if ($PSScriptRoot) {
 }
 $RepoRoot = if ($ScriptDir) { Split-Path -Parent $ScriptDir } else { '' }
 $LocalPluginJson = if ($RepoRoot) { Join-Path $RepoRoot 'plugin.json' } else { '' }
-$LocalBootstrap = if ($ScriptDir) { Join-Path $ScriptDir 'bootstrap.js' } else { '' }
-$IsLocalRepo = [bool]($LocalPluginJson -and $LocalBootstrap -and (Test-Path $LocalPluginJson) -and (Test-Path $LocalBootstrap))
+$LocalExtJson = if ($RepoRoot) { Join-Path $RepoRoot 'gemini-extension.json' } else { '' }
+$IsLocalRepo = [bool]($LocalPluginJson -and $LocalExtJson -and (Test-Path $LocalPluginJson) -and (Test-Path $LocalExtJson))
 
-if (-not (Get-Command agy -ErrorAction SilentlyContinue)) {
-    Write-Error "agy-pulse: agy CLI not on PATH. Install it first:`n  irm https://antigravity.google/cli/install.ps1 | iex"
-    exit 1
-}
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Error "agy-pulse: node is required but not on PATH."
-    exit 1
-}
+$AssetName = 'agy-pulse-windows-x86_64.zip'
+$ArchiveUrl = "$ReleaseBaseUrl/$AssetName"
+$SumsUrl = "$ReleaseBaseUrl/SHA256SUMS"
 
-if ((-not $HasExplicitRepo) -and $IsLocalRepo) {
-    Write-Host "==> Removing any existing agy-pulse plugin install..."
-    try { agy plugin uninstall agy-pulse 2>$null } catch {}
+$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("agy-pulse-install-" + [System.Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
-    Write-Host "==> Installing plugin from local repository $RepoRoot..."
-    agy plugin install $RepoRoot
-    if ($LASTEXITCODE -ne 0) { throw "agy plugin install exited with code $LASTEXITCODE" }
-
-    Write-Host ""
-    Write-Host "==> Bootstrapping runtime + statusLine config..."
-    node $LocalBootstrap
-    if ($LASTEXITCODE -ne 0) { throw "bootstrap.js exited with code $LASTEXITCODE" }
-
-    Write-Host ""
-    Write-Host "==> agy-pulse installed."
-    Write-Host "    Open a new agy session to see the agy-pulse status line."
-    Write-Host "    Repair anytime by re-running this script."
-    exit 0
-}
-
-if (-not $RepoRaw) {
-    $EffectiveSlug = if ($RepoSlug) { $RepoSlug } else { $DefaultRepoSlug }
-    $RepoRaw = "https://raw.githubusercontent.com/$EffectiveSlug/main"
-}
-if (-not $RepoUrl) {
-    $EffectiveSlug = if ($RepoSlug) { $RepoSlug } else { $DefaultRepoSlug }
-    $RepoUrl = "https://github.com/$EffectiveSlug.git"
-}
-
-# Step 1: stage the plugin. Uninstall first so stale files don't linger.
-Write-Host "==> Removing any existing agy-pulse plugin install..."
-try { agy plugin uninstall agy-pulse 2>$null } catch {}
-
-Write-Host "==> Installing plugin from $RepoUrl..."
-agy plugin install $RepoUrl
-if ($LASTEXITCODE -ne 0) { throw "agy plugin install exited with code $LASTEXITCODE" }
-
-# Step 2: download bootstrap.js to temp, run with node
-Write-Host ""
-Write-Host "==> Bootstrapping runtime + statusLine config..."
-$BootstrapUrl = "$RepoRaw/scripts/bootstrap.js"
-$TempBootstrap = Join-Path ([System.IO.Path]::GetTempPath()) "agy-pulse-bootstrap-$PID.js"
 try {
-    Invoke-WebRequest -Uri $BootstrapUrl -OutFile $TempBootstrap -UseBasicParsing
-    $env:AGY_PULSE_REPO_RAW = $RepoRaw
-    node $TempBootstrap
-    if ($LASTEXITCODE -ne 0) { throw "bootstrap.js exited with code $LASTEXITCODE" }
-} finally {
-    Remove-Item $TempBootstrap -Force -ErrorAction SilentlyContinue
-}
+    $SumsPath = Join-Path $TempDir 'SHA256SUMS'
+    $ArchivePath = Join-Path $TempDir $AssetName
+    $ExtractDir = Join-Path $TempDir 'extract'
 
-Write-Host ""
-Write-Host "==> agy-pulse installed."
-Write-Host "    Open a new agy session to see the agy-pulse status line."
-Write-Host "    Repair anytime by re-running this script."
+    Write-Host "==> Downloading $AssetName and SHA256SUMS..."
+    Invoke-WebRequest -Uri $SumsUrl -OutFile $SumsPath -UseBasicParsing
+    Invoke-WebRequest -Uri $ArchiveUrl -OutFile $ArchivePath -UseBasicParsing
+
+    $ExpectedHash = $null
+    foreach ($line in Get-Content -Path $SumsPath) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+        $parts = $trimmed -split '\s+', 2
+        if ($parts.Count -lt 2) { continue }
+        $hash = $parts[0].ToLowerInvariant()
+        $filePart = $parts[1].TrimStart('*')
+        if ($filePart.StartsWith('./')) { $filePart = $filePart.Substring(2) }
+        $baseName = Split-Path -Leaf $filePart
+        if (($filePart -eq $AssetName -or $baseName -eq $AssetName) -and ($hash -match '^[0-9a-f]{64}$')) {
+            $ExpectedHash = $hash
+            break
+        }
+    }
+
+    if (-not $ExpectedHash) {
+        throw "SHA256SUMS does not contain a valid entry for $AssetName"
+    }
+
+    $ActualHash = (Get-FileHash -Path $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ActualHash -ne $ExpectedHash) {
+        throw "SHA-256 mismatch for $AssetName (expected $ExpectedHash, got $ActualHash)"
+    }
+    Write-Host "==> SHA-256 verified ($ActualHash)"
+
+    Expand-Archive -Path $ArchivePath -DestinationPath $ExtractDir -Force
+
+    $PrimarySrc = Get-ChildItem -Path $ExtractDir -Filter 'agy-pulse.exe' -Recurse -File | Select-Object -First 1
+    $AliasSrc = Get-ChildItem -Path $ExtractDir -Filter 'agypl.exe' -Recurse -File | Select-Object -First 1
+    if (-not $PrimarySrc) {
+        throw "Extracted archive did not contain agy-pulse.exe"
+    }
+
+    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+    $PrimaryDst = Join-Path $BinDir 'agy-pulse.exe'
+    $AliasDst = Join-Path $BinDir 'agypl.exe'
+    Copy-Item -Path $PrimarySrc.FullName -Destination $PrimaryDst -Force
+    if ($AliasSrc) {
+        Copy-Item -Path $AliasSrc.FullName -Destination $AliasDst -Force
+    }
+
+    Write-Host "==> Configuring host statusLine via agy-pulse.exe install..."
+    & $PrimaryDst install --bin-dir $BinDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "agy-pulse.exe install exited with code $LASTEXITCODE"
+    }
+
+    if (Get-Command agy -ErrorAction SilentlyContinue) {
+        Write-Host "==> Syncing plugin manifest with agy CLI..."
+        try { agy plugin uninstall agy-pulse 2>$null } catch {}
+        if ($IsLocalRepo -and -not $env:AGY_PULSE_REPO -and -not $env:AGY_PULSE_REPO_URL) {
+            agy plugin install $RepoRoot
+        } else {
+            agy plugin install $RepoUrl
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "agy plugin install exited with code $LASTEXITCODE; native statusLine remains active."
+        }
+    }
+
+    Write-Host ""
+    Write-Host "==> agy-pulse installed to $BinDir (agy-pulse.exe, agypl.exe)."
+    if (-not (($env:PATH -split ';') -contains $BinDir)) {
+        Write-Host "    Add $BinDir to your user PATH to invoke agypl / agy-pulse from any terminal."
+    }
+    Write-Host "    Open a new agy session to see the agy-pulse status line."
+} finally {
+    Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+}
