@@ -1,0 +1,27 @@
+name: Feature Request
+description: Suggest a new feature or enhancement for agy-pulse
+title: "[Feat]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Use Case
+      description: What pain point or use case does this feature address?
+      placeholder: I'm often frustrated when...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Design
+      description: Describe how you envision this feature working (CLI flags, config fields, statusline/dashboard UI, etc.).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or workarounds you've considered.
+    validations:
+      required: false

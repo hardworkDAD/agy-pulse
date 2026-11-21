@@ -1,0 +1,54 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in agy-pulse
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue!
+        **Security Reminder:** Never paste plaintext OAuth tokens, keyring secrets, or unredacted personal logs in a public issue.
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe what happened...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Exact commands or steps to reproduce the behavior.
+      placeholder: |
+        1. Run '...'
+        2. Observe '...'
+    validations:
+      required: true
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected vs. Actual Behavior
+      description: What you expected to happen and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Provide your OS, Node.js version, and agy-pulse version.
+      value: |
+        - OS:
+        - Node.js version (`node -v`):
+        - agy-pulse version (`agypl --help`):
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or Redacted `agypl diagnose` Output
+      description: Optional. Paste relevant terminal output or redacted `agypl diagnose` JSON (do NOT include plaintext tokens or secrets).
+      render: text
+    validations:
+      required: false

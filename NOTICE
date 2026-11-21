@@ -1,0 +1,37 @@
+agy-pulse
+Copyright (c) 2026 agy-pulse
+
+This product is licensed under the MIT License (see the LICENSE file in the
+root directory of this repository).
+
+================================================================================
+OPEN-SOURCE REFERENCES & ACKNOWLEDGMENTS
+================================================================================
+
+agy-pulse is open-source software released under the MIT License. It builds
+upon and draws inspiration, architectural ideas, and telemetry decoding
+references from the following open-source projects:
+
+1. zzusec/agy-statusline
+   Repository: https://github.com/zzusec/agy-statusline
+   Referenced concepts:
+   - Real-time context window progress bar rendering
+   - Protobuf server compaction ceiling decoding
+   - Session cost monitoring and uppercase K/M token formatting style
+
+2. icebear0828/agy-hud
+   Repository: https://github.com/icebear0828/agy-hud
+   Referenced concepts:
+   - Multi-line Antigravity CLI HUD layout
+   - Cloud quota panel visualization
+   - Session telemetry structure
+
+3. elviscjn-cjn/antigravity-context-viewer
+   Repository: https://github.com/elviscjn-cjn/antigravity-context-viewer
+   Referenced concepts:
+   - gen_metadata Protobuf decoding for timeToFirstToken and streamingDuration
+   - Per-model streaming output speed statistics
+   - Model pricing rate alignment
+
+All copyrights, trademarks, and licenses of the referenced projects above belong
+strictly to their respective original authors and maintainers.
