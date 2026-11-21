@@ -59,6 +59,17 @@ function removeTokenMirrors() {
   return removed;
 }
 
+function loadDashboardLauncher() {
+  try {
+    return require('./dashboard-launcher.js');
+  } catch (err) {
+    if (err && err.code === 'MODULE_NOT_FOUND') {
+      return null;
+    }
+    throw err;
+  }
+}
+
 /**
  * Remove extra files written by the runtime/bootstrap.
  *
@@ -67,6 +78,8 @@ function removeTokenMirrors() {
  */
 function removeExtraFiles(root) {
   const removed = [];
+  const launcher = loadDashboardLauncher();
+  const dashboardStateFilename = (launcher && launcher.DASHBOARD_STATE_FILENAME) || 'agy-pulse-dashboard.json';
   const targets = [
     path.join(root, 'agy-pulse-payload.json'),
     path.join(root, 'agy-pulse-token.json'),
@@ -74,6 +87,7 @@ function removeExtraFiles(root) {
     path.join(root, 'agy-pulse-error.log'),
     path.join(root, 'agy-pulse-update-status.json'),
     path.join(root, 'agy-pulse-compaction-cache.json'),
+    path.join(root, dashboardStateFilename),
     path.join(root, 'daily-cost.json'),
     path.join(root, 'speed-cache'),
     path.join(root, 'transcript-cache'),
@@ -229,6 +243,22 @@ function handleLedgerFiles(root, purgeLedger = false) {
   return { preserved, purged };
 }
 
+function removeDashboardShortcuts(options = {}) {
+  const launcher = loadDashboardLauncher();
+  if (!launcher || typeof launcher.uninstallDesktopShortcut !== 'function') {
+    return { removed: [], skipped: [] };
+  }
+  const callOptions = {
+    platform: options.platform || process.platform,
+    env: options.env || process.env,
+    homeDir: options.homeDir || os.homedir(),
+  };
+  if (options.spawnSync !== undefined) {
+    callOptions.spawnSync = options.spawnSync;
+  }
+  return launcher.uninstallDesktopShortcut(callOptions);
+}
+
 function uninstall(options = {}) {
   const env = options.env || process.env;
   const homeDir = options.homeDir || os.homedir();
@@ -245,6 +275,7 @@ function uninstall(options = {}) {
     extraFiles: [],
     tempArtifacts: [],
     cliShims: [],
+    dashboardShortcuts: { removed: [], skipped: [] },
     preservedLedgers: [],
     purgedLedgers: [],
   };
@@ -332,6 +363,12 @@ function uninstall(options = {}) {
     platform: options.platform || process.platform,
     binDir: options.binDir,
   });
+  results.dashboardShortcuts = removeDashboardShortcuts({
+    platform: options.platform || process.platform,
+    env,
+    homeDir,
+    spawnSync: options.spawnSync,
+  });
 
   return results;
 }
@@ -356,6 +393,9 @@ if (require.main === module) {
   for (const f of result.cliShims) {
     process.stdout.write(`CLI shim removed: ${f}\n`);
   }
+  for (const f of (result.dashboardShortcuts && result.dashboardShortcuts.removed) || []) {
+    process.stdout.write(`dashboard shortcut removed: ${f}\n`);
+  }
   for (const f of result.purgedLedgers) {
     process.stdout.write(`ledger removed: ${f}\n`);
   }
@@ -376,6 +416,7 @@ module.exports = {
   removeWindowsShShims,
   isOurCliShimContent,
   removeCliShims,
+  removeDashboardShortcuts,
   handleLedgerFiles,
   uninstall,
 };

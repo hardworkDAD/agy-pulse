@@ -20,6 +20,7 @@ const RUNTIME_FILES = [
   'runtime/config.js',
   'runtime/cost.js',
   'runtime/daily-cost.js',
+  'runtime/dashboard-launcher.js',
   'runtime/dashboard-ui.js',
   'runtime/dashboard.js',
   'runtime/encoding.js',

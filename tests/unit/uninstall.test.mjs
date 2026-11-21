@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const uninstallModule = require('../../runtime/uninstall.js');
-const { removeExtraFiles, removeTempArtifacts, removeWindowsShShims, clearStatusLine, uninstall } = uninstallModule;
+const { removeExtraFiles, removeTempArtifacts, removeWindowsShShims, removeDashboardShortcuts, clearStatusLine, uninstall } = uninstallModule;
 
 test('removeExtraFiles removes agy-pulse-payload.json and the legacy status line directory', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'uninstall-extra-test-'));
@@ -262,6 +262,126 @@ test('uninstall removes only agy-pulse CLI shims (agypl / agy-pulse / .cmd) and 
     assert.ok(res.cliShims.includes(ourWinCmd));
     assert.ok(!res.cliShims.includes(foreignDefault));
     assert.ok(!res.cliShims.includes(foreignAlias));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('removeExtraFiles removes agy-pulse-dashboard.json', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'uninstall-dash-state-'));
+  try {
+    const dashboardStateFile = path.join(tmp, 'agy-pulse-dashboard.json');
+    const keepFile = path.join(tmp, 'keep.json');
+    fs.writeFileSync(dashboardStateFile, JSON.stringify({ pid: 12345, port: 3789 }), 'utf8');
+    fs.writeFileSync(keepFile, '{}', 'utf8');
+
+    const removed = removeExtraFiles(tmp);
+
+    assert.ok(removed.includes(dashboardStateFile));
+    assert.equal(fs.existsSync(dashboardStateFile), false);
+    assert.equal(fs.existsSync(keepFile), true);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('removeDashboardShortcuts removes marked shortcuts and protects unmarked foreign files', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'uninstall-dash-shortcuts-'));
+  try {
+    const { DASHBOARD_SHORTCUT_MARKER } = require('../../runtime/dashboard-launcher.js');
+    const home = path.join(tmp, 'home');
+    const xdgData = path.join(tmp, 'xdg-data');
+    const env = { HOME: home, USERPROFILE: home, XDG_DATA_HOME: xdgData };
+
+    const desktopEntry = path.join(xdgData, 'applications', 'agy-pulse-dashboard.desktop');
+    const desktopCopy = path.join(home, 'Desktop', 'agy-pulse-dashboard.desktop');
+    const iconFile = path.join(xdgData, 'icons', 'hicolor', 'scalable', 'apps', 'agy-pulse-dashboard.svg');
+    fs.mkdirSync(path.dirname(desktopEntry), { recursive: true });
+    fs.mkdirSync(path.dirname(desktopCopy), { recursive: true });
+    fs.mkdirSync(path.dirname(iconFile), { recursive: true });
+
+    // Case 1: marked shortcuts & icon should be removed
+    fs.writeFileSync(desktopEntry, `[Desktop Entry]\n# ${DASHBOARD_SHORTCUT_MARKER}\nName=agy-pulse Dashboard\n`, 'utf8');
+    fs.writeFileSync(desktopCopy, `[Desktop Entry]\n# ${DASHBOARD_SHORTCUT_MARKER}\nName=agy-pulse Dashboard\n`, 'utf8');
+    fs.writeFileSync(iconFile, '<svg><!-- agy-pulse-dashboard-icon --></svg>', 'utf8');
+
+    const spawnCalls = [];
+    const removedRes = removeDashboardShortcuts({
+      platform: 'linux',
+      env,
+      homeDir: home,
+      spawnSync: (cmd, args) => {
+        spawnCalls.push({ cmd, args });
+        return { status: 0 };
+      },
+    });
+
+    assert.ok(removedRes.removed.includes(desktopEntry));
+    assert.ok(removedRes.removed.includes(desktopCopy));
+    assert.ok(removedRes.removed.includes(iconFile));
+    assert.equal(fs.existsSync(desktopEntry), false);
+    assert.equal(fs.existsSync(desktopCopy), false);
+    assert.equal(fs.existsSync(iconFile), false);
+    assert.ok(spawnCalls.some(c => c.cmd === 'update-desktop-database'));
+
+    // Case 2: foreign unmarked files at the same paths must be preserved
+    fs.writeFileSync(desktopEntry, '[Desktop Entry]\nName=Foreign App\n', 'utf8');
+    fs.writeFileSync(desktopCopy, '[Desktop Entry]\nName=Foreign Desktop Copy\n', 'utf8');
+    fs.writeFileSync(iconFile, '<svg>foreign-icon</svg>', 'utf8');
+
+    const foreignRes = removeDashboardShortcuts({
+      platform: 'linux',
+      env,
+      homeDir: home,
+      spawnSync: () => ({ status: 0 }),
+    });
+
+    assert.deepEqual(foreignRes.removed, []);
+    assert.ok(foreignRes.skipped.includes(desktopEntry));
+    assert.ok(foreignRes.skipped.includes(desktopCopy));
+    assert.equal(fs.existsSync(desktopEntry), true);
+    assert.equal(fs.existsSync(desktopCopy), true);
+    assert.equal(fs.existsSync(iconFile), true);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('uninstall cleans agy-pulse-dashboard.json and marked dashboard shortcuts while preserving unmarked files', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'uninstall-dash-integration-'));
+  try {
+    const { DASHBOARD_SHORTCUT_MARKER } = require('../../runtime/dashboard-launcher.js');
+    const home = path.join(tmp, 'home');
+    const xdgData = path.join(tmp, 'xdg-data');
+    const root = path.join(home, '.gemini', 'antigravity-cli');
+    const settingsPath = path.join(root, 'settings.json');
+    const dashState = path.join(root, 'agy-pulse-dashboard.json');
+    const desktopEntry = path.join(xdgData, 'applications', 'agy-pulse-dashboard.desktop');
+    const foreignDesktopCopy = path.join(home, 'Desktop', 'agy-pulse-dashboard.desktop');
+
+    fs.mkdirSync(root, { recursive: true });
+    fs.mkdirSync(path.dirname(desktopEntry), { recursive: true });
+    fs.mkdirSync(path.dirname(foreignDesktopCopy), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({}), 'utf8');
+    fs.writeFileSync(dashState, JSON.stringify({ pid: 99999, port: 3789 }), 'utf8');
+    fs.writeFileSync(desktopEntry, `[Desktop Entry]\n# ${DASHBOARD_SHORTCUT_MARKER}\n`, 'utf8');
+    fs.writeFileSync(foreignDesktopCopy, '[Desktop Entry]\nName=User Custom\n', 'utf8');
+
+    const res = uninstall({
+      homeDir: home,
+      env: { HOME: home, USERPROFILE: home, XDG_DATA_HOME: xdgData },
+      settingsPath,
+      platform: 'linux',
+      spawnSync: () => ({ status: 0 }),
+      tmpDir: path.join(tmp, 'tmp'),
+    });
+
+    assert.ok(res.extraFiles.includes(dashState));
+    assert.equal(fs.existsSync(dashState), false);
+    assert.ok(res.dashboardShortcuts.removed.includes(desktopEntry));
+    assert.equal(fs.existsSync(desktopEntry), false);
+    assert.ok(res.dashboardShortcuts.skipped.includes(foreignDesktopCopy));
+    assert.equal(fs.existsSync(foreignDesktopCopy), true);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

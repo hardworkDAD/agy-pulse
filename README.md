@@ -92,7 +92,7 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags:
 | Command / Invocation | Aliases | Description |
 |---|---|---|
 | `agypl stats [range] [options]` | `report`, `--stats` | Print CLI & Antigravity IDE telemetry summary in terminal |
-| `agypl dashboard [options]` | `dash`, `ui`, `--dashboard` | Start offline local Web dashboard (`127.0.0.1:3789` by default) |
+| `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | Start or manage offline local Web dashboard (`127.0.0.1:3789`, standalone app window & desktop icon) |
 | `agypl config` | `--config` | Launch interactive terminal configuration wizard |
 | `agypl diagnose` | `--diagnose` | Output JSON authentication & quota cache diagnostics |
 | `agypl update` | `--update` | Download and install latest runtime from configured repository |
@@ -120,14 +120,32 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags:
 | `--no-sync` | flag | `false` | Skip read-only DB backfill and query existing ledger directly |
 | `-h`, `--help` | flag | — | Show `stats` help |
 
-### `agypl dashboard` options
+### `agypl dashboard` actions & options
 
-| Option | Values / Format | Default | Description |
+| Action / Option | Values / Format | Default | Description |
 |---|---|---|---|
+| *(no action)* | foreground server | `serve` | Run local dashboard in the foreground (`127.0.0.1:3789`) and open browser |
+| `open` | sub-action | — | Reuse or silently start background dashboard (600s idle exit) and open a standalone app window |
+| `stop` | sub-action | — | Stop the running background dashboard instance cleanly |
+| `status` | sub-action | — | Show background dashboard status (`url`, `pid`) and desktop shortcut state |
+| `install-shortcut` (`install-app`) | sub-action | — | Install a cross-platform desktop/app-launcher shortcut for terminal-free opening |
+| `uninstall-shortcut` (`uninstall-app`) | sub-action | — | Remove only `agy-pulse`-owned desktop shortcuts (fingerprint-verified) |
 | `--port <num>`, `-p <num>` | `0`–`65535` | `3789` | Bind loopback port (`0` picks random port; auto-falls back on conflict) |
-| `--no-open` / `--open` | flag | open | Disable or enable auto-opening the browser |
+| `--no-open` / `--open` | flag | open | Disable or enable auto-opening the browser/window |
+| `--app` / `--browser` | flag | `--app` for `open`, `--browser` for `serve` | Open in a standalone Chromium app window (`--app=<url>`) or default browser |
+| `--background` | flag | `false` | Run server with `deferInitialSync` and idle auto-exit (default `600`s) |
+| `--idle-timeout <sec>` | non-negative integer | `600` (`open`/`--background`), `0` (`serve`) | Auto-exit after N seconds of inactivity (`0` disables idle exit) |
+| `--desktop` | flag | `false` | Also place a shortcut on `~/Desktop` during `install-shortcut` |
 | `--lang <val>`, `--zh`, `--en` | `auto \| en \| zh` | `auto` | Initial dashboard UI language |
 | `--no-sync` | flag | `false` | Skip startup DB backfill and serve existing ledger immediately |
+
+Quick setup for terminal-free one-click opening:
+```bash
+agypl dashboard install-shortcut --desktop   # register OS app launcher (+ optional Desktop icon)
+agypl dashboard open                         # launch standalone app window on demand
+agypl dashboard status                       # inspect running instance & shortcut path
+agypl dashboard stop                         # stop background instance early
+```
 
 ### Installer / deploy / uninstaller flags
 
@@ -142,7 +160,7 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags:
 ### Permanent Telemetry Ledger & Web Dashboard (`stats` / `dashboard`)
 - **Zero-daemon collection (CLI + Antigravity IDE)**: While rendering the status line, `agy-pulse` silently performs a 15s-throttled incremental archive for the active CLI session (`agy-pulse-ledger.sqlite` via built-in `node:sqlite`, with automatic `agy-pulse-ledger.json` fallback). Running `stats` or `dashboard` automatically backfills both Antigravity CLI (`~/.gemini/antigravity-cli/conversations/*.db`) and Antigravity IDE (`~/.gemini/antigravity/conversations/*.db`) read-only (`?immutable=1` / WAL-safe temp copy) without touching source databases or affecting the live status bar.
 - **Permanent retention**: Recorded steps and session trees stay in your ledger even if old `conversations/*.db` files are pruned later.
-- **Offline Local Web Dashboard (`dashboard`)**: Binds strictly to `127.0.0.1` with Host/Origin validation, dark/light theme & `en`/`zh` toggles, `All / CLI / IDE` source filter pills, source cost share summary, preset + custom date range pickers, `hour`/`day`/`week` granularity, model/workspace/subagent filters, 6 KPI cards, interactive native SVG charts (stacked cost bars + cache hit rate & output speed dual-line trend), sortable per-model breakdown, searchable & expandable `/swarm` session tree with `CLI` / `IDE` source badges, and CSV/JSON export.
+- **Offline Local Web Dashboard (`dashboard`)**: Binds strictly to `127.0.0.1` with Host/Origin validation, supports single-instance on-demand background launch (`agypl dashboard open`) with automatic idle exit (600s default), standalone Chromium app-window launch (`--app`), cross-platform desktop shortcut install/uninstall (`install-shortcut` / `uninstall-shortcut`), dark/light theme & `en`/`zh` toggles, `All / CLI / IDE` source filter pills, source cost share summary, preset + custom date range pickers, `hour`/`day`/`week` granularity, model/workspace/subagent filters, 6 KPI cards, interactive native SVG charts (stacked cost bars + cache hit rate & output speed dual-line trend), sortable per-model breakdown, searchable & expandable `/swarm` session tree with `CLI` / `IDE` source badges, and CSV/JSON export.
 
 ---
 
@@ -157,7 +175,7 @@ Windows PowerShell:
 .\uninstall.ps1
 ```
 
-Removes the `agy-pulse` runtime directory, plugin installs, caches, logs, Windows shims, and clears `settings.json` `statusLine` (saving a `.bak` backup). Your permanent telemetry ledger (`agy-pulse-ledger.sqlite` / `agy-pulse-ledger.json`) is **preserved by default**; pass `--purge-ledger` (or `--purge`) to `node runtime/uninstall.js` if you want to remove it too.
+Removes the `agy-pulse` runtime directory, plugin installs, caches, logs, `agy-pulse-dashboard.json`, fingerprint-verified desktop shortcuts (`agypl dashboard uninstall-shortcut` / `removeDashboardShortcuts`), Windows shims, and clears `settings.json` `statusLine` (saving a `.bak` backup). Your permanent telemetry ledger (`agy-pulse-ledger.sqlite` / `agy-pulse-ledger.json`) is **preserved by default**; pass `--purge-ledger` (or `--purge`) to `node runtime/uninstall.js` if you want to remove it too.
 
 ---
 
@@ -293,6 +311,7 @@ Optional. Create `agy-pulse.config.json` in your workspace root to override defa
 | `AGY_PULSE_FORCE_ASCII` | Set `1` to force ASCII fallback |
 | `AGY_PULSE_FORCE_UNICODE` | Set `1` to force Unicode output |
 | `AGY_PULSE_NO_OPEN` | Set `1` to prevent `agypl dashboard` from auto-opening a browser |
+| `AGY_PULSE_DASHBOARD_IDLE_SEC` | Override default idle auto-exit timeout in seconds for `agypl dashboard open` / `--background` (default `600`) |
 | `NODE_USE_ENV_PROXY` | Automatically set to `'1'` in background quota refresh subprocess so Node honors `HTTP_PROXY`/`HTTPS_PROXY` (can be overridden) |
 | `COLUMNS` | Fallback terminal column width when `agyData.terminal_width` and `display.terminalWidth` are unset |
 | `NO_COLOR` | Disable ANSI colors in `agypl stats` output |
@@ -330,6 +349,7 @@ agy-pulse/
 │   ├── cost.js                        # ACV-aligned model pricing table (>200k tiers) & unified session cost
 │   ├── daily-cost.js                  # Lock-safe daily & 7-day rolling cost ledger
 │   ├── dashboard.js                   # Local 127.0.0.1 HTTP telemetry dashboard server (--dashboard)
+│   ├── dashboard-launcher.js          # Single-instance daemon, app-window & desktop shortcut launcher
 │   ├── dashboard-ui.js                # Zero-CDN bilingual dark/light SVG dashboard SPA
 │   ├── encoding.js                    # Terminal UTF-8 / codepage detector
 │   ├── ledger.js                      # Permanent node:sqlite/JSON telemetry ledger & read-only DB scanner

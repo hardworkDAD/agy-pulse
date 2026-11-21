@@ -319,6 +319,8 @@ function buildCliHelpText() {
     '',
     'Usage:',
     '  agypl dashboard [options]               Start local web dashboard (alias: dash, ui, --dashboard)',
+    '  agypl dashboard open|stop|status|install-shortcut|uninstall-shortcut',
+    '                                          Launch app window, manage background server, or desktop shortcut',
     '  agypl stats [today|7d|30d|all]          Show CLI & IDE telemetry summary (alias: report, --stats)',
     '  agypl config                            Launch interactive configuration wizard (alias: --config)',
     '  agypl diagnose                          Output JSON auth & quota cache diagnostics (alias: --diagnose)',
@@ -328,7 +330,7 @@ function buildCliHelpText() {
     '',
     'Options:',
     '  stats:     --range, --from, --to, --granularity, --source, --model, --workspace, --json, --csv, --lang, --no-sync',
-    '  dashboard: --port, --no-open, --lang, --no-sync',
+    '  dashboard: --port, --no-open, --app, --browser, --background, --idle-timeout, --desktop, --lang, --no-sync',
     '',
   ].join('\n');
 }

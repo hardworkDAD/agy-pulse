@@ -92,7 +92,7 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
 | 命令 / 调用方式 | 兼容别名 | 用途说明 |
 |---|---|---|
 | `agypl stats [range] [options]` | `report`, `--stats` | 输出 CLI 与 Antigravity IDE 终端遥测速查报表 |
-| `agypl dashboard [options]` | `dash`, `ui`, `--dashboard` | 启动本地离线 Web 看板（默认 `127.0.0.1:3789`） |
+| `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | 启动或管理本地离线 Web 看板（默认 `127.0.0.1:3789`，支持桌面快捷方式与独立窗口直开） |
 | `agypl config` | `--config` | 打开交互式终端配置向导 |
 | `agypl diagnose` | `--diagnose` | 输出 JSON 认证与配额缓存诊断信息 |
 | `agypl update` | `--update` | 从配置仓库在线检查并自更新运行时 |
@@ -120,14 +120,32 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
 | `--no-sync` | 开关标志 | `false` | 跳过只读 DB 补扫，直接查询现有永久账本 |
 | `-h`, `--help` | 开关标志 | — | 显示 `stats` 帮助说明 |
 
-### `agypl dashboard` 参数全表
+### `agypl dashboard` 子命令与参数全表
 
-| 参数 | 可选值 / 格式 | 默认值 | 说明 |
+| 子命令 / 参数 | 可选值 / 格式 | 默认值 | 说明 |
 |---|---|---|---|
+| *(无子命令)* | 前台服务 | `serve` | 前台启动本地 Web 看板（`127.0.0.1:3789`）并打开浏览器 |
+| `open` | 子动作 | — | 复用或静默拉起后台看板服务（闲置 600s 自动退出），并以独立 App 窗口打开 |
+| `stop` | 子动作 | — | 优雅停止正在运行的后台看板服务并清理状态文件 |
+| `status` | 子动作 | — | 查看后台看板运行状态（`url`、`pid`）及桌面快捷方式安装状态 |
+| `install-shortcut`（`install-app`） | 子动作 | — | 一键安装跨平台桌面/应用启动器图标，支持免终端直接点开 |
+| `uninstall-shortcut`（`uninstall-app`） | 子动作 | — | 仅卸载带 `agy-pulse` 指纹标记的桌面快捷方式 |
 | `--port <num>`, `-p <num>` | `0`–`65535` | `3789` | 监听回环端口（`0` 随机分配；端口冲突时自动递增回退） |
-| `--no-open` / `--open` | 开关标志 | 自动打开 | 禁止或允许启动后自动打开系统浏览器 |
+| `--no-open` / `--open` | 开关标志 | 自动打开 | 禁止或允许启动后自动打开窗口/浏览器 |
+| `--app` / `--browser` | 开关标志 | `open` 默认 `--app`，`serve` 默认 `--browser` | 使用 Chromium 系独立无地址栏 App 窗口（`--app=<url>`）或系统默认浏览器打开 |
+| `--background` | 开关标志 | `false` | 启用 `deferInitialSync` 与空闲自动退出模式（默认 `600` 秒） |
+| `--idle-timeout <sec>` | 非负整数（秒） | `open`/`--background` 为 `600`，`serve` 为 `0` | 无操作超时自动退出秒数（`0` 表示不自动退出） |
+| `--desktop` | 开关标志 | `false` | 执行 `install-shortcut` 时同步在桌面生成快捷方式副本 |
 | `--lang <val>`, `--zh`, `--en` | `auto \| en \| zh` | `auto` | 指定 Web 看板初始语言 |
 | `--no-sync` | 开关标志 | `false` | 跳过启动时 DB 补扫，直接展示现有账本 |
+
+一键安装桌面图标与免终端直开常用命令：
+```bash
+agypl dashboard install-shortcut --desktop   # 安装系统应用启动器图标（--desktop 同步放桌面）
+agypl dashboard open                         # 按需静默拉起后台并用独立 App 窗口打开
+agypl dashboard status                       # 查看后台服务状态与快捷方式路径
+agypl dashboard stop                         # 手动停止后台看板服务
+```
 
 ### 安装 / 部署 / 卸载脚本参数
 
@@ -142,7 +160,7 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
 ### 永久遥测账本与本地 Web 后台（`stats` / `dashboard`）
 - **零常驻进程采集（CLI + Antigravity IDE 合并统计）**：状态栏运行时仅对当前活跃 CLI 会话静默执行 15s 节流增量归档（优先使用内置 `node:sqlite` 写入 `agy-pulse-ledger.sqlite`，无 `node:sqlite` 时自动降级 `agy-pulse-ledger.json`）；运行 `stats` 或 `dashboard` 时自动合并只读补扫 Antigravity CLI（`~/.gemini/antigravity-cli/conversations/*.db`）与 Antigravity IDE（`~/.gemini/antigravity/conversations/*.db`）的全部会话库（`?immutable=1` + 活跃 `-wal` 临时拷贝，绝不写入原库，也不影响终端状态栏聚焦当前 CLI）。
 - **历史永久保留**：已归档的步级遥测与会话谱系树永久保存于本地账本中，即使后续源 `conversations/*.db` 被清理也不会丢失历史统计。
-- **纯离线本地 Web 看板（`dashboard`）**：严格绑定 `127.0.0.1` 并校验 `Host` / `Origin`，内置深/浅色与中/英文一键切换、`All / CLI / IDE` 来源切换与来源费用占比汇总、快捷区间 + 自定义起止日期、小时/天/周粒度、模型/工作区/子代理筛选、6 张 KPI 卡、2 张纯原生交互 SVG 图表、可排序模型分析表、可搜索可展开且带 `CLI` / `IDE` 徽标的 `/swarm` 蜂群树会话明细及 CSV/JSON 导出。
+- **纯离线本地 Web 看板（`dashboard`）**：严格绑定 `127.0.0.1` 并校验 `Host` / `Origin`，支持按需单实例静默拉起后台（`agypl dashboard open`）与空闲自动退出（默认 600s）、独立无地址栏 App 窗口直开（`--app`）、跨平台桌面图标一键安装与指纹保护卸载（`install-shortcut` / `uninstall-shortcut`），内置深/浅色与中/英文一键切换、`All / CLI / IDE` 来源切换与来源费用占比汇总、快捷区间 + 自定义起止日期、小时/天/周粒度、模型/工作区/子代理筛选、6 张 KPI 卡、2 张纯原生交互 SVG 图表、可排序模型分析表、可搜索可展开且带 `CLI` / `IDE` 徽标的 `/swarm` 蜂群树会话明细及 CSV/JSON 导出。
 
 ---
 
@@ -157,7 +175,7 @@ Windows PowerShell：
 .\uninstall.ps1
 ```
 
-卸载脚本会清理 `agy-pulse` 的运行时目录、插件目录、缓存、错误日志、Windows shim，并清除 `settings.json` 中的 `statusLine`（保留 `.bak` 备份）。默认**保留**永久历史遥测账本（`agy-pulse-ledger.sqlite` / `agy-pulse-ledger.json`）；如需一并清理，可在执行 `node runtime/uninstall.js` 时传入 `--purge-ledger`（或 `--purge`）。
+卸载脚本会清理 `agy-pulse` 的运行时目录、插件目录、缓存、错误日志、`agy-pulse-dashboard.json`、带指纹标记的桌面快捷方式（`removeDashboardShortcuts`，自动跳过无指纹的第三方图标）、Windows shim，并清除 `settings.json` 中的 `statusLine`（保留 `.bak` 备份）。默认**保留**永久历史遥测账本（`agy-pulse-ledger.sqlite` / `agy-pulse-ledger.json`）；如需一并清理，可在执行 `node runtime/uninstall.js` 时传入 `--purge-ledger`（或 `--purge`）。
 
 ---
 
@@ -293,6 +311,7 @@ Windows PowerShell：
 | `AGY_PULSE_FORCE_ASCII` | 设为 `1` 强制使用 ASCII 字符 |
 | `AGY_PULSE_FORCE_UNICODE` | 设为 `1` 强制使用 Unicode 字符 |
 | `AGY_PULSE_NO_OPEN` | 设为 `1` 时阻止 `agypl dashboard` 自动打开浏览器 |
+| `AGY_PULSE_DASHBOARD_IDLE_SEC` | 覆盖 `agypl dashboard open` / `--background` 的默认空闲自动退出秒数（默认 `600`） |
 | `NODE_USE_ENV_PROXY` | 后台配额刷新子进程默认注入 `'1'`，允许透传系统/环境代理（可显式覆盖） |
 | `COLUMNS` | 未传入 `agyData.terminal_width` 且未配置 `display.terminalWidth` 时的终端列宽兜底 |
 | `NO_COLOR` | 禁用 `agypl stats` 终端 ANSI 彩色输出 |
@@ -330,6 +349,7 @@ agy-pulse/
 │   ├── cost.js                        # 对标 ACV 费率表（含 >200k 阶梯价）与统一会话总费用计算
 │   ├── daily-cost.js                  # 并发安全的今日/七日滚动费用账本
 │   ├── dashboard.js                   # 本地 127.0.0.1 HTTP 遥测后台服务 (--dashboard)
+│   ├── dashboard-launcher.js          # 看板单实例后台拉起、独立窗口与桌面快捷方式管理器
 │   ├── dashboard-ui.js                # 零外链中英双语深浅色原生 SVG Web 看板
 │   ├── encoding.js                    # 终端 UTF-8 / 代码页自动检测
 │   ├── ledger.js                      # 永久 node:sqlite/JSON 遥测账本与全量只读 DB 归档扫描

@@ -52,6 +52,7 @@ sync_runtime_tree() {
     config.js \
     cost.js \
     daily-cost.js \
+    dashboard-launcher.js \
     dashboard-ui.js \
     dashboard.js \
     encoding.js \

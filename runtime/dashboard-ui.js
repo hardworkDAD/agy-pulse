@@ -29,6 +29,8 @@ function renderDashboardHtml(options = {}) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <link rel="manifest" href="/manifest.webmanifest">
   <title>agy-pulse · Telemetry Dashboard</title>
   <style>
     :root, [data-theme="dark"] {
@@ -1762,12 +1764,15 @@ function renderDashboardHtml(options = {}) {
       updateExportLinks();
     }
 
+    var lastOverviewFetchAt = Date.now();
+
     async function fetchOverview() {
       updateExportLinks();
       try {
         var res = await fetch('/api/overview?' + buildQueryString(), { cache: 'no-store' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var json = await res.json();
+        lastOverviewFetchAt = Date.now();
         state.data = json;
         renderAll();
       } catch (err) {
@@ -1923,6 +1928,21 @@ function renderDashboardHtml(options = {}) {
     applyTranslations();
     bindEvents();
     fetchOverview();
+
+    setInterval(function () {
+      if (document.visibilityState !== 'hidden') {
+        fetch('/api/ping', { method: 'POST', keepalive: true }).catch(function () {});
+      }
+    }, 60000);
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') {
+        fetch('/api/ping', { method: 'POST', keepalive: true }).catch(function () {});
+        if (Date.now() - lastOverviewFetchAt > 30000) {
+          fetchOverview();
+        }
+      }
+    });
   })();
   </script>
 </body>

@@ -1,11 +1,13 @@
 'use strict';
 
+const os = require('os');
 const http = require('http');
 const { URL } = require('url');
 const { spawn } = require('child_process');
 const { loadConfig } = require('./config.js');
 const { resolveLanguage } = require('./renderer/lang.js');
 const { renderDashboardHtml } = require('./dashboard-ui.js');
+const launcher = require('./dashboard-launcher.js');
 
 const DEFAULT_DASHBOARD_PORT = 3789;
 const LOOPBACK_HOST = '127.0.0.1';
@@ -13,19 +15,34 @@ const VALID_RANGES = new Set(['today', '24h', '7d', '30d', 'month', 'all', 'cust
 const VALID_GRANULARITIES = new Set(['auto', 'hour', 'day', 'week']);
 const VALID_SOURCES = new Set(['all', 'cli', 'ide']);
 const VALID_CSV_KINDS = new Set(['timeseries', 'models', 'sessions']);
+const SUBCOMMAND_ALIASES = {
+  open: 'open',
+  stop: 'stop',
+  status: 'status',
+  'install-shortcut': 'install-shortcut',
+  'install-app': 'install-shortcut',
+  'uninstall-shortcut': 'uninstall-shortcut',
+  'uninstall-app': 'uninstall-shortcut',
+};
 
 /**
- * Parse CLI arguments for `agy-pulse --dashboard`.
+ * Parse CLI arguments for `agy-pulse --dashboard` and `agy-pulse dashboard <action>`.
  *
  * @param {string[]} [argv]
- * @returns {{ port: number, open: boolean, host: string, lang: string, noSync: boolean }}
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {object}
  */
-function parseDashboardArgs(argv = []) {
+function parseDashboardArgs(argv = [], env = process.env) {
   const args = Array.isArray(argv) ? argv : [];
   let port = DEFAULT_DASHBOARD_PORT;
   let open = true;
   let lang = 'auto';
   let noSync = false;
+  let action = 'serve';
+  let appModeExplicit = null;
+  let backgroundServe = false;
+  let idleTimeoutExplicit = null;
+  let includeDesktop = false;
 
   let startIdx = 0;
   while (startIdx < args.length && !String(args[startIdx] ?? '')) {
@@ -34,6 +51,16 @@ function parseDashboardArgs(argv = []) {
   if (startIdx < args.length) {
     const first = String(args[startIdx]);
     if (first === 'dashboard' || first === 'dash' || first === 'ui' || first === '--dashboard') {
+      startIdx += 1;
+    }
+  }
+  while (startIdx < args.length && !String(args[startIdx] ?? '')) {
+    startIdx += 1;
+  }
+  if (startIdx < args.length) {
+    const maybeAction = String(args[startIdx]);
+    if (!maybeAction.startsWith('-') && SUBCOMMAND_ALIASES[maybeAction]) {
+      action = SUBCOMMAND_ALIASES[maybeAction];
       startIdx += 1;
     }
   }
@@ -51,6 +78,29 @@ function parseDashboardArgs(argv = []) {
       lang = 'zh';
     } else if (arg === '--en') {
       lang = 'en';
+    } else if (arg === '--app') {
+      appModeExplicit = true;
+    } else if (arg === '--browser') {
+      appModeExplicit = false;
+    } else if (arg === '--background' || arg === '--serve-background') {
+      backgroundServe = true;
+    } else if (arg === '--desktop') {
+      includeDesktop = true;
+    } else if (arg === '--idle-timeout') {
+      const next = args[i + 1];
+      if (next !== undefined) {
+        const parsed = Number(next);
+        if (Number.isInteger(parsed) && parsed >= 0) {
+          idleTimeoutExplicit = parsed;
+        }
+        i += 1;
+      }
+    } else if (arg.startsWith('--idle-timeout=')) {
+      const raw = arg.slice('--idle-timeout='.length);
+      const parsed = Number(raw);
+      if (Number.isInteger(parsed) && parsed >= 0) {
+        idleTimeoutExplicit = parsed;
+      }
     } else if (arg === '--port' || arg === '-p') {
       const next = args[i + 1];
       if (next !== undefined) {
@@ -80,12 +130,27 @@ function parseDashboardArgs(argv = []) {
     }
   }
 
+  const appMode = appModeExplicit !== null ? appModeExplicit : action === 'open';
+  const envIdleRaw = env && env.AGY_PULSE_DASHBOARD_IDLE_SEC !== undefined && env.AGY_PULSE_DASHBOARD_IDLE_SEC !== ''
+    ? Number(env.AGY_PULSE_DASHBOARD_IDLE_SEC)
+    : NaN;
+  const envIdleSec = Number.isInteger(envIdleRaw) && envIdleRaw >= 0 ? envIdleRaw : null;
+  const defaultIdleSec = (backgroundServe || action === 'open')
+    ? (envIdleSec !== null ? envIdleSec : launcher.DEFAULT_IDLE_TIMEOUT_SEC)
+    : 0;
+  const idleTimeoutSec = idleTimeoutExplicit !== null ? idleTimeoutExplicit : defaultIdleSec;
+
   return {
     port,
     open,
     host: LOOPBACK_HOST,
     lang,
     noSync,
+    action,
+    appMode,
+    backgroundServe,
+    idleTimeoutSec,
+    includeDesktop,
   };
 }
 
@@ -236,6 +301,12 @@ function createDashboardServer(options = {}) {
   const rawPort = options.port !== undefined && options.port !== null ? Number(options.port) : DEFAULT_DASHBOARD_PORT;
   const requestedPort = Number.isInteger(rawPort) && rawPort >= 0 && rawPort <= 65535 ? rawPort : DEFAULT_DASHBOARD_PORT;
   const noSync = Boolean(options.noSync);
+  const deferInitialSync = Boolean(options.deferInitialSync);
+  const idleTimeoutMs = Number(options.idleTimeoutMs) > 0 ? Number(options.idleTimeoutMs) : 0;
+  const autoSyncIntervalMs = options.autoSyncIntervalMs !== undefined
+    ? Number(options.autoSyncIntervalMs)
+    : 10000;
+  const onIdleClose = typeof options.onIdleClose === 'function' ? options.onIdleClose : null;
   const ledgerOptions = options.ledgerOptions || {};
   const renderHtml = typeof options.renderHtml === 'function' ? options.renderHtml : renderDashboardHtml;
   const defaultLang = options.lang === 'zh' || options.lang === 'en'
@@ -244,6 +315,59 @@ function createDashboardServer(options = {}) {
 
   let actualPort = requestedPort;
   let startedInfo = null;
+  let startedAt = null;
+  let lastSyncAtMs = 0;
+  let syncInFlight = null;
+  let idleTimer = null;
+
+  function clearIdleTimer() {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  }
+
+  function touchIdleTimer() {
+    if (!(idleTimeoutMs > 0) || !server.listening) return;
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      close().then(() => {
+        if (onIdleClose) {
+          try {
+            onIdleClose();
+          } catch {
+            // ignore idle callback error
+          }
+        }
+      });
+    }, idleTimeoutMs);
+    if (typeof idleTimer.unref === 'function') {
+      idleTimer.unref();
+    }
+  }
+
+  async function maybeAutoSync() {
+    if (noSync || !(autoSyncIntervalMs > 0)) return;
+    if (lastSyncAtMs > 0 && Date.now() - lastSyncAtMs < autoSyncIntervalMs) return;
+    if (syncInFlight) {
+      await syncInFlight;
+      return;
+    }
+    const ledger = resolveLedgerModule(options.ledger);
+    if (typeof ledger.syncAllConversationsToLedger !== 'function') return;
+    syncInFlight = (async () => {
+      try {
+        await ledger.syncAllConversationsToLedger(ledgerOptions);
+        lastSyncAtMs = Date.now();
+      } catch {
+        // Do not block overview rendering on incremental sync failures
+      } finally {
+        syncInFlight = null;
+      }
+    })();
+    await syncInFlight;
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -256,10 +380,78 @@ function createDashboardServer(options = {}) {
       const parsedUrl = new URL(req.url || '/', `http://${LOOPBACK_HOST}:${boundPort}`);
       const pathname = parsedUrl.pathname;
 
+      if (pathname === '/api/health') {
+        if (method !== 'GET') {
+          return sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          app: launcher.DASHBOARD_APP_ID,
+          pid: process.pid,
+          port: boundPort,
+          idleTimeoutMs,
+          startedAt,
+        });
+      }
+
+      if (pathname === '/api/ping') {
+        if (method !== 'POST') {
+          return sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
+        }
+        if (!isAllowedOrigin(req.headers.origin, boundPort)) {
+          return sendJson(res, 403, { ok: false, error: 'Forbidden: invalid Origin header' });
+        }
+        touchIdleTimer();
+        return sendJson(res, 200, { ok: true, active: true, ts: Date.now() });
+      }
+
+      if (pathname === '/icon.svg') {
+        if (method !== 'GET' && method !== 'HEAD') {
+          return sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
+        }
+        setSecurityHeaders(res);
+        res.writeHead(200, {
+          'Content-Type': 'image/svg+xml; charset=utf-8',
+          'Content-Length': Buffer.byteLength(launcher.DASHBOARD_ICON_SVG, 'utf8'),
+        });
+        res.end(method === 'HEAD' ? undefined : launcher.DASHBOARD_ICON_SVG);
+        return;
+      }
+
+      if (pathname === '/manifest.webmanifest') {
+        if (method !== 'GET' && method !== 'HEAD') {
+          return sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
+        }
+        const manifestBody = JSON.stringify({
+          name: 'agy-pulse Telemetry Dashboard',
+          short_name: 'agy-pulse',
+          start_url: '/',
+          display: 'standalone',
+          background_color: '#0b1120',
+          theme_color: '#0b1120',
+          icons: [
+            {
+              src: '/icon.svg',
+              sizes: 'any',
+              type: 'image/svg+xml',
+              purpose: 'any',
+            },
+          ],
+        }, null, 2);
+        setSecurityHeaders(res);
+        res.writeHead(200, {
+          'Content-Type': 'application/manifest+json; charset=utf-8',
+          'Content-Length': Buffer.byteLength(manifestBody, 'utf8'),
+        });
+        res.end(method === 'HEAD' ? undefined : manifestBody);
+        return;
+      }
+
       if (pathname === '/' || pathname === '/index.html') {
         if (method !== 'GET' && method !== 'HEAD') {
           return sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
         }
+        touchIdleTimer();
         const queryLang = parsedUrl.searchParams.get('lang');
         const initialLang = queryLang === 'zh' || queryLang === 'en' ? queryLang : defaultLang;
         const html = renderHtml({ initialLang });
@@ -280,6 +472,8 @@ function createDashboardServer(options = {}) {
         if (method !== 'GET') {
           return sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
         }
+        touchIdleTimer();
+        await maybeAutoSync();
         const ledger = resolveLedgerModule(options.ledger);
         const filter = parseOverviewFilter(parsedUrl.searchParams);
         const data = await ledger.queryLedger(filter, ledgerOptions);
@@ -293,8 +487,10 @@ function createDashboardServer(options = {}) {
         if (!isAllowedOrigin(req.headers.origin, boundPort)) {
           return sendJson(res, 403, { ok: false, error: 'Forbidden: invalid Origin header' });
         }
+        touchIdleTimer();
         const ledger = resolveLedgerModule(options.ledger);
         const syncStats = await ledger.syncAllConversationsToLedger(ledgerOptions);
+        lastSyncAtMs = Date.now();
         return sendJson(res, 200, {
           ok: syncStats && syncStats.ok !== undefined ? Boolean(syncStats.ok) : true,
           ...(syncStats || {}),
@@ -305,6 +501,7 @@ function createDashboardServer(options = {}) {
         if (method !== 'GET') {
           return sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
         }
+        touchIdleTimer();
         const ledger = resolveLedgerModule(options.ledger);
         const filter = parseOverviewFilter(parsedUrl.searchParams);
         const rawKind = String(parsedUrl.searchParams.get('kind') || '').trim();
@@ -323,6 +520,7 @@ function createDashboardServer(options = {}) {
         if (method !== 'GET') {
           return sendJson(res, 405, { ok: false, error: 'Method Not Allowed' });
         }
+        touchIdleTimer();
         const ledger = resolveLedgerModule(options.ledger);
         const filter = parseOverviewFilter(parsedUrl.searchParams);
         const queryResult = await ledger.queryLedger(filter, ledgerOptions);
@@ -342,11 +540,12 @@ function createDashboardServer(options = {}) {
     if (startedInfo) return startedInfo;
 
     let syncStats = null;
-    if (!noSync) {
+    if (!noSync && !deferInitialSync) {
       try {
         const ledger = resolveLedgerModule(options.ledger);
         if (typeof ledger.syncAllConversationsToLedger === 'function') {
           syncStats = await ledger.syncAllConversationsToLedger(ledgerOptions);
+          lastSyncAtMs = Date.now();
         }
       } catch (err) {
         syncStats = { ok: false, error: err && err.message ? err.message : String(err) };
@@ -354,16 +553,20 @@ function createDashboardServer(options = {}) {
     }
 
     actualPort = await listenWithFallback(server, requestedPort, LOOPBACK_HOST);
+    startedAt = new Date().toISOString();
+    touchIdleTimer();
     startedInfo = {
       url: `http://${LOOPBACK_HOST}:${actualPort}`,
       port: actualPort,
       host: LOOPBACK_HOST,
       syncStats,
+      startedAt,
     };
     return startedInfo;
   }
 
   function close() {
+    clearIdleTimer();
     return new Promise((resolve) => {
       if (!server.listening) {
         startedInfo = null;
@@ -406,15 +609,18 @@ function openBrowser(url, platform = process.platform, spawner = spawn) {
 }
 
 /**
- * CLI entrypoint for `agy-pulse --dashboard`.
+ * CLI entrypoint for `agy-pulse --dashboard` and `agy-pulse dashboard <action>`.
  *
  * @param {string[]} [argv]
  * @param {object} [options]
  */
 async function startDashboardCli(argv = [], options = {}) {
-  const parsed = parseDashboardArgs(argv);
   const env = options.env || process.env;
+  const homeDir = options.homeDir || os.homedir();
+  const platform = options.platform || process.platform;
+  const parsed = parseDashboardArgs(argv, env);
   const write = typeof options.write === 'function' ? options.write : (msg) => console.log(msg);
+  const launcherApi = options.launcher ? { ...launcher, ...options.launcher } : launcher;
 
   let lang = parsed.lang;
   if (lang === 'auto') {
@@ -426,19 +632,244 @@ async function startDashboardCli(argv = [], options = {}) {
     }
     lang = resolveLanguage(config, env);
   }
+  const isZh = lang === 'zh';
 
+  if (parsed.action === 'open') {
+    const running = await launcherApi.ensureBackgroundDashboard({
+      port: parsed.port,
+      host: LOOPBACK_HOST,
+      idleTimeoutSec: parsed.idleTimeoutSec,
+      lang,
+      noSync: parsed.noSync,
+      env,
+      homeDir,
+      execPath: options.execPath,
+      runtimeEntry: options.runtimeEntry,
+      spawn: options.spawn,
+      probeHealth: options.probeHealth,
+      waitTimeoutMs: options.waitTimeoutMs,
+      pollIntervalMs: options.pollIntervalMs,
+    });
+
+    if (parsed.open && options.open !== false && env.AGY_PULSE_NO_OPEN !== '1') {
+      launcherApi.openDashboardWindow(running.url, {
+        appMode: parsed.appMode,
+        platform,
+        env,
+        homeDir,
+        spawn: options.spawn,
+        existsSync: options.existsSync,
+        resolveExecutable: options.resolveExecutable,
+        fallbackOpenBrowser: options.fallbackOpenBrowser || openBrowser,
+      });
+    }
+
+    write(isZh
+      ? `agy-pulse 本地看板${running.reused ? '已在运行' : '已在后台启动'}: ${running.url} (PID ${running.pid || '?'})`
+      : `agy-pulse dashboard ${running.reused ? 'already running' : 'started in background'}: ${running.url} (PID ${running.pid || '?'})`);
+
+    return {
+      ...running,
+      action: 'open',
+    };
+  }
+
+  if (parsed.action === 'stop') {
+    const res = await launcherApi.stopBackgroundDashboard({
+      port: parsed.port,
+      host: LOOPBACK_HOST,
+      env,
+      homeDir,
+      probeHealth: options.probeHealth,
+      kill: options.kill,
+      waitTimeoutMs: options.waitTimeoutMs,
+      pollIntervalMs: options.pollIntervalMs,
+    });
+
+    if (res.stopped) {
+      write(isZh
+        ? `已停止 agy-pulse 后台看板 (PID ${res.pid}, ${res.url || `http://${LOOPBACK_HOST}:${res.port}`})`
+        : `Stopped background agy-pulse dashboard (PID ${res.pid}, ${res.url || `http://${LOOPBACK_HOST}:${res.port}`})`);
+    } else {
+      write(isZh
+        ? '未检测到正在运行的 agy-pulse 后台看板。'
+        : 'No running background agy-pulse dashboard found.');
+    }
+
+    return {
+      ...res,
+      action: 'stop',
+    };
+  }
+
+  if (parsed.action === 'status') {
+    const running = await launcherApi.findRunningDashboard({
+      port: parsed.port,
+      host: LOOPBACK_HOST,
+      env,
+      homeDir,
+      probeHealth: options.probeHealth,
+    });
+    const shortcut = launcherApi.getDesktopShortcutStatus({
+      platform,
+      env,
+      homeDir,
+    });
+
+    if (running) {
+      write(isZh
+        ? `看板状态: 运行中 | URL: ${running.url} | PID: ${running.pid || '?'}`
+        : `Dashboard: running | URL: ${running.url} | PID: ${running.pid || '?'}`);
+    } else {
+      write(isZh
+        ? '看板状态: 未运行'
+        : 'Dashboard: not running');
+    }
+
+    if (shortcut.installed) {
+      write(isZh
+        ? `桌面快捷方式: 已安装 (${shortcut.path})`
+        : `Desktop shortcut: installed (${shortcut.path})`);
+    } else {
+      write(isZh
+        ? '桌面快捷方式: 未安装'
+        : 'Desktop shortcut: not installed');
+    }
+
+    return {
+      action: 'status',
+      running,
+      shortcut,
+    };
+  }
+
+  if (parsed.action === 'install-shortcut') {
+    const res = launcherApi.installDesktopShortcut({
+      platform,
+      env,
+      homeDir,
+      execPath: options.execPath,
+      runtimeEntry: options.runtimeEntry,
+      includeDesktop: parsed.includeDesktop,
+      spawnSync: options.spawnSync,
+      port: parsed.port !== DEFAULT_DASHBOARD_PORT ? parsed.port : undefined,
+    });
+
+    write(isZh
+      ? `已安装 agy-pulse Dashboard 桌面快捷方式: ${res.primaryPath}`
+      : `Installed agy-pulse Dashboard desktop shortcut: ${res.primaryPath}`);
+    write(isZh
+      ? '现在可直接在系统应用菜单/桌面点击图标打开看板（空闲自动退出）。'
+      : 'You can now launch the dashboard directly from your app menu or desktop icon.');
+
+    return {
+      ...res,
+      action: 'install-shortcut',
+    };
+  }
+
+  if (parsed.action === 'uninstall-shortcut') {
+    const res = launcherApi.uninstallDesktopShortcut({
+      platform,
+      env,
+      homeDir,
+      spawnSync: options.spawnSync,
+    });
+
+    if (res.removed.length > 0) {
+      write(isZh
+        ? `已移除 agy-pulse Dashboard 快捷方式 (${res.removed.length} 项): ${res.removed.join(', ')}`
+        : `Removed agy-pulse Dashboard shortcut (${res.removed.length}): ${res.removed.join(', ')}`);
+    } else {
+      write(isZh
+        ? '未发现由 agy-pulse 创建的桌面快捷方式。'
+        : 'No agy-pulse Dashboard desktop shortcuts found to remove.');
+    }
+
+    return {
+      ...res,
+      action: 'uninstall-shortcut',
+    };
+  }
+
+  if (parsed.backgroundServe) {
+    const idleTimeoutMs = parsed.idleTimeoutSec * 1000;
+    const ownerPid = process.pid;
+    let closeServerFn = null;
+
+    const instance = createDashboardServer({
+      port: parsed.port,
+      host: LOOPBACK_HOST,
+      lang,
+      noSync: parsed.noSync,
+      deferInitialSync: true,
+      idleTimeoutMs,
+      autoSyncIntervalMs: options.autoSyncIntervalMs,
+      ledger: options.ledger,
+      ledgerOptions: options.ledgerOptions,
+      env,
+      onIdleClose: () => {
+        launcherApi.clearDashboardStateIfOwner(ownerPid, { env, homeDir });
+        if (typeof options.onIdleClose === 'function') {
+          options.onIdleClose();
+        }
+        if (options.exitOnIdle !== false && options.registerSignals !== false) {
+          process.exit(0);
+        }
+      },
+    });
+
+    const info = await instance.start();
+    launcherApi.writeDashboardState(
+      {
+        app: launcher.DASHBOARD_APP_ID,
+        pid: ownerPid,
+        port: info.port,
+        host: info.host,
+        url: info.url,
+        idleTimeoutMs,
+        startedAt: info.startedAt,
+      },
+      { env, homeDir }
+    );
+
+    closeServerFn = async () => {
+      launcherApi.clearDashboardStateIfOwner(ownerPid, { env, homeDir });
+      await instance.close();
+    };
+
+    if (options.registerSignals !== false) {
+      const shutdown = async () => {
+        await closeServerFn();
+        process.exit(0);
+      };
+      process.once('SIGINT', shutdown);
+      process.once('SIGTERM', shutdown);
+    }
+
+    return {
+      ...info,
+      pid: ownerPid,
+      backgroundServe: true,
+      close: closeServerFn,
+    };
+  }
+
+  const idleTimeoutMs = parsed.idleTimeoutSec > 0 ? parsed.idleTimeoutSec * 1000 : 0;
   const instance = createDashboardServer({
     port: parsed.port,
     host: LOOPBACK_HOST,
     lang,
     noSync: parsed.noSync,
+    idleTimeoutMs,
+    autoSyncIntervalMs: options.autoSyncIntervalMs,
     ledger: options.ledger,
     ledgerOptions: options.ledgerOptions,
     env,
+    onIdleClose: options.onIdleClose,
   });
 
   const info = await instance.start();
-  const isZh = lang === 'zh';
 
   if (info.syncStats && info.syncStats.ok !== false && !parsed.noSync) {
     const totalDbs = info.syncStats.totalDbs ?? 0;
@@ -454,7 +885,20 @@ async function startDashboardCli(argv = [], options = {}) {
     : `agy-pulse dashboard listening at ${info.url} (press Ctrl+C to stop)`);
 
   if (parsed.open && options.open !== false && env.AGY_PULSE_NO_OPEN !== '1') {
-    openBrowser(info.url, options.platform || process.platform, options.spawn || spawn);
+    if (parsed.appMode) {
+      launcherApi.openDashboardWindow(info.url, {
+        appMode: true,
+        platform,
+        env,
+        homeDir,
+        spawn: options.spawn,
+        existsSync: options.existsSync,
+        resolveExecutable: options.resolveExecutable,
+        fallbackOpenBrowser: options.fallbackOpenBrowser || openBrowser,
+      });
+    } else {
+      openBrowser(info.url, platform, options.spawn || spawn);
+    }
   }
 
   if (options.registerSignals !== false) {

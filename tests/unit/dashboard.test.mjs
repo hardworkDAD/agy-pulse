@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import { createRequire } from 'node:module';
@@ -13,6 +16,11 @@ const {
   openBrowser,
 } = require('../../runtime/dashboard.js');
 const { renderDashboardHtml } = require('../../runtime/dashboard-ui.js');
+const {
+  DASHBOARD_APP_ID,
+  DASHBOARD_ICON_SVG,
+  readDashboardState,
+} = require('../../runtime/dashboard-launcher.js');
 
 function createSampleQueryResult() {
   return {
@@ -185,45 +193,85 @@ function rawRequest({ port, method = 'GET', path = '/', headers = {} }) {
 }
 
 test('parseDashboardArgs parses defaults and flags accurately', () => {
-  assert.deepEqual(parseDashboardArgs([]), {
+  assert.deepEqual(parseDashboardArgs([], {}), {
     port: DEFAULT_DASHBOARD_PORT,
     open: true,
     host: '127.0.0.1',
     lang: 'auto',
     noSync: false,
+    action: 'serve',
+    appMode: false,
+    backgroundServe: false,
+    idleTimeoutSec: 0,
+    includeDesktop: false,
   });
 
   assert.deepEqual(
-    parseDashboardArgs(['--dashboard', '--port', '4123', '--no-open', '--no-sync', '--lang', 'zh']),
+    parseDashboardArgs(['--dashboard', '--port', '4123', '--no-open', '--no-sync', '--lang', 'zh'], {}),
     {
       port: 4123,
       open: false,
       host: '127.0.0.1',
       lang: 'zh',
       noSync: true,
+      action: 'serve',
+      appMode: false,
+      backgroundServe: false,
+      idleTimeoutSec: 0,
+      includeDesktop: false,
     }
   );
 
   assert.deepEqual(
-    parseDashboardArgs(['-p', '0', '--lang=en']),
+    parseDashboardArgs(['-p', '0', '--lang=en'], {}),
     {
       port: 0,
       open: true,
       host: '127.0.0.1',
       lang: 'en',
       noSync: false,
+      action: 'serve',
+      appMode: false,
+      backgroundServe: false,
+      idleTimeoutSec: 0,
+      includeDesktop: false,
     }
   );
 
-  assert.equal(parseDashboardArgs(['--port=invalid']).port, DEFAULT_DASHBOARD_PORT);
-  assert.equal(parseDashboardArgs(['--port', '70000']).port, DEFAULT_DASHBOARD_PORT);
+  assert.equal(parseDashboardArgs(['--port=invalid'], {}).port, DEFAULT_DASHBOARD_PORT);
+  assert.equal(parseDashboardArgs(['--port', '70000'], {}).port, DEFAULT_DASHBOARD_PORT);
 
   assert.deepEqual(
-    parseDashboardArgs(['dashboard', '--port', '4123', '--no-open', '--no-sync', '--lang', 'zh']),
-    parseDashboardArgs(['--dashboard', '--port', '4123', '--no-open', '--no-sync', '--lang', 'zh'])
+    parseDashboardArgs(['dashboard', '--port', '4123', '--no-open', '--no-sync', '--lang', 'zh'], {}),
+    parseDashboardArgs(['--dashboard', '--port', '4123', '--no-open', '--no-sync', '--lang', 'zh'], {})
   );
-  assert.deepEqual(parseDashboardArgs(['dash', '-p', '0']), parseDashboardArgs(['--dashboard', '-p', '0']));
-  assert.deepEqual(parseDashboardArgs(['ui', '--lang=en']), parseDashboardArgs(['--dashboard', '--lang=en']));
+  assert.deepEqual(parseDashboardArgs(['dash', '-p', '0'], {}), parseDashboardArgs(['--dashboard', '-p', '0'], {}));
+  assert.deepEqual(parseDashboardArgs(['ui', '--lang=en'], {}), parseDashboardArgs(['--dashboard', '--lang=en'], {}));
+
+  // Subcommands and launcher flags
+  assert.deepEqual(parseDashboardArgs(['open'], {}), {
+    port: DEFAULT_DASHBOARD_PORT,
+    open: true,
+    host: '127.0.0.1',
+    lang: 'auto',
+    noSync: false,
+    action: 'open',
+    appMode: true,
+    backgroundServe: false,
+    idleTimeoutSec: 600,
+    includeDesktop: false,
+  });
+  assert.equal(parseDashboardArgs(['open', '--browser'], {}).appMode, false);
+  assert.equal(parseDashboardArgs(['serve', '--app'], {}).appMode, true);
+  assert.equal(parseDashboardArgs(['open'], { AGY_PULSE_DASHBOARD_IDLE_SEC: '180' }).idleTimeoutSec, 180);
+  assert.equal(parseDashboardArgs(['open', '--idle-timeout', '45'], { AGY_PULSE_DASHBOARD_IDLE_SEC: '180' }).idleTimeoutSec, 45);
+  assert.equal(parseDashboardArgs(['--serve-background', '--idle-timeout=90'], {}).backgroundServe, true);
+  assert.equal(parseDashboardArgs(['--serve-background', '--idle-timeout=90'], {}).idleTimeoutSec, 90);
+  assert.equal(parseDashboardArgs(['stop'], {}).action, 'stop');
+  assert.equal(parseDashboardArgs(['status'], {}).action, 'status');
+  assert.equal(parseDashboardArgs(['install-app', '--desktop'], {}).action, 'install-shortcut');
+  assert.equal(parseDashboardArgs(['install-app', '--desktop'], {}).includeDesktop, true);
+  assert.equal(parseDashboardArgs(['uninstall-app'], {}).action, 'uninstall-shortcut');
 });
 
 test('renderDashboardHtml outputs self-contained zero-CDN bilingual HTML with XSS protection', () => {
@@ -277,6 +325,10 @@ test('renderDashboardHtml outputs self-contained zero-CDN bilingual HTML with XS
   assert.ok(enHtml.includes('badge-source-ide'));
   assert.ok(enHtml.includes('badge-source-cli'));
   assert.ok(enHtml.includes('s.source'));
+  assert.ok(enHtml.includes('<link rel="icon" type="image/svg+xml" href="/icon.svg">'));
+  assert.ok(enHtml.includes('<link rel="manifest" href="/manifest.webmanifest">'));
+  assert.ok(enHtml.includes('/api/ping'));
+  assert.ok(enHtml.includes('visibilitychange'));
 });
 
 test('createDashboardServer rejects non-loopback host binding', () => {
@@ -513,4 +565,200 @@ test('startDashboardCli syncs, prints localized banner, and openBrowser dispatch
 
   // openBrowser failure is silently tolerated
   assert.equal(openBrowser('http://127.0.0.1:3789', 'linux', () => { throw new Error('boom'); }), false);
+});
+
+test('createDashboardServer serves health, ping, icon.svg, manifest.webmanifest, deferred auto-sync, and idle timeout', async () => {
+  const { calls, ledger } = createMockLedger();
+  let idleClosed = false;
+  const dashboard = createDashboardServer({
+    port: 0,
+    deferInitialSync: true,
+    autoSyncIntervalMs: 10000,
+    idleTimeoutMs: 120,
+    ledger,
+    onIdleClose: () => {
+      idleClosed = true;
+    },
+  });
+
+  const info = await dashboard.start();
+  try {
+    // deferInitialSync skips sync in start()
+    assert.equal(calls.sync.length, 0);
+    const validHost = `127.0.0.1:${info.port}`;
+
+    // /api/health returns app identity and rejects invalid Host
+    const healthRes = await rawRequest({ port: info.port, path: '/api/health', headers: { Host: validHost } });
+    assert.equal(healthRes.statusCode, 200);
+    const healthJson = JSON.parse(healthRes.body);
+    assert.equal(healthJson.ok, true);
+    assert.equal(healthJson.app, DASHBOARD_APP_ID);
+    assert.equal(healthJson.pid, process.pid);
+    assert.equal(healthJson.port, info.port);
+    assert.equal(healthJson.idleTimeoutMs, 120);
+
+    const badHealthHost = await rawRequest({ port: info.port, path: '/api/health', headers: { Host: `evil:${info.port}` } });
+    assert.equal(badHealthHost.statusCode, 403);
+
+    // /icon.svg & /manifest.webmanifest
+    const iconRes = await rawRequest({ port: info.port, path: '/icon.svg', headers: { Host: validHost } });
+    assert.equal(iconRes.statusCode, 200);
+    assert.equal(iconRes.headers['content-type'], 'image/svg+xml; charset=utf-8');
+    assert.equal(iconRes.body, DASHBOARD_ICON_SVG);
+
+    const manifestRes = await rawRequest({ port: info.port, path: '/manifest.webmanifest', headers: { Host: validHost } });
+    assert.equal(manifestRes.statusCode, 200);
+    assert.equal(manifestRes.headers['content-type'], 'application/manifest+json; charset=utf-8');
+    const manifestJson = JSON.parse(manifestRes.body);
+    assert.equal(manifestJson.display, 'standalone');
+    assert.equal(manifestJson.icons[0].src, '/icon.svg');
+
+    // First /api/overview triggers auto-sync once, second immediate call within interval does not
+    const ov1 = await rawRequest({ port: info.port, path: '/api/overview', headers: { Host: validHost } });
+    assert.equal(ov1.statusCode, 200);
+    assert.equal(calls.sync.length, 1);
+
+    const ov2 = await rawRequest({ port: info.port, path: '/api/overview', headers: { Host: validHost } });
+    assert.equal(ov2.statusCode, 200);
+    assert.equal(calls.sync.length, 1);
+
+    // /api/ping validates origin and refreshes idle timer
+    const pingBadOrigin = await rawRequest({
+      port: info.port,
+      method: 'POST',
+      path: '/api/ping',
+      headers: { Host: validHost, Origin: 'https://evil.example' },
+    });
+    assert.equal(pingBadOrigin.statusCode, 403);
+
+    const pingOk = await rawRequest({
+      port: info.port,
+      method: 'POST',
+      path: '/api/ping',
+      headers: { Host: validHost, Origin: `http://127.0.0.1:${info.port}` },
+    });
+    assert.equal(pingOk.statusCode, 200);
+    assert.equal(JSON.parse(pingOk.body).active, true);
+
+    // Keep querying /api/health every 30ms for 180ms: /api/health must NOT reset idle timer, so server closes
+    const deadline = Date.now() + 800;
+    while (!idleClosed && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 30));
+      try {
+        await rawRequest({ port: info.port, path: '/api/health', headers: { Host: validHost } });
+      } catch {
+        // expected once closed
+      }
+    }
+    assert.equal(idleClosed, true);
+  } finally {
+    await dashboard.close();
+  }
+});
+
+test('startDashboardCli dispatches open, stop, status, install-shortcut, uninstall-shortcut, and --serve-background', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-pulse-cli-dash-'));
+  const env = { AGY_PULSE_DATA_DIR: tmpDir, XDG_DATA_HOME: path.join(tmpDir, 'xdg') };
+
+  try {
+    // 1. open action
+    const openLogs = [];
+    let openedWindow = null;
+    const openRes = await startDashboardCli(['open', '--port', '4105', '--lang', 'en'], {
+      env,
+      homeDir: tmpDir,
+      platform: 'linux',
+      write: (l) => openLogs.push(l),
+      launcher: {
+        ensureBackgroundDashboard: async (opts) => ({
+          alive: true,
+          reused: false,
+          url: `http://127.0.0.1:${opts.port}`,
+          port: opts.port,
+          pid: 9876,
+        }),
+        openDashboardWindow: (url, opts) => {
+          openedWindow = { url, appMode: opts.appMode };
+          return { ok: true, mode: 'app', browser: 'chromium' };
+        },
+      },
+    });
+    assert.equal(openRes.action, 'open');
+    assert.equal(openRes.pid, 9876);
+    assert.deepEqual(openedWindow, { url: 'http://127.0.0.1:4105', appMode: true });
+    assert.ok(openLogs.some((l) => l.includes('http://127.0.0.1:4105')));
+
+    // 2. install-shortcut -> status -> uninstall-shortcut
+    const installLogs = [];
+    const installRes = await startDashboardCli(['install-shortcut', '--lang', 'en'], {
+      env,
+      homeDir: tmpDir,
+      platform: 'linux',
+      execPath: '/usr/bin/node',
+      runtimeEntry: '/app/agy-pulse.js',
+      write: (l) => installLogs.push(l),
+    });
+    assert.equal(installRes.action, 'install-shortcut');
+    assert.equal(installRes.installed, true);
+
+    const statusLogs = [];
+    const statusRes = await startDashboardCli(['status', '--lang', 'en'], {
+      env,
+      homeDir: tmpDir,
+      platform: 'linux',
+      probeHealth: async () => ({ alive: false, occupiedByOther: false }),
+      write: (l) => statusLogs.push(l),
+    });
+    assert.equal(statusRes.action, 'status');
+    assert.equal(statusRes.shortcut.installed, true);
+    assert.ok(statusLogs.some((l) => l.includes('installed')));
+
+    const uninstallLogs = [];
+    const uninstallRes = await startDashboardCli(['uninstall-shortcut', '--lang', 'en'], {
+      env,
+      homeDir: tmpDir,
+      platform: 'linux',
+      write: (l) => uninstallLogs.push(l),
+    });
+    assert.equal(uninstallRes.action, 'uninstall-shortcut');
+    assert.ok(uninstallRes.removed.length >= 1);
+
+    // 3. stop action
+    const stopLogs = [];
+    const stopRes = await startDashboardCli(['stop', '--lang', 'zh'], {
+      env,
+      homeDir: tmpDir,
+      write: (l) => stopLogs.push(l),
+      launcher: {
+        stopBackgroundDashboard: async () => ({ stopped: true, pid: 9876, port: 4105, url: 'http://127.0.0.1:4105' }),
+      },
+    });
+    assert.equal(stopRes.action, 'stop');
+    assert.equal(stopRes.stopped, true);
+    assert.ok(stopLogs.some((l) => l.includes('9876')));
+
+    // 4. --serve-background writes state file and cleans up on close()
+    const { calls, ledger } = createMockLedger();
+    const bgRes = await startDashboardCli(['--serve-background', '--port', '0', '--idle-timeout', '30'], {
+      env,
+      homeDir: tmpDir,
+      ledger,
+      registerSignals: false,
+      exitOnIdle: false,
+      write: () => {},
+    });
+    try {
+      assert.equal(bgRes.backgroundServe, true);
+      assert.equal(calls.sync.length, 0);
+      const state = readDashboardState({ env, homeDir: tmpDir });
+      assert.equal(state.pid, process.pid);
+      assert.equal(state.port, bgRes.port);
+      assert.equal(state.idleTimeoutMs, 30000);
+    } finally {
+      await bgRes.close();
+    }
+    assert.equal(readDashboardState({ env, homeDir: tmpDir }), null);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
