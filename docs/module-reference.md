@@ -71,10 +71,10 @@ Exports:
 - `formatCycleModeSegment(cycleMode, { bold, reset })` — formats `agyData.cycle_mode` with theme-independent fixed semantic ANSI colors (`auto` → yellow, `accept-edits` → green, `plan` → bright blue `\x1b[94m`, `bestn` → `best-of-n` magenta, unknown non-empty → sanitized 24-char cyan) and preserves the badge immediately after `planSeg` on Line 1 ahead of narrow-terminal degradation steps when `display.showCycleMode !== false`.
 
 ### `runtime/speed.js`
-- `getOutputSpeed(agyData, rootDir, state, now)` — single-turn output `tok/s` calculator with 500ms–120s active-turn latching.
+- `getOutputSpeed(agyData, rootDir, state, now)` — calculates output `tok/s` from paired deltas of the host's cumulative output and API time counters, or the output and timing of one planner response. An open response uses a 500ms–120s sampling window.
 - `formatTtft(ttftSec, lang)` — formats TTFT as `<N>ms` when `<1s` and `<N.N>s` when `>=1s` (`ttft` in `en`, `首字` in `zh`).
 - `formatChildModelSpeeds(childModelSpeeds, options)` — formats child/non-main model badges, enriching with `modelPerf[model]` (`avgSpeed` + `avgTtftSec`) when available (`⚡ Hydro: X.X tok/s (首字 Y.Ys)` / `[sub] Hydro: X.X tok/s (ttft Y.Ys)`).
-- `renderer.js` Line 1 prioritizes `state.modelPerf[mainModelKey].avgSpeed` (falling back to single-turn `outputSpeed`), appends `(${formatTtft(avgTtftSec, lang)})`, merges `state.childModelSpeeds` with non-main `state.modelPerf` entries (sorted by `lastUpdatedMs` descending, capped at `MAX_CHILD_MODELS_DISPLAY = 3`) when `showSpeed` is enabled, and hides both main and child model speeds/TTFT when idle beyond `modelSpeedExpireTurns` (default `30`) or `modelSpeedExpireMinutes` (default `5`).
+- `renderer.js` Line 1 prioritizes `state.modelPerf[mainModelKey].avgSpeed` (falling back to `outputSpeed`), appends `(${formatTtft(avgTtftSec, lang)})`, merges `state.childModelSpeeds` with non-main `state.modelPerf` entries (sorted by `lastUpdatedMs` descending, capped at `MAX_CHILD_MODELS_DISPLAY = 3`) when `showSpeed` is enabled, and hides both main and child model speeds/TTFT when idle beyond `modelSpeedExpireTurns` (default `30`) or `modelSpeedExpireMinutes` (default `5`).
 
 ### `runtime/renderer/context-monitor.js`
 - `formatMonitorTokens(n)` — base-1000 uppercase `K`/`M` formatter.

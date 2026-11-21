@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { createHash } = require('crypto');
 const { resolveAntigravityPath } = require('./paths.js');
-const { sanitizeTerminalText, compactModelName } = require('./renderer/format.js');
+const { sanitizeTerminalText } = require('./renderer/format.js');
 
 // Below 500ms API time a rate is mostly noise
 const MIN_API_DELTA_MS = 500;
@@ -12,6 +12,7 @@ const MIN_API_DELTA_MS = 500;
 const MAX_OPEN_TURN_TRAILING_MS = 120000;
 const MAX_FIRST_TURN_TRAILING_MS = MAX_OPEN_TURN_TRAILING_MS;
 const MAX_SPEED_CACHE_FILES = 32;
+const SPEED_CACHE_VERSION = 1;
 const MAX_CHILD_MODELS_DISPLAY = 3;
 const MAX_VALID_SPEED = 5000;
 
@@ -61,21 +62,10 @@ function pruneSpeedCacheDir(dirPath, maxFiles = MAX_SPEED_CACHE_FILES) {
 function readState(file) {
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const speed = raw.speed ?? null;
-    if (!isCount(raw.apiDurationMs) || typeof raw.usageKey !== 'string' || (speed !== null && !isValidSpeed(speed))) {
+    if (raw?.version !== SPEED_CACHE_VERSION || (raw.speed !== null && !isValidSpeed(raw.speed))) {
       return null;
     }
-    return {
-      apiDurationMs: raw.apiDurationMs,
-      usageKey: raw.usageKey,
-      modelKey: typeof raw.modelKey === 'string' && raw.modelKey.trim() ? raw.modelKey.trim() : null,
-      speed,
-      totalOutput: isCount(raw.totalOutput) ? raw.totalOutput : null,
-      plannerStartMs: isCount(raw.plannerStartMs) ? raw.plannerStartMs : null,
-      plannerEndMs: isCount(raw.plannerEndMs) ? raw.plannerEndMs : null,
-      turnBaselineOutput: isCount(raw.turnBaselineOutput) ? raw.turnBaselineOutput : null,
-      pending: Boolean(raw.pending),
-    };
+    return raw;
   } catch {
     return null;
   }
@@ -87,7 +77,7 @@ function writeState(file, state) {
     const dir = path.dirname(file);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify({ version: SPEED_CACHE_VERSION, ...state }), { mode: 0o600 });
     fs.renameSync(tmp, file);
     tmp = null;
     pruneSpeedCacheDir(dir, MAX_SPEED_CACHE_FILES);
@@ -101,19 +91,64 @@ function writeState(file, state) {
   }
 }
 
-function resolveTurnTokens(hasPerTurnOutput, turnOutput, totalOutput, turnBaselineOutput) {
-  if (hasPerTurnOutput) {
-    return turnOutput;
+function sampleApiSpeed(file, previous, modelKey, apiDurationMs, totalOutput) {
+  let speed = null;
+  if (
+    previous?.source === 'api' && previous.modelKey === modelKey &&
+    isCount(previous.apiDurationMs) && isCount(previous.totalOutput)
+  ) {
+    const deltaMs = apiDurationMs - previous.apiDurationMs;
+    const deltaTokens = totalOutput - previous.totalOutput;
+    if (deltaMs === 0 && deltaTokens === 0) return previous.speed;
+    if (deltaMs >= MIN_API_DELTA_MS && deltaTokens > 0) {
+      const rate = deltaTokens / (deltaMs / 1000);
+      if (isValidSpeed(rate)) speed = rate;
+    }
   }
-  if (totalOutput !== null && isCount(turnBaselineOutput) && totalOutput >= turnBaselineOutput) {
-    return totalOutput - turnBaselineOutput;
+
+  // After a one-sided update or reset, start from the new paired snapshot.
+  writeState(file, { source: 'api', modelKey, speed, apiDurationMs, totalOutput });
+  return speed;
+}
+
+function samplePlannerSpeed(file, previous, modelKey, planner, now) {
+  const plannerStartMs = planner.startMs;
+  const plannerEndMs = isCount(planner.endMs) ? planner.endMs : null;
+  const plannerOutputTokens = isCount(planner.outputTokens) ? planner.outputTokens : null;
+  const sameModel = previous?.source === 'transcript' && previous.modelKey === modelKey;
+  const sameResponse = previous?.source === 'transcript' && previous.plannerStartMs === plannerStartMs;
+  // A model change can arrive before the next response appears in the transcript.
+  if (sameResponse && !sameModel) return null;
+  const sameSample = sameResponse &&
+    previous.plannerEndMs === plannerEndMs && previous.plannerOutputTokens === plannerOutputTokens;
+  if (sameSample && previous.pending === false) return previous.speed;
+
+  const isOpen = plannerEndMs === null;
+  const durationMs = (plannerEndMs ?? now) - plannerStartMs;
+  const expired = isOpen && (planner.interrupted === true || durationMs > MAX_OPEN_TURN_TRAILING_MS);
+  let speed = null;
+  let pending = false;
+  if (plannerOutputTokens > 0) {
+    const tooShort = durationMs < MIN_API_DELTA_MS;
+    if (expired || (isOpen && tooShort)) {
+      speed = sameModel ? previous.speed : null;
+    } else if (!tooShort) {
+      const rate = plannerOutputTokens / (durationMs / 1000);
+      if (isValidSpeed(rate)) speed = rate;
+    }
+    pending = isOpen && !expired && (tooShort || speed === null);
   }
-  return 0;
+
+  if (sameSample && previous.speed === speed && previous.pending === pending) return speed;
+  writeState(file, {
+    source: 'transcript', modelKey, speed, plannerStartMs, plannerEndMs, plannerOutputTokens, pending,
+  });
+  return speed;
 }
 
 /**
- * Calculates output token speed (tokens / second) for the finished response.
- * Follows claude-hud contract and holds the reading until the next response.
+ * Calculates output token speed from paired cumulative API counters or a
+ * single timed planner response.
  *
  * @param {Object} agyData
  * @param {string} [rootDir]
@@ -123,211 +158,30 @@ function resolveTurnTokens(hasPerTurnOutput, turnOutput, totalOutput, turnBaseli
  */
 function getOutputSpeed(agyData, rootDir = null, state = null, now = Date.now()) {
   const transcriptPath = (agyData?.transcript_path || state?.transcriptPath || agyData?.session_id || '')?.trim();
-  const usage = agyData?.context_window?.current_usage || agyData?.context_window || state?.usage?.current_usage || state?.usage;
-  const turnOutput = isCount(usage?.output_tokens) ? usage.output_tokens : null;
-  const totalOutput = isCount(agyData?.context_window?.total_output_tokens)
-    ? agyData.context_window.total_output_tokens
-    : (isCount(state?.usage?.total_output_tokens)
-      ? state.usage.total_output_tokens
-      : (isCount(state?.totalOutputTokens) ? state.totalOutputTokens : null));
-  const hasPerTurnOutput = turnOutput !== null;
-  const output = turnOutput ?? totalOutput;
+  if (!transcriptPath) return null;
 
-  const nativeApiDurationMs = (
-    agyData?.cost?.total_api_duration_ms ??
-    agyData?.cost?.total_duration_ms ??
-    agyData?.total_api_duration_ms
-  );
-  const hasNativeDuration = isCount(nativeApiDurationMs);
-  const planner = !hasNativeDuration ? state?.lastPlannerResponse : null;
-  const apiDurationMs = hasNativeDuration ? nativeApiDurationMs : state?.totalApiDurationMs;
-
-  if (!transcriptPath || !usage || !isCount(output)) {
-    return null;
-  }
-
-  const file = getSpeedCachePath(rootDir, transcriptPath);
-  const usageKey = [
-    usage.input_tokens ?? 0,
-    output,
-    usage.cache_creation_input_tokens ?? 0,
-    usage.cache_read_input_tokens ?? 0,
-    totalOutput ?? '',
-  ].join(':');
-
-  const previous = readState(file);
-  const rawModel = (
-    agyData?.model?.display_name ||
+  const modelKey = String(
     agyData?.model?.id ||
+    agyData?.model?.display_name ||
     (typeof agyData?.model === 'string' ? agyData.model : '') ||
     state?.lastTurnUsage?.model ||
     ''
-  );
-  const modelKey = rawModel ? (compactModelName(rawModel) || String(rawModel).trim()) : null;
-  const isModelChanged = Boolean(previous?.modelKey && modelKey && previous.modelKey !== modelKey);
-
-  // Path A: Transcript-derived per-response timing from agy PLANNER_RESPONSE steps
-  if (planner && isCount(planner.startMs)) {
-    const isFreshOrLegacy = !previous || previous.plannerStartMs === null;
-    const hasPendingFirstTurn = Boolean(previous && previous.pending && previous.speed === null);
-    const hasClosedTurn = isCount(planner.endMs) && planner.endMs >= planner.startMs;
-    const plannerEndMs = isCount(planner.endMs) ? planner.endMs : null;
-    const trailingMs = !hasClosedTurn && now >= planner.startMs ? now - planner.startMs : 0;
-    const isSamePlannerTurn = Boolean(
-      previous && previous.plannerStartMs !== null && planner.startMs === previous.plannerStartMs
-    );
-    const isCounterReset = Boolean(
-      !hasPerTurnOutput && totalOutput !== null && isCount(previous?.totalOutput) && totalOutput < previous.totalOutput
-    );
-
-    let turnBaselineOutput;
-    if (isCounterReset) {
-      turnBaselineOutput = 0;
-    } else if (isSamePlannerTurn) {
-      turnBaselineOutput = previous.turnBaselineOutput === null ? 0 : previous.turnBaselineOutput;
-    } else if (isFreshOrLegacy) {
-      turnBaselineOutput = 0;
-    } else {
-      turnBaselineOutput = isCount(previous.totalOutput) ? previous.totalOutput : null;
-    }
-
-    const baseState = {
-      apiDurationMs: isCount(apiDurationMs) ? apiDurationMs : 0,
-      usageKey,
-      modelKey,
-      totalOutput,
-      plannerStartMs: planner.startMs,
-      plannerEndMs,
-      turnBaselineOutput,
-    };
-
-    if (!hasClosedTurn && (planner.interrupted === true || trailingMs > MAX_OPEN_TURN_TRAILING_MS)) {
-      const fallbackSpeed = (isFreshOrLegacy || isCounterReset || isModelChanged) ? null : previous.speed;
-      if (
-        !isFreshOrLegacy &&
-        !isCounterReset &&
-        !isModelChanged &&
-        previous.pending === false &&
-        previous.usageKey === usageKey &&
-        previous.plannerStartMs === planner.startMs &&
-        previous.plannerEndMs === null
-      ) {
-        return fallbackSpeed;
-      }
-      writeState(file, { ...baseState, speed: fallbackSpeed, pending: false });
-      return fallbackSpeed;
-    }
-
-    const hasActiveFirstTurn = (
-      (!previous || hasPendingFirstTurn) &&
-      !hasClosedTurn &&
-      trailingMs >= MIN_API_DELTA_MS &&
-      trailingMs <= MAX_OPEN_TURN_TRAILING_MS
-    );
-    const resetRequired = (
-      ((isFreshOrLegacy || hasPendingFirstTurn) && !hasClosedTurn && !hasActiveFirstTurn) ||
-      isCounterReset
-    );
-    if (resetRequired) {
-      writeState(file, { ...baseState, speed: null, pending: true });
-      return null;
-    }
-
-    if (
-      !isFreshOrLegacy &&
-      !isModelChanged &&
-      !previous.pending &&
-      previous.speed !== null &&
-      (previous.plannerEndMs !== null || plannerEndMs === null) &&
-      usageKey === previous.usageKey &&
-      planner.startMs === previous.plannerStartMs
-    ) {
-      return previous.speed;
-    }
-
-    const turnTokens = resolveTurnTokens(
-      hasPerTurnOutput,
-      turnOutput,
-      totalOutput,
-      turnBaselineOutput
-    );
-    const durationMs = hasClosedTurn
-      ? planner.endMs - planner.startMs
-      : (now >= planner.startMs ? now - planner.startMs : 0);
-    const tokensAligned = (
-      planner.outputTokens === null ||
-      Math.abs(turnTokens - planner.outputTokens) <= Math.max(5, Math.round(turnTokens * 0.05))
-    );
-    const fallbackSpeed = (isFreshOrLegacy || isModelChanged) ? null : previous.speed;
-    const rawComputedSpeed = tokensAligned && turnTokens > 0 && durationMs >= MIN_API_DELTA_MS
-      ? turnTokens / (durationMs / 1000)
-      : null;
-    const speed = isValidSpeed(rawComputedSpeed) ? rawComputedSpeed : fallbackSpeed;
-
-    const pending = Boolean(durationMs < MIN_API_DELTA_MS || speed === null);
-    writeState(file, { ...baseState, speed, pending });
-    return speed;
+  ).trim().toLowerCase();
+  const file = getSpeedCachePath(rootDir, transcriptPath);
+  const previous = readState(file);
+  const apiDurationMs = [agyData?.cost?.total_api_duration_ms, agyData?.total_api_duration_ms].find(isCount);
+  const totalOutput = agyData?.context_window?.total_output_tokens;
+  if (isCount(apiDurationMs) && isCount(totalOutput)) {
+    return sampleApiSpeed(file, previous, modelKey, apiDurationMs, totalOutput);
   }
 
-  // Path B: Cumulative API duration (native agyData.cost or legacy state.totalApiDurationMs)
-  if (!isCount(apiDurationMs)) {
-    return null;
+  const planner = state?.lastPlannerResponse;
+  if (isCount(planner?.startMs)) {
+    return samplePlannerSpeed(file, previous, modelKey, planner, now);
   }
 
-  const resetRequired = (
-    !previous ||
-    apiDurationMs < previous.apiDurationMs ||
-    (!hasPerTurnOutput && totalOutput !== null && previous.totalOutput !== null && totalOutput < previous.totalOutput)
-  );
-  if (resetRequired) {
-    writeState(file, {
-      apiDurationMs,
-      usageKey,
-      modelKey,
-      speed: null,
-      totalOutput,
-      plannerStartMs: null,
-      turnBaselineOutput: null,
-    });
-    return null;
-  }
-
-  if (apiDurationMs === previous.apiDurationMs) {
-    if (isModelChanged) {
-      writeState(file, {
-        apiDurationMs,
-        usageKey,
-        modelKey,
-        speed: null,
-        totalOutput,
-        plannerStartMs: null,
-        turnBaselineOutput: null,
-      });
-      return null;
-    }
-    return previous.speed;
-  }
-
-  const deltaMs = apiDurationMs - previous.apiDurationMs;
-  const pathBBaseline = isCount(previous.totalOutput) ? previous.totalOutput : null;
-  const turnTokens = resolveTurnTokens(hasPerTurnOutput, turnOutput, totalOutput, pathBBaseline);
-  const isNewResponse = usageKey !== previous.usageKey && turnTokens > 0;
-  const rawComputedSpeed = isNewResponse && deltaMs >= MIN_API_DELTA_MS
-    ? turnTokens / (deltaMs / 1000)
-    : null;
-  const fallbackSpeed = isModelChanged ? null : previous.speed;
-  const speed = isValidSpeed(rawComputedSpeed) ? rawComputedSpeed : fallbackSpeed;
-
-  writeState(file, {
-    apiDurationMs,
-    usageKey,
-    modelKey,
-    speed,
-    totalOutput,
-    plannerStartMs: null,
-    turnBaselineOutput: null,
-  });
-  return speed;
+  if (previous?.source) writeState(file, { modelKey, speed: null });
+  return null;
 }
 
 /**

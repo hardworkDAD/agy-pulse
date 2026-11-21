@@ -121,6 +121,7 @@ function buildGenMetadataBlob({
     if (e.rawModel) f1Parts.push(encodeStringField(19, e.rawModel));
 
     const usageParts = [];
+    if (e.systemPromptTokens) usageParts.push(encodeVarintField(1, e.systemPromptTokens));
     if (e.inputTokens) usageParts.push(encodeVarintField(2, e.inputTokens));
     if (e.outputTokens) usageParts.push(encodeVarintField(3, e.outputTokens));
     if (e.cacheReadTokens) usageParts.push(encodeVarintField(5, e.cacheReadTokens));
@@ -693,6 +694,96 @@ test('filters out 0-token ghost steps (e.g. MODEL_UNSPECIFIED) at ingestion and 
   assert.equal(res.byModel.length, 1);
   assert.equal(res.byModel[0].model, 'Carbon');
 });
+
+for (const forceJson of [false, true]) {
+  test(`backfills system prompt tokens in the ${forceJson ? 'JSON' : 'SQLite'} ledger`, () => {
+    const options = { roots: [tempDir], forceJson, now: new Date(2026, 10, 20, 14).getTime() };
+    const { now } = options;
+    const liveDbPath = path.join(tempDir, 'conversations', 'live.db');
+    const archiveDbPath = path.join(tempDir, 'conversations', 'archive.db');
+    const trajectoryBlob = buildTrajectoryMetaBlob({ createdAtMs: now - 1000 });
+    const generation = (idx, entries) => ({ idx, data: buildGenMetadataBlob({ entries }) });
+    const hydro = 'Gemini 4 Hydrogen (High)';
+    const legacy = { displayName: hydro, inputTokens: 200, outputTokens: 100 };
+    const regular = { displayName: hydro, inputTokens: 3000, cacheReadTokens: 10000, outputTokens: 1000 };
+    createConvDb(liveDbPath, { trajectoryBlob, genRows: [generation(1, [regular]), generation(2, [legacy])] });
+    createConvDb(archiveDbPath, { trajectoryBlob, genRows: [generation(1, [legacy])] });
+    const initialSync = syncAllConversationsToLedger(options);
+    assert.equal(initialSync.stepsUpserted, 3);
+    const { ledgerPath } = initialSync;
+
+    const source = new DatabaseSync(liveDbPath);
+    try {
+      const updated = generation(1, [
+        { displayName: 'Gemini 4 Carbon (High)', systemPromptTokens: 400 },
+        { ...regular, systemPromptTokens: 2000 },
+      ]);
+      source.prepare('UPDATE gen_metadata SET data = ? WHERE idx = ?').run(updated.data, updated.idx);
+    } finally {
+      source.close();
+    }
+    fs.unlinkSync(archiveDbPath);
+
+    // Recreate a ledger written by the old decoder after the source already had system prompts.
+    const stat = fs.statSync(liveDbPath);
+    const legacySig = `${stat.size}:${Math.trunc(stat.mtimeMs)}:0:0`;
+    if (forceJson) {
+      const disk = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+      disk.ingestedDbs.live.sig = legacySig;
+      fs.writeFileSync(ledgerPath, JSON.stringify(disk));
+    } else {
+      const disk = new DatabaseSync(ledgerPath);
+      try {
+        disk.prepare('UPDATE ingested_dbs SET sig = ? WHERE conversation_id = ?').run(legacySig, 'live');
+      } finally {
+        disk.close();
+      }
+    }
+
+    // Let the in-memory throttle expire so the upgrade checks the persisted signature.
+    const upgradeOptions = { ...options, now: now + SYNC_THROTTLE_MS };
+    const upgrade = forceJson
+      ? syncSingleConversationToLedger('live', upgradeOptions)
+      : syncAllConversationsToLedger(upgradeOptions);
+    assert.equal(upgrade.ok, true);
+    assert.equal(upgrade.stepsUpserted, 3);
+
+    const filter = { range: 'today', now: upgradeOptions.now };
+    const result = queryLedger(filter, options);
+    assert.equal(result.summary.totalSteps, 4);
+    assert.equal(result.summary.inputTokens, 5800);
+    assert.equal(result.summary.cacheReadTokens, 10000);
+    assert.equal(result.summary.outputTokens, 1200);
+    assert.equal(result.summary.totalTokens, 17000);
+    assert.ok(Math.abs(result.summary.cacheHitRate - 10000 / 15800 * 100) < 1e-9);
+    assert.ok(Math.abs(result.summary.totalCostUsd - 0.01865) < 1e-9);
+    assert.equal(result.sessions.find(s => s.rootConversationId === 'archive')?.inputTokens, 200);
+    assert.match(formatLedgerCsv(result, { kind: 'models' }), /^Hydro,0\.01785,95\.71,3,5400,10000,/m);
+
+    const activeSteps = forceJson
+      ? Object.values(JSON.parse(fs.readFileSync(ledgerPath, 'utf8')).steps)
+        .filter(step => step.conversationId === 'live' && step.genIdx === 1)
+        .map(({ entryIdx, model }) => [entryIdx, model])
+      : readActiveGenerationSteps(ledgerPath);
+    assert.deepEqual(activeSteps, [[0, 'Hydro'], [1, 'Carbon']]);
+
+    assert.equal(syncAllConversationsToLedger(upgradeOptions).newlySyncedDbs, 0);
+    assert.equal(syncSingleConversationToLedger('live', upgradeOptions).stepsUpserted, 0);
+    assert.deepEqual(queryLedger(filter, options).summary, result.summary);
+  });
+}
+
+function readActiveGenerationSteps(ledgerPath) {
+  const db = new DatabaseSync(ledgerPath, { readOnly: true });
+  try {
+    return db.prepare(`
+      SELECT entry_idx, model FROM telemetry_steps
+      WHERE conversation_id = 'live' AND gen_idx = 1 ORDER BY entry_idx
+    `).all().map(row => [row.entry_idx, row.model]);
+  } finally {
+    db.close();
+  }
+}
 
 test('dual-source sync (CLI + IDE) deduplicates by conversationId, reports cliDbs/ideDbs, and filters/aggregates by source', () => {
   assert.equal(normalizeSource('ide'), 'ide');

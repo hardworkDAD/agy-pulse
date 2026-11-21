@@ -8,15 +8,11 @@ import { getOutputSpeed, formatSpeed, formatTtft, formatChildModelSpeeds, getSpe
 
 let tempDir;
 
-const frame = (output, apiMs, input = 1000) => ({
+const frame = (output, totalOutput, apiMs) => ({
   transcript_path: path.join(tempDir, 'session.jsonl'),
   context_window: {
-    current_usage: {
-      input_tokens: input,
-      output_tokens: output,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
-    },
+    total_output_tokens: totalOutput,
+    current_usage: { input_tokens: 1000, output_tokens: output },
   },
   cost: { total_api_duration_ms: apiMs },
 });
@@ -29,59 +25,46 @@ afterEach(async () => {
   await rm(tempDir, { recursive: true, force: true });
 });
 
-test('speed is the finished response over API time added, held until next response', () => {
-  // 1. Initial 0 output tokens returns null
-  assert.equal(getOutputSpeed(frame(0, 1000), tempDir), null);
-
-  // 2. First response: 400 tokens in (5000 - 1000 = 4000ms) => 100 tok/s
-  assert.equal(getOutputSpeed(frame(400, 5000), tempDir), 100);
-
-  // 3. Same frame keeps the reading
-  assert.equal(getOutputSpeed(frame(400, 5000), tempDir), 100);
-
-  // 4. API time increased but usage unchanged (subagents) => folds into baseline
-  assert.equal(getOutputSpeed(frame(400, 9000), tempDir), 100);
-
-  // 5. Under 500ms of API time (9200 - 9000 = 200ms) is too noisy => holds previous speed
-  assert.equal(getOutputSpeed(frame(300, 9200, 2000), tempDir), 100);
-
-  // 6. Valid new response: 300 tokens in (12000 - 9200 = 2800ms) => 300 / 2.8 tok/s
-  assert.equal(
-    getOutputSpeed(frame(300, 12000, 3000), tempDir)?.toFixed(1),
-    (300 / 2.8).toFixed(1)
-  );
-
-  // 7. Counter reset starts over
-  assert.equal(getOutputSpeed(frame(300, 100, 4000), tempDir), null);
-
-  // 8. Missing transcript_path returns null
-  assert.equal(getOutputSpeed({ ...frame(300, 100), transcript_path: undefined }, tempDir), null);
+test('uses matching cumulative deltas across requests and holds speed on repeated snapshots', () => {
+  assert.equal(getOutputSpeed(frame(500, 500, 10000), tempDir), null);
+  assert.equal(getOutputSpeed(frame(300, 1100, 16000), tempDir), 100);
+  assert.equal(getOutputSpeed(frame(0, 1100, 16000), tempDir), 100);
+  assert.equal(getOutputSpeed(frame(0, 900, 17000), tempDir), null);
+  assert.equal(getOutputSpeed(frame(400, 1300, 21000), tempDir), 100);
+  assert.equal(getOutputSpeed(frame(0, 1400, 100), tempDir), null);
+  assert.equal(getOutputSpeed({ ...frame(300, 1400, 100), transcript_path: undefined }, tempDir), null);
 });
 
-test('falls back to state.totalApiDurationMs when agyData.cost is missing', () => {
-  const baseData = {
-    transcript_path: path.join(tempDir, 'session.jsonl'),
-    context_window: {
-      current_usage: { input_tokens: 1000, output_tokens: 0 },
-    },
-  };
-  getOutputSpeed(baseData, tempDir, { totalApiDurationMs: 1000 });
+test('rebases on one-sided updates and ignores intervals shorter than 500ms', () => {
+  assert.equal(getOutputSpeed(frame(500, 500, 10000), tempDir), null);
+  assert.equal(getOutputSpeed(frame(300, 800, 13000), tempDir), 100);
 
-  const agyData = {
-    transcript_path: path.join(tempDir, 'session.jsonl'),
-    context_window: {
-      current_usage: {
-        input_tokens: 1000,
-        output_tokens: 400,
-      },
-    },
-  };
-  const state = {
-    totalApiDurationMs: 5000,
-  };
+  // Time advances ahead of tokens. Neither update by itself yields a speed.
+  assert.equal(getOutputSpeed(frame(300, 800, 16000), tempDir), null);
+  assert.equal(getOutputSpeed(frame(300, 1100, 16000), tempDir), null);
+  assert.equal(getOutputSpeed(frame(400, 1500, 18000), tempDir), 200);
 
-  const speed = getOutputSpeed(agyData, tempDir, state);
-  assert.equal(speed, 100); // 400 tokens / 4s = 100 tok/s
+  // The inverse arrival order also rebases. A later valid interval recovers.
+  assert.equal(getOutputSpeed(frame(200, 1700, 18000), tempDir), null);
+  assert.equal(getOutputSpeed(frame(200, 1700, 20000), tempDir), null);
+  assert.equal(getOutputSpeed(frame(300, 2000, 20200), tempDir), null);
+  assert.equal(getOutputSpeed(frame(600, 2600, 23200), tempDir), 200);
+});
+
+test('falls back to a timed planner response when the native counters cannot be paired', () => {
+  const partial = frame(500, undefined, 10000);
+  assert.equal(getOutputSpeed(partial, tempDir, { totalOutputTokens: 500 }), null);
+  assert.equal(getOutputSpeed(frame(300, undefined, 13000), tempDir, { totalOutputTokens: 800 }), null);
+  assert.equal(getOutputSpeed(partial, tempDir, {
+    lastPlannerResponse: { startMs: 10000, endMs: 14000, outputTokens: 400 },
+  }), 100);
+
+  const wallClock = { ...frame(500, 500, 10000), cost: { total_duration_ms: 10000 } };
+  const nextWallClock = { ...frame(300, 800, 13000), cost: { total_duration_ms: 13000 } };
+  assert.equal(getOutputSpeed(wallClock, tempDir), null);
+  assert.equal(getOutputSpeed(nextWallClock, tempDir), null);
+  assert.equal(getOutputSpeed({ ...wallClock, total_api_duration_ms: 10000 }, tempDir), null);
+  assert.equal(getOutputSpeed(frame(300, 800, 13000), tempDir), 100);
 });
 
 test('uses transcript lastPlannerResponse closed and trailing durations without tool-time inflation', () => {
@@ -190,50 +173,18 @@ test('computes and latches speed for first-turn plain-text reply within 500ms..1
   assert.equal(shortSpeed, null);
 });
 
-test('allows 5% (min 5 tokens) alignment tolerance and supports first-turn speed from cumulative total_output_tokens', () => {
-  const tolTranscript = path.join(tempDir, 'tolerance.jsonl');
-  const makeAgy = (output, totalOutput) => ({
-    transcript_path: tolTranscript,
-    context_window: {
-      total_output_tokens: totalOutput,
-      current_usage: {
-        input_tokens: 1000,
-        output_tokens: output,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-      },
-    },
-  });
-
-  // 1000 vs 1045 -> diff 45 <= max(5, round(1000 * 0.05) = 50) -> accepted
-  const alignedSpeed = getOutputSpeed(makeAgy(1000, 1000), tempDir, {
-    lastPlannerResponse: { startMs: 10000, endMs: 20000, outputTokens: 1045 },
-  }, 20500);
-  assert.equal(alignedSpeed, 100);
-
-  // 100 vs 500 -> diff 400 > 5 -> rejected, falls back to previous speed (100)
-  const misalignedSpeed = getOutputSpeed(makeAgy(100, 1100), tempDir, {
-    lastPlannerResponse: { startMs: 25000, endMs: 27000, outputTokens: 500 },
-  }, 27500);
-  assert.equal(misalignedSpeed, 100);
-
-  // First turn with ONLY cumulative total_output_tokens (no per-turn output_tokens)
-  const cumTranscript = path.join(tempDir, 'cum-first-turn.jsonl');
-  const cumAgy = {
-    transcript_path: cumTranscript,
-    context_window: {
-      total_output_tokens: 600,
-      current_usage: {
-        input_tokens: 2000,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-      },
-    },
-  };
-  const cumSpeed = getOutputSpeed(cumAgy, tempDir, {
-    lastPlannerResponse: { startMs: 10000, endMs: 14000, outputTokens: 600 },
-  }, 14500);
-  assert.equal(cumSpeed, 150); // 600 / 4s
+test('a reopened transcript needs the timed response’s own output count', () => {
+  const agy = { session_id: 'reopened', context_window: { total_output_tokens: 9000 } };
+  const planner = { startMs: 1000, endMs: 11000 };
+  assert.equal(getOutputSpeed(agy, tempDir, {
+    lastPlannerResponse: { ...planner, outputTokens: null },
+  }), null);
+  assert.equal(getOutputSpeed(agy, tempDir, {
+    lastPlannerResponse: { ...planner, outputTokens: 300 },
+  }), 30);
+  assert.equal(getOutputSpeed(agy, tempDir, {
+    lastPlannerResponse: { startMs: 12000, endMs: 16000, outputTokens: null },
+  }), null);
 });
 
 test('Path A recovers from < 500ms pending state and updates speed when unclosed turn closes', () => {
@@ -276,7 +227,7 @@ test('prunes speed-cache directory to at most 32 files', () => {
   for (let i = 0; i < 36; i += 1) {
     getOutputSpeed({
       transcript_path: path.join(tempDir, `sess-${i}.jsonl`),
-      context_window: { current_usage: { input_tokens: 100, output_tokens: 200 } },
+      context_window: { total_output_tokens: 200 },
       cost: { total_api_duration_ms: 1000 },
     }, tempDir);
   }
@@ -334,7 +285,7 @@ test('non-first-turn open turn > 120s or interrupted holds previous speed instea
   assert.equal(freshCache.pending, false);
 });
 
-test('cumulative-only total_output_tokens preserves turnBaselineOutput across <500ms pending and open->closed recalculation', () => {
+test('planner response counts survive short open samples and open-to-closed recalculation', () => {
   const transcriptPath = path.join(tempDir, 'cumulative-baseline.jsonl');
   const cumAgy = (input, totalOutput) => ({
     transcript_path: transcriptPath,
@@ -348,7 +299,7 @@ test('cumulative-only total_output_tokens preserves turnBaselineOutput across <5
     },
   });
 
-  // Scenario 1: Turn 1 with only total_output_tokens: 500
+  // Turn 1: the log supplies 500 tokens for this response.
   // t = 200ms -> null (pending: true)
   assert.equal(getOutputSpeed(cumAgy(1000, 500), tempDir, {
     lastPlannerResponse: { startMs: 10000, endMs: null, outputTokens: 500 },
@@ -365,13 +316,13 @@ test('cumulative-only total_output_tokens preserves turnBaselineOutput across <5
     lastPlannerResponse: { startMs: 10000, endMs: 15000, outputTokens: 500 },
   }, 15500), 100);
 
-  // Scenario 2: Turn 2 with total_output_tokens: 1100 (baseline from Turn 1 = 500)
+  // Turn 2: the log supplies 600 tokens for this response.
   // First check < 500ms (pending: true, holds 100)
   assert.equal(getOutputSpeed(cumAgy(2000, 1100), tempDir, {
     lastPlannerResponse: { startMs: 20000, endMs: null, outputTokens: 600 },
   }, 20200), 100);
 
-  // Closes with 3000ms duration -> uses 1100 - 500 = 600 => 200 tok/s
+  // Closes with 3000ms duration -> uses the logged 600 tokens => 200 tok/s
   assert.equal(getOutputSpeed(cumAgy(2000, 1100), tempDir, {
     lastPlannerResponse: { startMs: 20000, endMs: 23000, outputTokens: 600 },
   }, 23500), 200);
@@ -484,12 +435,13 @@ test('getOutputSpeed invalidates stale speed on model switch, rejects >5000 dirt
   const cacheFile = getSpeedCachePath(tempDir, transcriptPath);
   fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
   fs.writeFileSync(cacheFile, JSON.stringify({
-    apiDurationMs: 1000,
-    usageKey: '1000:500:0:0:500',
-    modelKey: 'Carbon',
+    version: 1,
+    source: 'transcript',
+    modelKey: 'gemini 4 carbon (high)',
     speed: 25000,
     plannerStartMs: 10000,
-    plannerEndMs: 10020,
+    plannerEndMs: 15000,
+    plannerOutputTokens: 500,
     pending: false,
   }));
 
@@ -534,26 +486,25 @@ test('getOutputSpeed invalidates stale speed on model switch, rejects >5000 dirt
     lastPlannerResponse: { startMs: 20000, endMs: null, outputTokens: 300 },
   }, 250000), 100);
   assert.equal(fs.statSync(staleCacheFile).mtimeMs, oldMtime);
+});
 
-  // Path B model switch clears previous model's speed when apiDurationMs hasn't advanced
-  const pathBFile = path.join(tempDir, 'pathb-switch.jsonl');
-  getOutputSpeed({
-    transcript_path: pathBFile,
-    model: { id: 'gemini-4-carbon-high' },
-    context_window: { current_usage: { input_tokens: 100, output_tokens: 0 } },
-    cost: { total_api_duration_ms: 1000 },
-  }, tempDir);
-  assert.equal(getOutputSpeed({
-    transcript_path: pathBFile,
-    model: { id: 'gemini-4-carbon-high' },
-    context_window: { current_usage: { input_tokens: 100, output_tokens: 400 } },
-    cost: { total_api_duration_ms: 5000 },
-  }, tempDir), 100);
-  assert.equal(getOutputSpeed({
-    transcript_path: pathBFile,
-    model: { id: 'claude-opus-4-6' },
-    context_window: { current_usage: { input_tokens: 100, output_tokens: 400 } },
-    cost: { total_api_duration_ms: 5000 },
-  }, tempDir), null);
+test('rebases cumulative counters after switching between model variants', () => {
+  const sample = (id, output, totalOutput, apiMs) => ({
+    ...frame(output, totalOutput, apiMs),
+    model: { id },
+  });
+  assert.equal(getOutputSpeed(sample('gemini-4-carbon-high', 0, 0, 1000), tempDir), null);
+  assert.equal(getOutputSpeed(sample('gemini-4-carbon-high', 400, 400, 5000), tempDir), 100);
+  assert.equal(getOutputSpeed(sample('gemini-4-carbon-low', 400, 800, 9000), tempDir), null);
+  assert.equal(getOutputSpeed(sample('gemini-4-carbon-low', 600, 1400, 12000), tempDir), 200);
+});
+
+test('discards an old speed cache even when both counters match', () => {
+  const oldFrame = frame(300, 1100, 16000);
+  const cacheFile = getSpeedCachePath(tempDir, oldFrame.transcript_path);
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  fs.writeFileSync(cacheFile, JSON.stringify({ apiDurationMs: 16000, usageKey: 'old', totalOutput: 1100, speed: 50 }));
+  assert.equal(getOutputSpeed(oldFrame, tempDir), null);
+  assert.equal(getOutputSpeed(frame(300, 1400, 19000), tempDir), 100);
 });
 

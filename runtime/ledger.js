@@ -29,6 +29,8 @@ const DEFAULT_LEDGER_FILENAME = 'agy-pulse-ledger.sqlite';
 const FALLBACK_LEDGER_FILENAME = 'agy-pulse-ledger.json';
 const SYNC_THROTTLE_MS = 15000;
 const LEDGER_SCHEMA_VERSION = '2';
+// Bump this when existing conversation rows need to be reimported.
+const LEDGER_INGESTION_VERSION = 1;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -423,6 +425,7 @@ function extractGenMetadataRowDetails(buf) {
 
   const stepIndices = extractStepIndicesFromGenMetadata(b);
   const entries = [];
+  const systemPromptOnlyEntries = [];
   let parentCascadeId = null;
   let rootCascadeId = null;
   let cascadeId = null;
@@ -462,7 +465,9 @@ function extractGenMetadataRowDetails(buf) {
     if (!modelKey) continue;
 
     const usage = pbGetSub(f1, 4);
-    const inputTokens = usage ? (pbGetVarint(usage, 2) ?? 0) : 0;
+    const systemPromptTokens = usage ? (pbGetVarint(usage, 1) ?? 0) : 0;
+    const rawInputTokens = usage ? (pbGetVarint(usage, 2) ?? 0) : 0;
+    const inputTokens = systemPromptTokens + rawInputTokens;
     const outputTokens = usage ? (pbGetVarint(usage, 3) ?? 0) : 0;
     const cacheReadTokens = usage ? (pbGetVarint(usage, 5) ?? 0) : 0;
     const cacheWriteTokens = 0;
@@ -481,10 +486,12 @@ function extractGenMetadataRowDetails(buf) {
     const validTtft = (
       ttftSec !== null && Number.isFinite(ttftSec) && ttftSec >= 0 && ttftSec <= MAX_VALID_TTFT_SEC
     );
-    const hasAnyToken = inputTokens > 0 || outputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0;
-    if (!hasAnyToken) continue;
+    const hasOtherTokens = rawInputTokens > 0 || outputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0;
+    if (systemPromptTokens === 0 && !hasOtherTokens) continue;
 
-    entries.push({
+    // Keep the existing entry indices used in ledger keys when backfilling older rows.
+    const targetEntries = hasOtherTokens ? entries : systemPromptOnlyEntries;
+    targetEntries.push({
       modelKey,
       stepModel,
       inputTokens,
@@ -500,7 +507,7 @@ function extractGenMetadataRowDetails(buf) {
     });
   }
 
-  return { entries, stepIndices, parentCascadeId, rootCascadeId, cascadeId };
+  return { entries: entries.concat(systemPromptOnlyEntries), stepIndices, parentCascadeId, rootCascadeId, cascadeId };
 }
 
 function getDbMaxMtimeMs(dbPath) {
@@ -531,7 +538,7 @@ function getDbSignature(dbPath) {
     } catch {
       walStat = null;
     }
-    return `${dbStat.size}:${Math.trunc(dbStat.mtimeMs)}:${walStat ? walStat.size : 0}:${walStat ? Math.trunc(walStat.mtimeMs) : 0}`;
+    return `${LEDGER_INGESTION_VERSION}:${dbStat.size}:${Math.trunc(dbStat.mtimeMs)}:${walStat ? walStat.size : 0}:${walStat ? Math.trunc(walStat.mtimeMs) : 0}`;
   } catch {
     return null;
   }
