@@ -1,10 +1,36 @@
 #!/usr/bin/env bash
 # Remove agy-pulse from this machine.
-# 1. Run runtime/uninstall.js (clears settings.statusLine, removes runtime dirs, tmp tokens)
-# 2. Run `agy plugin uninstall agy-pulse`
+# 1. Prefer native v2 binary (`agypl uninstall` / `agy-pulse uninstall`), forwarding flags such as --purge-ledger.
+# 2. Fallback to legacy v1 runtime/uninstall.js if no native binary is installed.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+NATIVE_BIN=""
+BIN_CANDIDATES=()
+if [ -n "${AGY_PULSE_BIN_DIR:-}" ]; then
+  BIN_CANDIDATES+=("${AGY_PULSE_BIN_DIR}/agypl" "${AGY_PULSE_BIN_DIR}/agy-pulse")
+fi
+BIN_CANDIDATES+=("${HOME}/.local/bin/agypl" "${HOME}/.local/bin/agy-pulse")
+
+for candidate in "${BIN_CANDIDATES[@]}"; do
+  if [ -x "$candidate" ]; then
+    NATIVE_BIN="$candidate"
+    break
+  fi
+done
+
+if [ -z "$NATIVE_BIN" ]; then
+  if command -v agypl >/dev/null 2>&1; then
+    NATIVE_BIN="agypl"
+  elif command -v agy-pulse >/dev/null 2>&1; then
+    NATIVE_BIN="agy-pulse"
+  fi
+fi
+
+if [ -n "$NATIVE_BIN" ]; then
+  exec "$NATIVE_BIN" uninstall "$@"
+fi
 
 RUNTIME_UNINSTALL=""
 CANDIDATES=()
@@ -31,9 +57,9 @@ for candidate in "${CANDIDATES[@]}"; do
 done
 
 if command -v node >/dev/null 2>&1 && [ -n "$RUNTIME_UNINSTALL" ]; then
-  node "$RUNTIME_UNINSTALL"
+  node "$RUNTIME_UNINSTALL" "$@"
 else
-  echo "agy-pulse uninstall: runtime not found — skipping settings cleanup" >&2
+  echo "agy-pulse uninstall: binary and legacy runtime not found — skipping settings cleanup" >&2
 fi
 
 PLUGIN_NAME="agy-pulse"

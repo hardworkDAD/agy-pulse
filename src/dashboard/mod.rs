@@ -14,7 +14,7 @@ pub use launcher::{
     BrowserLaunchSpec, BrowserOpenResult, DASHBOARD_ICON_MARKER, DASHBOARD_SHORTCUT_MARKER,
     DASHBOARD_STATE_FILENAME, DashboardStateFile, EnsureDashboardResult, RunningDashboardInfo,
     ShortcutInstallReport, ShortcutStatus, ShortcutUninstallReport, StopDashboardResult,
-    build_app_window_launch_spec, uninstall_desktop_shortcuts,
+    build_app_window_launch_spec, stop_background_dashboard, uninstall_desktop_shortcuts,
 };
 pub use server::{DashboardError, DashboardServer, DashboardServerConfig, DashboardServerInfo};
 

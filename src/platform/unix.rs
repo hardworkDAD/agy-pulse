@@ -287,3 +287,48 @@ pub(super) fn set_executable_0755(path: &Path) -> io::Result<()> {
     perms.set_mode(0o755);
     fs::set_permissions(path, perms)
 }
+
+pub(super) fn replace_executable_atomically(source_file: &Path, target_path: &Path) -> io::Result<()> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let target_name = target_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("agy-pulse");
+    let tmp_path = target_path.with_file_name(format!(
+        ".{target_name}.update.{}.{nanos}.tmp",
+        std::process::id()
+    ));
+
+    let res = (|| -> io::Result<()> {
+        let mut src = fs::File::open(source_file)?;
+        let mut dst = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o755)
+            .open(&tmp_path)?;
+        io::copy(&mut src, &mut dst)?;
+        dst.sync_all()?;
+        set_executable_0755(&tmp_path)?;
+        fs::rename(&tmp_path, target_path)?;
+        Ok(())
+    })();
+
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    res
+}
+
+pub(super) fn remove_binary_file_safely(path: &Path) -> io::Result<bool> {
+    if fs::symlink_metadata(path).is_err() {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    Ok(true)
+}

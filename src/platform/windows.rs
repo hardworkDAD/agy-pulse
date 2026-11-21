@@ -226,3 +226,82 @@ pub(super) fn terminate_process(pid: u32) -> io::Result<()> {
 pub(super) fn set_executable_0755(_path: &Path) -> io::Result<()> {
     Ok(())
 }
+
+pub(super) fn replace_executable_atomically(source_file: &Path, target_path: &Path) -> io::Result<()> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let target_name = target_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("agy-pulse.exe");
+    let tmp_path = target_path.with_file_name(format!(
+        ".{target_name}.update.{}.{nanos}.tmp",
+        std::process::id()
+    ));
+
+    let copy_res = (|| -> io::Result<()> {
+        let mut src = fs::File::open(source_file)?;
+        let mut dst = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)?;
+        io::copy(&mut src, &mut dst)?;
+        dst.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(err) = copy_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    if fs::symlink_metadata(target_path).is_ok() {
+        let primary_old = target_path.with_file_name(format!("{target_name}.old"));
+        if fs::symlink_metadata(&primary_old).is_ok() {
+            let _ = fs::remove_file(&primary_old);
+        }
+        let old_path = if fs::symlink_metadata(&primary_old).is_err() {
+            primary_old
+        } else {
+            target_path.with_file_name(format!("{target_name}.{}.{nanos}.old", std::process::id()))
+        };
+
+        if let Err(err) = fs::rename(target_path, &old_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+        if let Err(err) = fs::rename(&tmp_path, target_path) {
+            let _ = fs::rename(&old_path, target_path);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+        let _ = fs::remove_file(&old_path);
+        Ok(())
+    } else {
+        if let Err(err) = fs::rename(&tmp_path, target_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn remove_binary_file_safely(path: &Path) -> io::Result<bool> {
+    if fs::symlink_metadata(path).is_err() {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(_) => {
+            let path_str = path.to_string_lossy().replace('"', "\"\"");
+            let script = format!("ping -n 2 127.0.0.1 >nul & del /f /q \"{path_str}\"");
+            let _ = spawn_detached(Path::new("cmd.exe"), &["/c", &script]);
+            Ok(true)
+        }
+    }
+}

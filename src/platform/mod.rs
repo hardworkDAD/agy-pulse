@@ -503,6 +503,139 @@ pub fn set_executable_0755(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Atomically replace an executable at `target_path` using `source_file`
+/// (POSIX `0755` sibling temp + rename; Windows rename-running-`.exe`-to-`.old` + rename).
+pub fn replace_executable_atomically(source_file: &Path, target_path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::replace_executable_atomically(source_file, target_path)
+    }
+    #[cfg(windows)]
+    {
+        windows::replace_executable_atomically(source_file, target_path)
+    }
+}
+
+/// Remove a binary or shim file safely, scheduling delayed removal on Windows if locked by self.
+pub fn remove_binary_file_safely(path: &Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        unix::remove_binary_file_safely(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::remove_binary_file_safely(path)
+    }
+}
+
+/// Return the standard 5-platform release archive filename for the current build target.
+pub fn current_release_asset_name() -> Option<&'static str> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        Some("agy-pulse-linux-x86_64.tar.gz")
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        Some("agy-pulse-linux-aarch64.tar.gz")
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        Some("agy-pulse-macos-x86_64.tar.gz")
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Some("agy-pulse-macos-aarch64.tar.gz")
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        Some("agy-pulse-windows-x86_64.zip")
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+    )))]
+    {
+        None
+    }
+}
+
+/// Primary binary filename for the active OS (`agy-pulse` or `agy-pulse.exe`).
+pub fn primary_binary_name() -> &'static str {
+    if current_desktop_os() == DesktopOs::Windows {
+        "agy-pulse.exe"
+    } else {
+        "agy-pulse"
+    }
+}
+
+/// Alias binary filename for the active OS (`agypl` or `agypl.exe`).
+pub fn alias_binary_name() -> &'static str {
+    if current_desktop_os() == DesktopOs::Windows {
+        "agypl.exe"
+    } else {
+        "agypl"
+    }
+}
+
+/// Resolve the isolated user CLI binary directory (`AGY_PULSE_BIN_DIR`, else `~/.local/bin` or `%LOCALAPPDATA%\agy-pulse\bin`).
+/// Never resolves to official `agy` program directories.
+pub fn resolve_cli_bin_dir(explicit: Option<&Path>) -> PathBuf {
+    if let Some(dir) = explicit {
+        return dir.to_path_buf();
+    }
+    if let Ok(val) = env::var("AGY_PULSE_BIN_DIR") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if current_desktop_os() == DesktopOs::Windows {
+        return windows_local_app_data()
+            .or_else(|| home_dir().map(|h| h.join("AppData").join("Local")))
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("agy-pulse")
+            .join("bin");
+    }
+    home_dir()
+        .map(|h| h.join(".local").join("bin"))
+        .unwrap_or_else(|| PathBuf::from(".local").join("bin"))
+}
+
+/// Return deduplicated candidate directories where user-installed `agy-pulse` / `agypl` binaries may live.
+pub fn cli_shim_candidate_dirs(explicit: Option<&Path>) -> Vec<PathBuf> {
+    let mut raw = Vec::new();
+    if let Some(dir) = explicit {
+        raw.push(dir.to_path_buf());
+    }
+    if let Ok(val) = env::var("AGY_PULSE_BIN_DIR") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            raw.push(PathBuf::from(trimmed));
+        }
+    }
+    if let Some(home) = home_dir() {
+        raw.push(home.join(".local").join("bin"));
+    }
+    if current_desktop_os() == DesktopOs::Windows
+        && let Some(local_app) = windows_local_app_data()
+    {
+        raw.push(local_app.join("agy-pulse").join("bin"));
+    }
+
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for dir in raw {
+        let key = fs::canonicalize(&dir).unwrap_or_else(|_| normalize_lexical_path(&dir));
+        if seen.insert(key) {
+            out.push(dir);
+        }
+    }
+    out
+}
+
 /// Resolve an executable on `PATH` safely without searching relative directories such as `.`.
 pub fn resolve_safe_executable(name: &str) -> Option<PathBuf> {
     let path_os = env::var_os("PATH")?;

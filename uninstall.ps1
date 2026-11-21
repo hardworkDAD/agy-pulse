@@ -1,7 +1,29 @@
 # Remove agy-pulse from this machine (Windows).
-# 1. Run runtime\uninstall.js (clears settings.statusLine, removes runtime dirs, tmp tokens)
-# 2. Run `agy plugin uninstall agy-pulse`
+# 1. Prefer native v2 binary (`agypl.exe uninstall` / `agy-pulse.exe uninstall`), forwarding args such as --purge-ledger.
+# 2. Fallback to legacy v1 runtime\uninstall.js if no native binary is installed.
 $ErrorActionPreference = 'Continue'
+
+$NativeCandidates = @()
+if ($env:AGY_PULSE_BIN_DIR) {
+    $NativeCandidates += (Join-Path $env:AGY_PULSE_BIN_DIR 'agypl.exe')
+    $NativeCandidates += (Join-Path $env:AGY_PULSE_BIN_DIR 'agy-pulse.exe')
+}
+if ($env:LOCALAPPDATA) {
+    $NativeCandidates += (Join-Path $env:LOCALAPPDATA 'agy-pulse\bin\agypl.exe')
+    $NativeCandidates += (Join-Path $env:LOCALAPPDATA 'agy-pulse\bin\agy-pulse.exe')
+}
+
+$NativeBin = $NativeCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if (-not $NativeBin) {
+    $Cmd = Get-Command agypl -ErrorAction SilentlyContinue
+    if (-not $Cmd) { $Cmd = Get-Command agy-pulse -ErrorAction SilentlyContinue }
+    if ($Cmd) { $NativeBin = $Cmd.Source }
+}
+
+if ($NativeBin) {
+    & $NativeBin uninstall @args
+    exit $LASTEXITCODE
+}
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $RuntimeCandidates = @()
@@ -23,9 +45,9 @@ $Runtime = $RuntimeCandidates | Where-Object { $_ -and (Test-Path $_) } | Select
 $PluginDir = Join-Path $env:USERPROFILE '.gemini\config\plugins\agy-pulse'
 
 if ((Get-Command node -ErrorAction SilentlyContinue) -and $Runtime) {
-    node $Runtime
+    node $Runtime @args
 } else {
-    Write-Error "agy-pulse uninstall: runtime not found - skipping settings cleanup"
+    Write-Error "agy-pulse uninstall: binary and legacy runtime not found - skipping settings cleanup"
 }
 
 if (Get-Command agy -ErrorAction SilentlyContinue) {

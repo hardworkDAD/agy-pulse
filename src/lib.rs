@@ -5,6 +5,7 @@ pub mod dashboard;
 pub mod domain;
 pub mod ingest;
 pub mod ledger;
+pub mod ops;
 pub mod platform;
 pub mod render;
 
@@ -28,6 +29,8 @@ Usage:\n  \
   agypl dashboard [options]               Start local web dashboard (alias: dash, ui, --dashboard)\n  \
   agypl stats [today|7d|30d|all]          Show CLI & IDE telemetry summary (alias: report, --stats)\n  \
   agypl config                            Launch interactive configuration wizard (alias: --config)\n  \
+  agypl install                           Deploy CLI binaries & register host statusLine (alias: --install)\n  \
+  agypl uninstall [--purge-ledger]        Safely remove statusLine & caches (keeps ledger by default)\n  \
   agypl update                            Check and install the latest release (alias: --update)\n  \
   agypl help                              Show this help message (alias: --help, -h)\n  \
   agypl --version                         Show version information (alias: -V, -v, version)\n  \
@@ -110,6 +113,9 @@ fn run_statusline_pipeline() {
     if !cfg.enabled {
         return;
     }
+
+    ingest.snapshot.update_available_version = ops::read_available_update_version();
+    ops::maybe_spawn_background_update_check();
 
     let show_daily = cfg.display.show_daily_cost.unwrap_or(false);
     let show_weekly = cfg.display.show_weekly_cost.unwrap_or(false);
@@ -205,6 +211,22 @@ pub fn run_cli() -> i32 {
 
     if matches!(first, Some("config")) || args.iter().any(|a| a == "--config") {
         return config::run_config_cli();
+    }
+
+    if matches!(first, Some("install")) || args.iter().any(|a| a == "--install") {
+        return ops::run_install_cli(&args);
+    }
+
+    if matches!(first, Some("uninstall")) || args.iter().any(|a| a == "--uninstall") {
+        return ops::run_uninstall_cli(&args);
+    }
+
+    if matches!(first, Some("update")) || args.iter().any(|a| a == "--update") {
+        return ops::run_update_cli(&args);
+    }
+
+    if args.iter().any(|a| a == "--check-update-bg") {
+        return ops::run_check_update_bg_cli();
     }
 
     if matches!(first, Some("help" | "--help" | "-h"))
