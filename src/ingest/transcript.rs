@@ -11,7 +11,8 @@ use serde_json::{Map, Value};
 
 use crate::domain::{
     ChildModelSpeed, ImageQuotaExhausted, ModelTokenTotals, TokenUsage, TurnPeakByMode,
-    compact_model_name, model_includes_cache_in_input, parse_iso8601_to_epoch_ms,
+    calculate_token_cost, compact_model_name, model_includes_cache_in_input,
+    parse_iso8601_to_epoch_ms,
 };
 use crate::platform;
 
@@ -20,13 +21,14 @@ use super::speed_tracker::{
 };
 use super::stdin::find_context_window;
 
-const TRANSCRIPT_CACHE_VERSION: u32 = 9;
+const TRANSCRIPT_CACHE_VERSION: u32 = 10;
 const TRANSCRIPT_CACHE_HEAD_BYTES: usize = 256;
 const MAX_TRANSCRIPT_CACHE_FILES: usize = 32;
 const FULL_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_FULL_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FULL_TRANSCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CHILD_AGENTS: usize = 256;
+const MAX_RECENT_TOKEN_STEPS: usize = 512;
 const MAX_CHILD_TAIL_BYTES: u64 = 65_536;
 const MAX_CHILD_OPEN_TURN_MS: i64 = 120_000;
 const MIN_CHILD_API_DELTA_MS: i64 = 500;
@@ -59,12 +61,25 @@ impl CachedTurnUsage {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct ModelTokenAcc {
-    input_tokens: u64,
-    cache_read_tokens: u64,
-    cache_write_tokens: u64,
-    output_tokens: u64,
-    steps: u64,
+pub(super) struct ModelTokenAcc {
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub steps: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct TranscriptTokenStepCost {
+    pub step_index: Option<u64>,
+    pub model_key: String,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -120,6 +135,9 @@ struct TranscriptAccState {
     total_output_tokens: u64,
     total_cache_read_tokens: u64,
     total_cache_creation_tokens: u64,
+    transcript_cost_usd: f64,
+    token_steps_count: u64,
+    recent_token_steps: Vec<TranscriptTokenStepCost>,
     model_totals: BTreeMap<String, ModelTokenAcc>,
     last_known_model: String,
     peak_raw_turn_tokens: u64,
@@ -146,7 +164,16 @@ struct TranscriptCacheFile {
     state: TranscriptAccState,
 }
 
+pub(super) struct ChildActivitySummary {
+    pub model_hint: String,
+    pub last_active_turn: u64,
+    pub last_active_ms: i64,
+}
+
 pub(super) struct ScannedTranscript {
+    pub steps: u64,
+    pub user_turns: u64,
+    pub has_planner_response: bool,
     pub usage: Option<Value>,
     pub last_turn_usage: Option<CachedTurnUsage>,
     pub last_known_model: String,
@@ -161,6 +188,16 @@ pub(super) struct ScannedTranscript {
     pub child_model_speeds: Vec<ChildModelSpeed>,
     pub model_token_totals: Vec<ModelTokenTotals>,
     pub image_exhausted: Option<ImageQuotaExhausted>,
+    pub transcript_cost_usd: f64,
+    pub transcript_cost_by_model: BTreeMap<String, ModelTokenAcc>,
+    pub token_steps_count: u64,
+    pub recent_token_steps: Vec<TranscriptTokenStepCost>,
+    pub all_child_ids: Vec<String>,
+    pub model_last_seen_turn: BTreeMap<String, u64>,
+    pub model_last_active_ms: BTreeMap<String, i64>,
+    pub child_activities: Vec<ChildActivitySummary>,
+    pub persisted_child_turns: Vec<(String, Option<u64>, i64)>,
+    pub child_tail_activities: Vec<(String, i64)>,
 }
 
 fn normalized_transcript_path_str(transcript_path: &Path) -> String {
@@ -360,7 +397,7 @@ fn load_full_entries_map(transcript_path: &Path, needed_steps: &HashSet<u64>) ->
     map
 }
 
-fn resolve_brain_context(transcript_path: &Path) -> (Option<PathBuf>, Option<String>) {
+pub(super) fn resolve_brain_context(transcript_path: &Path) -> (Option<PathBuf>, Option<String>) {
     let resolved = fs::canonicalize(transcript_path)
         .or_else(|_| std::path::absolute(transcript_path))
         .unwrap_or_else(|_| transcript_path.to_path_buf());
@@ -1382,11 +1419,37 @@ fn process_transcript_entry(
             inp
         };
 
+        let usage_for_cost = TokenUsage {
+            input_tokens: inp,
+            output_tokens: out,
+            cache_read_input_tokens: c_read,
+            cache_creation_input_tokens: c_create,
+            cache_exclusive: cw_opt.is_none(),
+        };
+        let step_cost_usd =
+            calculate_token_cost(step_model, &usage_for_cost, cache_inclusive, false).unwrap_or(0.0);
+
+        acc.transcript_cost_usd += step_cost_usd;
+        acc.token_steps_count = acc.token_steps_count.saturating_add(1);
+        if acc.recent_token_steps.len() >= MAX_RECENT_TOKEN_STEPS {
+            acc.recent_token_steps.remove(0);
+        }
+        acc.recent_token_steps.push(TranscriptTokenStepCost {
+            step_index: as_u64_val(entry.get("step_index")),
+            model_key: model_key.clone(),
+            input_tokens: effective_uncached_in,
+            cache_read_tokens: c_read,
+            cache_write_tokens: c_create,
+            output_tokens: out,
+            cost_usd: step_cost_usd,
+        });
+
         let model_acc = acc.model_totals.entry(model_key).or_default();
         model_acc.input_tokens = model_acc.input_tokens.saturating_add(effective_uncached_in);
         model_acc.cache_read_tokens = model_acc.cache_read_tokens.saturating_add(c_read);
         model_acc.cache_write_tokens = model_acc.cache_write_tokens.saturating_add(c_create);
         model_acc.output_tokens = model_acc.output_tokens.saturating_add(out);
+        model_acc.cost_usd += step_cost_usd;
         model_acc.steps = model_acc.steps.saturating_add(1);
 
         acc.last_turn_usage = Some(CachedTurnUsage {
@@ -1758,9 +1821,9 @@ fn resolve_child_model_speeds(
     transcript_path: &Path,
     acc: &mut TranscriptAccState,
     now_ms: i64,
-) -> (Vec<ChildModelSpeed>, bool) {
+) -> (Vec<ChildModelSpeed>, Vec<(String, i64)>, bool) {
     if acc.child_agents.is_empty() && acc.persisted_child_speeds.is_empty() {
-        return (Vec::new(), false);
+        return (Vec::new(), Vec::new(), false);
     }
     let (brain_dir, _) = resolve_brain_context(transcript_path);
     let current_turns = acc
@@ -1985,8 +2048,10 @@ fn resolve_child_model_speeds(
         active_candidates.push((item, turns_ago, last_active_ms));
     }
 
+    let tail_activities: Vec<(String, i64)> = model_last_active_ms.into_iter().collect();
+
     if active_candidates.is_empty() {
-        return (Vec::new(), persisted_changed);
+        return (Vec::new(), tail_activities, persisted_changed);
     }
 
     active_candidates.sort_by(|(a, _, _), (b, _, _)| {
@@ -2011,7 +2076,7 @@ fn resolve_child_model_speeds(
             last_active_ms,
         })
         .collect();
-    (result, persisted_changed)
+    (result, tail_activities, persisted_changed)
 }
 
 /// Incrementally scan a host `transcript.jsonl` file using inode + 256-byte head SHA-256 caching,
@@ -2097,7 +2162,7 @@ pub(super) fn scan_transcript_incremental(
         cache_dirty = true;
     }
 
-    let (child_model_speeds, child_persisted_changed) =
+    let (child_model_speeds, child_tail_activities, child_persisted_changed) =
         resolve_child_model_speeds(transcript_path, &mut state, now_ms);
 
     if cache_dirty || child_persisted_changed {
@@ -2154,7 +2219,33 @@ pub(super) fn scan_transcript_incremental(
         .filter(|&reset_ms| reset_ms > now_ms)
         .map(|reset_time_ms| ImageQuotaExhausted { reset_time_ms });
 
+    let all_child_ids: Vec<String> = state.child_agents.keys().cloned().collect();
+    let child_activities: Vec<ChildActivitySummary> = state
+        .child_agents
+        .values()
+        .map(|c| ChildActivitySummary {
+            model_hint: c.model_hint.clone(),
+            last_active_turn: c.last_active_turn.max(c.added_turn),
+            last_active_ms: c.last_active_ms,
+        })
+        .collect();
+    let persisted_child_turns: Vec<(String, Option<u64>, i64)> = state
+        .persisted_child_speeds
+        .iter()
+        .map(|(k, v)| {
+            let ts = v
+                .last_active_ms
+                .unwrap_or(0)
+                .max(v.event_ms)
+                .max(v.updated_at);
+            (k.clone(), v.last_active_turn, ts)
+        })
+        .collect();
+
     Some(ScannedTranscript {
+        steps: state.steps,
+        user_turns: state.user_turns,
+        has_planner_response: state.has_planner_response,
         usage: state.usage,
         last_turn_usage: state.last_turn_usage,
         last_known_model: state.last_known_model,
@@ -2172,5 +2263,15 @@ pub(super) fn scan_transcript_incremental(
         child_model_speeds,
         model_token_totals,
         image_exhausted,
+        transcript_cost_usd: state.transcript_cost_usd,
+        transcript_cost_by_model: state.model_totals,
+        token_steps_count: state.token_steps_count,
+        recent_token_steps: state.recent_token_steps,
+        all_child_ids,
+        model_last_seen_turn: state.model_last_seen_turn,
+        model_last_active_ms: state.model_last_active_ms,
+        child_activities,
+        persisted_child_turns,
+        child_tail_activities,
     })
 }

@@ -42,6 +42,17 @@ pub fn resolve_cascade_cost_usd(snapshot: &PulseSnapshot, allow_routed_cost: boo
         model_id,
         allow_routed_cost,
     ) {
+        if let Some(children) = snapshot.cost.children_cost_usd
+            && children.is_finite()
+            && children > 0.0
+        {
+            let breakdown_total = snapshot
+                .cost
+                .cascade_usd
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(0.0);
+            return Some(breakdown_total.max(native + children));
+        }
         return Some(native);
     }
 

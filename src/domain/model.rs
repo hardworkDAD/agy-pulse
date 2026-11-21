@@ -101,6 +101,7 @@ pub struct HostIdentity {
 pub struct CostSnapshot {
     pub native_total_usd: Option<f64>,
     pub cascade_usd: Option<f64>,
+    pub children_cost_usd: Option<f64>,
     pub today_usd: Option<f64>,
     pub week_usd: Option<f64>,
 }
@@ -117,6 +118,7 @@ pub struct PulseSnapshot {
     pub cost: CostSnapshot,
     pub terminal_width: Option<u16>,
     pub task_count: u64,
+    pub transcript_steps: u64,
     pub compaction_count: u64,
     pub server_compaction_limit: Option<u64>,
     pub peak_raw_turn_tokens: u64,
@@ -129,6 +131,7 @@ pub struct PulseSnapshot {
     pub transcript_total_output_tokens: u64,
     pub output_speed_tok_s: Option<f64>,
     pub main_model_last_active_ms: Option<i64>,
+    pub main_model_turns_ago: Option<u64>,
     pub child_model_speeds: Vec<ChildModelSpeed>,
     pub model_token_totals: Vec<ModelTokenTotals>,
     pub image_exhausted: Option<ImageQuotaExhausted>,

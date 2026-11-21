@@ -351,9 +351,14 @@ pub fn render_statusline(
         .unwrap_or("");
     let main_model_key = compact_model_name(main_model_ident);
 
-    let main_speed_expired = snapshot
-        .main_model_last_active_ms
-        .is_some_and(|ts| ts > 0 && (snapshot.observed_at_ms - ts) > max_idle_ms);
+    let main_perf_turns_expired = snapshot.transcript_steps == 0
+        && snapshot
+            .main_model_turns_ago
+            .is_some_and(|ago| ago > max_idle_turns);
+    let main_speed_expired = main_perf_turns_expired
+        || snapshot
+            .main_model_last_active_ms
+            .is_some_and(|ts| ts > 0 && (snapshot.observed_at_ms - ts) > max_idle_ms);
 
     let active_output_speed = if show_speed && !main_speed_expired {
         snapshot.output_speed_tok_s.filter(|s| s.is_finite() && *s > 0.0 && *s <= 5000.0)
@@ -624,11 +629,13 @@ pub fn render_statusline(
     };
     let tokens_str = format!("{}{token_prefix} {token_parts}{RESET}", palette.cyan);
 
-    let effective_ctx_size = cw
-        .map(|c| c.context_window_size)
-        .filter(|&s| s > 0)
-        .or(snapshot.server_compaction_limit)
-        .unwrap_or(0);
+    let raw_ctx_size = cw.map(|c| c.context_window_size).unwrap_or(0);
+    let effective_ctx_size = match (raw_ctx_size > 0, snapshot.server_compaction_limit) {
+        (true, Some(srv)) if srv > 0 => raw_ctx_size.min(srv),
+        (false, Some(srv)) if srv > 0 => srv,
+        (true, _) => raw_ctx_size,
+        (false, _) => 0,
+    };
 
     let has_positive_used_pct = ctx_pct_raw > 0.0;
     let use_active_turn_ctx = !has_positive_used_pct
@@ -651,7 +658,16 @@ pub fn render_statusline(
         };
         (active, pct)
     } else {
-        (total_input, ctx_pct_raw)
+        let pct = if raw_ctx_size > 0 && effective_ctx_size > 0 && effective_ctx_size < raw_ctx_size {
+            if total_input > 0 {
+                ((total_input as f64 * 100.0) / effective_ctx_size as f64).min(100.0)
+            } else {
+                (ctx_pct_raw * (raw_ctx_size as f64 / effective_ctx_size as f64)).min(100.0)
+            }
+        } else {
+            ctx_pct_raw
+        };
+        (total_input, pct)
     };
 
     let ctx_bar = create_progress_bar(
