@@ -26,6 +26,8 @@ struct IsolatedEnv {
     data_dir: PathBuf,
     global_cfg_dir: PathBuf,
     xdg_cfg_dir: PathBuf,
+    app_data_dir: PathBuf,
+    local_app_data_dir: PathBuf,
     workspace_dir: PathBuf,
 }
 
@@ -37,11 +39,15 @@ impl IsolatedEnv {
         let data_dir = root.join("data");
         let global_cfg_dir = root.join("global_cfg");
         let xdg_cfg_dir = root.join("xdg_cfg");
+        let app_data_dir = root.join("app_data");
+        let local_app_data_dir = root.join("local_app_data");
         let workspace_dir = root.join("workspace");
         fs::create_dir_all(&home_dir).unwrap();
         fs::create_dir_all(&data_dir).unwrap();
         fs::create_dir_all(&global_cfg_dir).unwrap();
         fs::create_dir_all(&xdg_cfg_dir).unwrap();
+        fs::create_dir_all(&app_data_dir).unwrap();
+        fs::create_dir_all(&local_app_data_dir).unwrap();
         fs::create_dir_all(&workspace_dir).unwrap();
         Self {
             _temp: temp,
@@ -49,6 +55,8 @@ impl IsolatedEnv {
             data_dir,
             global_cfg_dir,
             xdg_cfg_dir,
+            app_data_dir,
+            local_app_data_dir,
             workspace_dir,
         }
     }
@@ -60,6 +68,10 @@ impl IsolatedEnv {
             .env("USERPROFILE", &self.home_dir)
             .env("XDG_DATA_HOME", self.home_dir.join(".local/share"))
             .env("XDG_CONFIG_HOME", &self.xdg_cfg_dir)
+            .env("APPDATA", &self.app_data_dir)
+            .env("AppData", &self.app_data_dir)
+            .env("LOCALAPPDATA", &self.local_app_data_dir)
+            .env("LocalAppData", &self.local_app_data_dir)
             .env("AGY_PULSE_DATA_DIR", &self.data_dir)
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
             .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
@@ -310,10 +322,18 @@ fn t04_lockfree_db_zero_side_effects_with_active_wal_and_immutable() {
         fs::metadata(&wal_sidecar).unwrap().len() > 0,
         "-wal sidecar must be non-empty"
     );
-    // Delete -shm while keeping writer connection open or re-check exact snapshot before/after binary
+    // Delete -shm while keeping writer connection open on Unix; on Windows SQLite mmap locks -shm
     let shm_sidecar = PathBuf::from(format!("{}-shm", wal_db_path.display()));
-    let _ = fs::remove_file(&shm_sidecar);
-    assert!(!shm_sidecar.exists(), "-shm removed before run");
+    #[cfg(unix)]
+    {
+        let _ = fs::remove_file(&shm_sidecar);
+        assert!(!shm_sidecar.exists(), "-shm removed before run");
+    }
+    #[cfg(windows)]
+    let (wal_len_before, shm_existed_before) = (
+        fs::metadata(&wal_sidecar).unwrap().len(),
+        shm_sidecar.exists(),
+    );
 
     let before_wal = snapshot_dir_bytes(&conv_dir);
     let stdin_wal = serde_json::json!({
@@ -338,6 +358,19 @@ fn t04_lockfree_db_zero_side_effects_with_active_wal_and_immutable() {
         before_wal, after_wal,
         "conversations/ must have zero -shm creation and zero byte modification during active WAL read"
     );
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            fs::metadata(&wal_sidecar).unwrap().len(),
+            wal_len_before,
+            "-wal size must remain unchanged during active WAL read"
+        );
+        assert_eq!(
+            shm_sidecar.exists(),
+            shm_existed_before,
+            "-shm existence must remain unchanged during active WAL read"
+        );
+    }
     drop(writer_conn);
 }
 

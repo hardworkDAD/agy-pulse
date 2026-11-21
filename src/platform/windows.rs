@@ -158,11 +158,14 @@ pub(super) fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()
     let tmp_path = path.with_file_name(tmp_name);
 
     let write_res = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)?;
-        file.write_all(bytes)?;
+        {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp_path)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
         fs::rename(&tmp_path, path)?;
         Ok(())
     })();

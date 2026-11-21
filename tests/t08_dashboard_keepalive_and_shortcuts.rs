@@ -29,7 +29,10 @@ struct IsolatedEnv {
     ide_data_dir: PathBuf,
     global_cfg_dir: PathBuf,
     xdg_cfg_dir: PathBuf,
+    app_data_dir: PathBuf,
+    local_app_data_dir: PathBuf,
     workspace_dir: PathBuf,
+    tmp_dir: PathBuf,
 }
 
 impl IsolatedEnv {
@@ -42,14 +45,20 @@ impl IsolatedEnv {
         let ide_data_dir = root.join("ide_data");
         let global_cfg_dir = root.join("global_cfg");
         let xdg_cfg_dir = root.join("xdg_cfg");
+        let app_data_dir = root.join("app_data");
+        let local_app_data_dir = root.join("local_app_data");
         let workspace_dir = root.join("workspace");
+        let tmp_dir = root.join("tmp");
         fs::create_dir_all(&home_dir).unwrap();
         fs::create_dir_all(&xdg_data_home).unwrap();
         fs::create_dir_all(&cli_data_dir).unwrap();
         fs::create_dir_all(&ide_data_dir).unwrap();
         fs::create_dir_all(&global_cfg_dir).unwrap();
         fs::create_dir_all(&xdg_cfg_dir).unwrap();
+        fs::create_dir_all(&app_data_dir).unwrap();
+        fs::create_dir_all(&local_app_data_dir).unwrap();
         fs::create_dir_all(&workspace_dir).unwrap();
+        fs::create_dir_all(&tmp_dir).unwrap();
         Self {
             _temp: temp,
             home_dir,
@@ -58,7 +67,10 @@ impl IsolatedEnv {
             ide_data_dir,
             global_cfg_dir,
             xdg_cfg_dir,
+            app_data_dir,
+            local_app_data_dir,
             workspace_dir,
+            tmp_dir,
         }
     }
 
@@ -73,10 +85,17 @@ impl IsolatedEnv {
             .env("USERPROFILE", &self.home_dir)
             .env("XDG_DATA_HOME", &self.xdg_data_home)
             .env("XDG_CONFIG_HOME", &self.xdg_cfg_dir)
+            .env("APPDATA", &self.app_data_dir)
+            .env("AppData", &self.app_data_dir)
+            .env("LOCALAPPDATA", &self.local_app_data_dir)
+            .env("LocalAppData", &self.local_app_data_dir)
             .env("AGY_PULSE_DATA_DIR", &self.cli_data_dir)
             .env("AGY_PULSE_IDE_DATA_DIR", &self.ide_data_dir)
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
             .env("AGY_PULSE_NO_OPEN", "1")
+            .env("TMPDIR", &self.tmp_dir)
+            .env("TMP", &self.tmp_dir)
+            .env("TEMP", &self.tmp_dir)
             .env("LC_ALL", "en_US.UTF-8")
             .env("LANG", "en_US.UTF-8");
         cmd
@@ -574,87 +593,256 @@ fn t08_app_window_command_construction_and_fingerprint_safe_shortcuts() {
 
     // 2. Shortcut installation & fingerprint-safe uninstallation in isolated TempDir
     let env = IsolatedEnv::new();
-    let apps_dir = env.xdg_data_home.join("applications");
-    let desktop_dir = env.home_dir.join("Desktop");
-    fs::create_dir_all(&apps_dir).unwrap();
-    fs::create_dir_all(&desktop_dir).unwrap();
 
-    // User custom files in same directories must never be touched
-    let user_app_file = apps_dir.join("user-custom.desktop");
-    let user_desktop_file = desktop_dir.join("my-notes.desktop");
-    fs::write(&user_app_file, "[Desktop Entry]\nName=My App\n").unwrap();
-    fs::write(&user_desktop_file, "[Desktop Entry]\nName=Notes\n").unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let apps_dir = env.xdg_data_home.join("applications");
+        let desktop_dir = env.home_dir.join("Desktop");
+        fs::create_dir_all(&apps_dir).unwrap();
+        fs::create_dir_all(&desktop_dir).unwrap();
 
-    // Even a same-named file without our fingerprint marker must NOT be deleted by uninstall
-    let foreign_same_name = apps_dir.join("agy-pulse-dashboard.desktop");
-    fs::write(
-        &foreign_same_name,
-        "[Desktop Entry]\nName=User Custom Entry\n",
-    )
-    .unwrap();
-    let foreign_uninstall = env
-        .base_cmd()
-        .args(["dashboard", "uninstall-shortcut", "--desktop"])
-        .output()
+        // User custom files in same directories must never be touched
+        let user_app_file = apps_dir.join("user-custom.desktop");
+        let user_desktop_file = desktop_dir.join("my-notes.desktop");
+        fs::write(&user_app_file, "[Desktop Entry]\nName=My App\n").unwrap();
+        fs::write(&user_desktop_file, "[Desktop Entry]\nName=Notes\n").unwrap();
+
+        // Even a same-named file without our fingerprint marker must NOT be deleted by uninstall
+        let foreign_same_name = apps_dir.join("agy-pulse-dashboard.desktop");
+        fs::write(
+            &foreign_same_name,
+            "[Desktop Entry]\nName=User Custom Entry\n",
+        )
         .unwrap();
-    assert!(foreign_uninstall.status.success());
-    assert!(
-        foreign_same_name.exists(),
-        "uninstall-shortcut must NOT delete files lacking the exclusive fingerprint"
-    );
-    fs::remove_file(&foreign_same_name).unwrap();
+        let foreign_uninstall = env
+            .base_cmd()
+            .args(["dashboard", "uninstall-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(foreign_uninstall.status.success());
+        assert!(
+            foreign_same_name.exists(),
+            "uninstall-shortcut must NOT delete files lacking the exclusive fingerprint"
+        );
+        fs::remove_file(&foreign_same_name).unwrap();
 
-    // Install with --desktop
-    let install_out = env
-        .base_cmd()
-        .args(["dashboard", "install-shortcut", "--desktop"])
-        .output()
-        .unwrap();
-    assert!(
-        install_out.status.success(),
-        "install-shortcut failed: {}",
-        String::from_utf8_lossy(&install_out.stderr)
-    );
+        // Install with --desktop
+        let install_out = env
+            .base_cmd()
+            .args(["dashboard", "install-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(
+            install_out.status.success(),
+            "install-shortcut failed: {}",
+            String::from_utf8_lossy(&install_out.stderr)
+        );
 
-    let installed_entry = apps_dir.join("agy-pulse-dashboard.desktop");
-    let installed_desktop = desktop_dir.join("agy-pulse-dashboard.desktop");
-    let installed_icon = env
-        .xdg_data_home
-        .join("icons/hicolor/scalable/apps/agy-pulse-dashboard.svg");
-    assert!(installed_entry.exists(), "missing app menu desktop entry");
-    assert!(installed_desktop.exists(), "missing Desktop shortcut copy");
-    assert!(installed_icon.exists(), "missing shortcut icon SVG");
+        let installed_entry = apps_dir.join("agy-pulse-dashboard.desktop");
+        let installed_desktop = desktop_dir.join("agy-pulse-dashboard.desktop");
+        let installed_icon = env
+            .xdg_data_home
+            .join("icons/hicolor/scalable/apps/agy-pulse-dashboard.svg");
+        assert!(installed_entry.exists(), "missing app menu desktop entry");
+        assert!(installed_desktop.exists(), "missing Desktop shortcut copy");
+        assert!(installed_icon.exists(), "missing shortcut icon SVG");
 
-    let entry_text = fs::read_to_string(&installed_entry).unwrap();
-    assert!(entry_text.contains(DASHBOARD_SHORTCUT_MARKER));
-    assert!(entry_text.contains("dashboard open"));
+        let entry_text = fs::read_to_string(&installed_entry).unwrap();
+        assert!(entry_text.contains(DASHBOARD_SHORTCUT_MARKER));
+        assert!(entry_text.contains("dashboard open"));
 
-    let status_installed = env
-        .base_cmd()
-        .args(["dashboard", "status"])
-        .output()
-        .unwrap();
-    assert!(status_installed.status.success());
-    let status_text = String::from_utf8_lossy(&status_installed.stdout);
-    assert!(
-        status_text.contains("installed"),
-        "expected shortcut installed in status, got: {status_text}"
-    );
+        let status_installed = env
+            .base_cmd()
+            .args(["dashboard", "status"])
+            .output()
+            .unwrap();
+        assert!(status_installed.status.success());
+        let status_text = String::from_utf8_lossy(&status_installed.stdout);
+        assert!(
+            status_text.contains("installed"),
+            "expected shortcut installed in status, got: {status_text}"
+        );
 
-    // Uninstall removes only fingerprinted files, leaving user custom files intact
-    let uninstall_out = env
-        .base_cmd()
-        .args(["dashboard", "uninstall-shortcut", "--desktop"])
-        .output()
-        .unwrap();
-    assert!(uninstall_out.status.success());
+        // Uninstall removes only fingerprinted files, leaving user custom files intact
+        let uninstall_out = env
+            .base_cmd()
+            .args(["dashboard", "uninstall-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(uninstall_out.status.success());
 
-    assert!(!installed_entry.exists());
-    assert!(!installed_desktop.exists());
-    assert!(!installed_icon.exists());
-    assert!(user_app_file.exists(), "user app file was wrongly deleted");
-    assert!(
-        user_desktop_file.exists(),
-        "user desktop file was wrongly deleted"
-    );
+        assert!(!installed_entry.exists());
+        assert!(!installed_desktop.exists());
+        assert!(!installed_icon.exists());
+        assert!(user_app_file.exists(), "user app file was wrongly deleted");
+        assert!(
+            user_desktop_file.exists(),
+            "user desktop file was wrongly deleted"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let apps_dir = env.home_dir.join("Applications");
+        let desktop_dir = env.home_dir.join("Desktop");
+        let user_app_file = apps_dir.join("User Custom.app/Contents/Info.plist");
+        let user_desktop_file = desktop_dir.join("my-notes.webloc");
+        fs::create_dir_all(user_app_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(&desktop_dir).unwrap();
+        fs::write(&user_app_file, "<plist>User Custom</plist>\n").unwrap();
+        fs::write(&user_desktop_file, "<plist>Notes</plist>\n").unwrap();
+
+        // Same-named .app bundle without our fingerprint marker must NOT be deleted by uninstall
+        let foreign_bundle = apps_dir.join("agy-pulse Dashboard.app");
+        let foreign_plist = foreign_bundle.join("Contents/Info.plist");
+        fs::create_dir_all(foreign_plist.parent().unwrap()).unwrap();
+        fs::write(&foreign_plist, "<plist>User Custom Entry</plist>\n").unwrap();
+        let foreign_uninstall = env
+            .base_cmd()
+            .args(["dashboard", "uninstall-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(foreign_uninstall.status.success());
+        assert!(
+            foreign_plist.exists(),
+            "uninstall-shortcut must NOT delete .app bundles lacking the exclusive fingerprint"
+        );
+        fs::remove_dir_all(&foreign_bundle).unwrap();
+
+        let install_out = env
+            .base_cmd()
+            .args(["dashboard", "install-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(
+            install_out.status.success(),
+            "install-shortcut failed: {}",
+            String::from_utf8_lossy(&install_out.stderr)
+        );
+
+        let installed_plist = foreign_bundle.join("Contents/Info.plist");
+        let installed_script = foreign_bundle.join("Contents/MacOS/agy-pulse-dashboard");
+        let installed_icon = foreign_bundle.join("Contents/Resources/agy-pulse-dashboard.svg");
+        assert!(installed_plist.exists(), "missing macOS Info.plist");
+        assert!(installed_script.exists(), "missing macOS launcher script");
+        assert!(installed_icon.exists(), "missing macOS bundle icon SVG");
+
+        let plist_text = fs::read_to_string(&installed_plist).unwrap();
+        let script_text = fs::read_to_string(&installed_script).unwrap();
+        assert!(plist_text.contains(DASHBOARD_SHORTCUT_MARKER));
+        assert!(script_text.contains(DASHBOARD_SHORTCUT_MARKER));
+        assert!(script_text.contains("dashboard open"));
+
+        let status_installed = env
+            .base_cmd()
+            .args(["dashboard", "status"])
+            .output()
+            .unwrap();
+        assert!(status_installed.status.success());
+        let status_text = String::from_utf8_lossy(&status_installed.stdout);
+        assert!(
+            status_text.contains("installed"),
+            "expected shortcut installed in status, got: {status_text}"
+        );
+
+        let uninstall_out = env
+            .base_cmd()
+            .args(["dashboard", "uninstall-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(uninstall_out.status.success());
+
+        assert!(!foreign_bundle.exists());
+        assert!(!installed_plist.exists());
+        assert!(!installed_script.exists());
+        assert!(!installed_icon.exists());
+        assert!(user_app_file.exists(), "user app file was wrongly deleted");
+        assert!(
+            user_desktop_file.exists(),
+            "user desktop file was wrongly deleted"
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        let start_dir = env
+            .app_data_dir
+            .join("Microsoft/Windows/Start Menu/Programs");
+        let desktop_dir = env.home_dir.join("Desktop");
+        let vbs_dir = env.local_app_data_dir.join("agy-pulse");
+        fs::create_dir_all(&start_dir).unwrap();
+        fs::create_dir_all(&desktop_dir).unwrap();
+        fs::create_dir_all(&vbs_dir).unwrap();
+
+        let user_start_file = start_dir.join("user-custom.lnk");
+        let user_desktop_file = desktop_dir.join("my-notes.lnk");
+        fs::write(&user_start_file, b"user-start-shortcut").unwrap();
+        fs::write(&user_desktop_file, b"user-desktop-shortcut").unwrap();
+
+        let installed_vbs = vbs_dir.join("agy-pulse-dashboard.vbs");
+        fs::write(&installed_vbs, "' User custom script\r\n").unwrap();
+        let foreign_uninstall = env
+            .base_cmd()
+            .args(["dashboard", "uninstall-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(foreign_uninstall.status.success());
+        assert!(
+            installed_vbs.exists(),
+            "uninstall-shortcut must NOT delete scripts lacking the exclusive fingerprint"
+        );
+        fs::remove_file(&installed_vbs).unwrap();
+
+        let install_out = env
+            .base_cmd()
+            .args(["dashboard", "install-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(
+            install_out.status.success(),
+            "install-shortcut failed: {}",
+            String::from_utf8_lossy(&install_out.stderr)
+        );
+
+        let installed_icon = vbs_dir.join("agy-pulse-dashboard.svg");
+        let installed_start_lnk = start_dir.join("agy-pulse Dashboard.lnk");
+        let installed_desktop_lnk = desktop_dir.join("agy-pulse Dashboard.lnk");
+        assert!(installed_vbs.exists(), "missing Windows VBS launcher");
+        assert!(installed_icon.exists(), "missing Windows icon SVG");
+        assert!(installed_start_lnk.exists(), "missing Start Menu .lnk");
+        assert!(installed_desktop_lnk.exists(), "missing Desktop .lnk");
+
+        let vbs_text = fs::read_to_string(&installed_vbs).unwrap();
+        assert!(vbs_text.contains(DASHBOARD_SHORTCUT_MARKER));
+        assert!(vbs_text.contains("dashboard open"));
+
+        let status_installed = env
+            .base_cmd()
+            .args(["dashboard", "status"])
+            .output()
+            .unwrap();
+        assert!(status_installed.status.success());
+        let status_text = String::from_utf8_lossy(&status_installed.stdout);
+        assert!(
+            status_text.contains("installed"),
+            "expected shortcut installed in status, got: {status_text}"
+        );
+
+        let uninstall_out = env
+            .base_cmd()
+            .args(["dashboard", "uninstall-shortcut", "--desktop"])
+            .output()
+            .unwrap();
+        assert!(uninstall_out.status.success());
+
+        assert!(!installed_vbs.exists());
+        assert!(!installed_icon.exists());
+        assert!(!installed_start_lnk.exists());
+        assert!(!installed_desktop_lnk.exists());
+        assert!(user_start_file.exists(), "user Start Menu file was wrongly deleted");
+        assert!(
+            user_desktop_file.exists(),
+            "user desktop file was wrongly deleted"
+        );
+    }
 }

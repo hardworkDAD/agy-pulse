@@ -33,6 +33,9 @@ struct IsolatedEnv {
     home_dir: PathBuf,
     data_dir: PathBuf,
     global_cfg_dir: PathBuf,
+    xdg_cfg_dir: PathBuf,
+    app_data_dir: PathBuf,
+    local_app_data_dir: PathBuf,
     workspace_dir: PathBuf,
 }
 
@@ -43,16 +46,25 @@ impl IsolatedEnv {
         let home_dir = root.join("home");
         let data_dir = root.join("data");
         let global_cfg_dir = root.join("global_cfg");
+        let xdg_cfg_dir = root.join("xdg_cfg");
+        let app_data_dir = root.join("app_data");
+        let local_app_data_dir = root.join("local_app_data");
         let workspace_dir = root.join("workspace");
         fs::create_dir_all(&home_dir).unwrap();
         fs::create_dir_all(&data_dir).unwrap();
         fs::create_dir_all(&global_cfg_dir).unwrap();
+        fs::create_dir_all(&xdg_cfg_dir).unwrap();
+        fs::create_dir_all(&app_data_dir).unwrap();
+        fs::create_dir_all(&local_app_data_dir).unwrap();
         fs::create_dir_all(&workspace_dir).unwrap();
         Self {
             _temp: temp,
             home_dir,
             data_dir,
             global_cfg_dir,
+            xdg_cfg_dir,
+            app_data_dir,
+            local_app_data_dir,
             workspace_dir,
         }
     }
@@ -63,6 +75,11 @@ impl IsolatedEnv {
             .env("HOME", &self.home_dir)
             .env("USERPROFILE", &self.home_dir)
             .env("XDG_DATA_HOME", self.home_dir.join(".local/share"))
+            .env("XDG_CONFIG_HOME", &self.xdg_cfg_dir)
+            .env("APPDATA", &self.app_data_dir)
+            .env("AppData", &self.app_data_dir)
+            .env("LOCALAPPDATA", &self.local_app_data_dir)
+            .env("LocalAppData", &self.local_app_data_dir)
             .env("AGY_PULSE_DATA_DIR", &self.data_dir)
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
             .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")

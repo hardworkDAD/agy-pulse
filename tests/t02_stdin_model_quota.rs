@@ -31,6 +31,9 @@ struct IsolatedEnv {
     home_dir: PathBuf,
     data_dir: PathBuf,
     global_cfg_dir: PathBuf,
+    xdg_cfg_dir: PathBuf,
+    app_data_dir: PathBuf,
+    local_app_data_dir: PathBuf,
     workspace_dir: PathBuf,
 }
 
@@ -41,16 +44,25 @@ impl IsolatedEnv {
         let home_dir = root.join("home");
         let data_dir = root.join("data");
         let global_cfg_dir = root.join("global_cfg");
+        let xdg_cfg_dir = root.join("xdg_cfg");
+        let app_data_dir = root.join("app_data");
+        let local_app_data_dir = root.join("local_app_data");
         let workspace_dir = root.join("workspace");
         fs::create_dir_all(&home_dir).unwrap();
         fs::create_dir_all(&data_dir).unwrap();
         fs::create_dir_all(&global_cfg_dir).unwrap();
+        fs::create_dir_all(&xdg_cfg_dir).unwrap();
+        fs::create_dir_all(&app_data_dir).unwrap();
+        fs::create_dir_all(&local_app_data_dir).unwrap();
         fs::create_dir_all(&workspace_dir).unwrap();
         Self {
             _temp: temp,
             home_dir,
             data_dir,
             global_cfg_dir,
+            xdg_cfg_dir,
+            app_data_dir,
+            local_app_data_dir,
             workspace_dir,
         }
     }
@@ -66,6 +78,11 @@ impl IsolatedEnv {
             .env("HOME", &self.home_dir)
             .env("USERPROFILE", &self.home_dir)
             .env("XDG_DATA_HOME", self.home_dir.join(".local/share"))
+            .env("XDG_CONFIG_HOME", &self.xdg_cfg_dir)
+            .env("APPDATA", &self.app_data_dir)
+            .env("AppData", &self.app_data_dir)
+            .env("LOCALAPPDATA", &self.local_app_data_dir)
+            .env("LocalAppData", &self.local_app_data_dir)
             .env("AGY_PULSE_DATA_DIR", &self.data_dir)
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
             .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
@@ -402,7 +419,11 @@ fn e2e_stdin_multi_provider_quota_aliases_and_openai_filtering() {
     })
     .to_string();
 
-    let (code, stdout, stderr) = env.run_stdin(&agy_pulse_bin(), &payload, &[("COLUMNS", "120")]);
+    let (code, stdout, stderr) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
     assert_eq!(code, 0);
     assert_eq!(stderr, "");
 
@@ -448,7 +469,11 @@ fn e2e_quota_styles_models_fallback_compact_none_and_expired_handling() {
         .to_string(),
     )
     .unwrap();
-    let (code1, out1, err1) = env.run_stdin(&agypl_bin(), &payload, &[("COLUMNS", "120")]);
+    let (code1, out1, err1) = env.run_stdin(
+        &agypl_bin(),
+        &payload,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
     assert_eq!(code1, 0);
     assert_eq!(err1, "");
     let plain1 = strip_ansi(&out1);
@@ -467,7 +492,11 @@ fn e2e_quota_styles_models_fallback_compact_none_and_expired_handling() {
         .to_string(),
     )
     .unwrap();
-    let (code2, out2, _) = env.run_stdin(&agy_pulse_bin(), &payload, &[("COLUMNS", "120")]);
+    let (code2, out2, _) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
     assert_eq!(code2, 0);
     let plain2 = strip_ansi(&out2);
     assert!(plain2.contains("Google: 25% │ Claude: 8%"), "compact summary mismatch:\n{plain2}");

@@ -165,6 +165,8 @@ impl IsolatedEnv {
             .env("AGY_PULSE_NO_OPEN", "1")
             .env("AGY_PULSE_DISABLE_UPDATE_CHECK", "1")
             .env("TMPDIR", &self.tmp_dir)
+            .env("TMP", &self.tmp_dir)
+            .env("TEMP", &self.tmp_dir)
             .env_remove("AGY_PULSE_FORCE_ASCII")
             .env_remove("AGY_PULSE_FORCE_UNICODE")
             .env_remove("AGY_PULSE_LANGUAGE")
@@ -879,7 +881,13 @@ fn t11_cli_statusline_autostart_reuse_and_opt_out() {
     assert!(strip_ansi(&out4).contains(&expected_url));
     assert!(
         wait_until(Duration::from_secs(5), || {
-            http_get_status_and_body(port, "/api/health").is_some_and(|(s, _)| s == 200)
+            env.state_file_path().exists()
+                && fs::read_to_string(env.state_file_path())
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                    .and_then(|v| v["pid"].as_u64())
+                    .is_some_and(|pid| pid != u64::from(dummy_pid))
+                && http_get_status_and_body(port, "/api/health").is_some_and(|(s, _)| s == 200)
         }),
         "respawned dashboard did not become healthy after ping failure"
     );

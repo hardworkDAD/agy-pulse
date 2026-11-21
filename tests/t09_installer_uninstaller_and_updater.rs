@@ -109,6 +109,8 @@ impl IsolatedEnv {
             .env("AGY_PULSE_NO_OPEN", "1")
             .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
             .env("TMPDIR", &self.tmp_dir)
+            .env("TMP", &self.tmp_dir)
+            .env("TEMP", &self.tmp_dir)
             .env("LC_ALL", "en_US.UTF-8")
             .env("LANG", "en_US.UTF-8");
         cmd
@@ -780,11 +782,55 @@ fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_b
         .unwrap();
     assert_eq!(shortcut_out.status.code(), Some(0));
 
-    // Add an unrelated desktop file that must NOT be removed
-    let apps_dir = env.xdg_data_home.join("applications");
-    fs::create_dir_all(&apps_dir).unwrap();
-    let foreign_desktop = apps_dir.join("other-unrelated-app.desktop");
-    fs::write(&foreign_desktop, "[Desktop Entry]\nName=Other\n").unwrap();
+    // Add an unrelated shortcut/entry file that must NOT be removed
+    #[cfg(target_os = "linux")]
+    let (installed_shortcuts, foreign_shortcut) = {
+        let apps_dir = env.xdg_data_home.join("applications");
+        fs::create_dir_all(&apps_dir).unwrap();
+        let foreign = apps_dir.join("other-unrelated-app.desktop");
+        fs::write(&foreign, "[Desktop Entry]\nName=Other\n").unwrap();
+        (vec![apps_dir.join("agy-pulse-dashboard.desktop")], foreign)
+    };
+    #[cfg(target_os = "macos")]
+    let (installed_shortcuts, foreign_shortcut) = {
+        let apps_dir = env.home_dir.join("Applications");
+        let foreign = apps_dir.join("OtherApp.app/Contents/Info.plist");
+        fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+        fs::write(&foreign, "<plist>Other</plist>\n").unwrap();
+        (
+            vec![
+                apps_dir.join("agy-pulse Dashboard.app"),
+                apps_dir.join("agy-pulse Dashboard.app/Contents/Info.plist"),
+            ],
+            foreign,
+        )
+    };
+    #[cfg(windows)]
+    let (installed_shortcuts, foreign_shortcut) = {
+        let start_dir = env
+            .app_data
+            .join("Microsoft/Windows/Start Menu/Programs");
+        fs::create_dir_all(&start_dir).unwrap();
+        let foreign = start_dir.join("other-unrelated-app.lnk");
+        fs::write(&foreign, b"foreign-lnk").unwrap();
+        (
+            vec![
+                env.local_app_data
+                    .join("agy-pulse/agy-pulse-dashboard.vbs"),
+                env.local_app_data
+                    .join("agy-pulse/agy-pulse-dashboard.svg"),
+                start_dir.join("agy-pulse Dashboard.lnk"),
+            ],
+            foreign,
+        )
+    };
+    for path in &installed_shortcuts {
+        assert!(
+            path.exists(),
+            "expected installed shortcut artifact: {}",
+            path.display()
+        );
+    }
 
     // Seed caches, legacy runtime dir, ledger + WAL/SHM, and global config
     let legacy_runtime = env.cli_data_dir.join("agy-pulse-runtime");
@@ -840,9 +886,15 @@ fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_b
     assert!(!deployed_primary.exists());
     assert!(!deployed_alias.exists());
 
-    // Fingerprinted shortcut removed, unrelated desktop file preserved
-    assert!(!apps_dir.join("agy-pulse-dashboard.desktop").exists());
-    assert!(foreign_desktop.is_file());
+    // Fingerprinted shortcut removed, unrelated shortcut file preserved
+    for path in &installed_shortcuts {
+        assert!(
+            !path.exists(),
+            "shortcut artifact was not removed: {}",
+            path.display()
+        );
+    }
+    assert!(foreign_shortcut.is_file());
 
     // Caches and runtime dir removed
     assert!(!legacy_runtime.exists());

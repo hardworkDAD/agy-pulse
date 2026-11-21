@@ -30,6 +30,8 @@ struct IsolatedEnv {
     data_dir: PathBuf,
     global_cfg_dir: PathBuf,
     xdg_cfg_dir: PathBuf,
+    app_data_dir: PathBuf,
+    local_app_data_dir: PathBuf,
     workspace_dir: PathBuf,
 }
 
@@ -41,11 +43,15 @@ impl IsolatedEnv {
         let data_dir = root.join("data");
         let global_cfg_dir = root.join("global_cfg");
         let xdg_cfg_dir = root.join("xdg_cfg");
+        let app_data_dir = root.join("app_data");
+        let local_app_data_dir = root.join("local_app_data");
         let workspace_dir = root.join("workspace");
         fs::create_dir_all(&home_dir).unwrap();
         fs::create_dir_all(&data_dir).unwrap();
         fs::create_dir_all(&global_cfg_dir).unwrap();
         fs::create_dir_all(&xdg_cfg_dir).unwrap();
+        fs::create_dir_all(&app_data_dir).unwrap();
+        fs::create_dir_all(&local_app_data_dir).unwrap();
         fs::create_dir_all(&workspace_dir).unwrap();
         Self {
             _temp: temp,
@@ -53,6 +59,8 @@ impl IsolatedEnv {
             data_dir,
             global_cfg_dir,
             xdg_cfg_dir,
+            app_data_dir,
+            local_app_data_dir,
             workspace_dir,
         }
     }
@@ -69,6 +77,10 @@ impl IsolatedEnv {
             .env("USERPROFILE", &self.home_dir)
             .env("XDG_DATA_HOME", self.home_dir.join(".local/share"))
             .env("XDG_CONFIG_HOME", &self.xdg_cfg_dir)
+            .env("APPDATA", &self.app_data_dir)
+            .env("AppData", &self.app_data_dir)
+            .env("LOCALAPPDATA", &self.local_app_data_dir)
+            .env("LocalAppData", &self.local_app_data_dir)
             .env("AGY_PULSE_DATA_DIR", &self.data_dir)
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
             .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
@@ -658,7 +670,11 @@ fn t03_compaction_checkpoint_resets_active_context_and_preserves_peak_and_count(
         writeln!(f, "{ckpt}").unwrap();
     }
 
-    let (_, out_after_ckpt, _) = env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
+    let (_, out_after_ckpt, _) = env.run_stdin(
+        &agy_pulse_bin(),
+        &stdin_payload,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
     let plain_after_ckpt = strip_ansi(&out_after_ckpt);
     assert!(
         plain_after_ckpt.contains("0/512k"),
@@ -698,7 +714,11 @@ fn t03_compaction_checkpoint_resets_active_context_and_preserves_peak_and_count(
         writeln!(f, "{turn2}").unwrap();
     }
 
-    let (_, out_post_turn, _) = env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
+    let (_, out_post_turn, _) = env.run_stdin(
+        &agy_pulse_bin(),
+        &stdin_payload,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
     let plain_post_turn = strip_ansi(&out_post_turn);
     assert!(
         plain_post_turn.contains("30.4K/512K"),
@@ -836,7 +856,11 @@ fn t03_child_and_swarm_active_model_speeds_capped_at_three_and_expire_on_idle() 
     })
     .to_string();
 
-    let (_, out1, _) = env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "200")]);
+    let (_, out1, _) = env.run_stdin(
+        &agy_pulse_bin(),
+        &stdin_payload,
+        &[("COLUMNS", "200"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
     let line1 = strip_ansi(&out1).lines().next().unwrap_or("").to_string();
     // Top 3 most recent distinct models: Flash (300.0), Argon (220.0), Neon (250.0); oldest Hydro is capped out!
     assert!(line1.contains("⚡ "), "missing ⚡ child speed prefix:\n{line1}");
@@ -986,10 +1010,19 @@ fn t03_workspace_rules_memory_hooks_and_mcp_offline_scan_and_render() {
         .to_string(),
     )
     .unwrap();
-    let claude_dir = env.xdg_cfg_dir.join("Claude");
-    fs::create_dir_all(&claude_dir).unwrap();
+    #[cfg(target_os = "macos")]
+    let claude_config_path = env
+        .home_dir
+        .join("Library/Application Support/Claude/claude_desktop_config.json");
+    #[cfg(windows)]
+    let claude_config_path = env.app_data_dir.join("Claude/claude_desktop_config.json");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let claude_config_path = env.xdg_cfg_dir.join("Claude/claude_desktop_config.json");
+    if let Some(claude_dir) = claude_config_path.parent() {
+        fs::create_dir_all(claude_dir).unwrap();
+    }
     fs::write(
-        claude_dir.join("claude_desktop_config.json"),
+        &claude_config_path,
         serde_json::json!({
             "mcpServers": {
                 "memory": {}

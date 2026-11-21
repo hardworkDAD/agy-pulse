@@ -47,7 +47,15 @@ fn percent_encode_sqlite_uri_path(path_str: &str) -> String {
 
 pub(super) fn to_immutable_sqlite_uri(db_path: &Path) -> String {
     let abs = std::path::absolute(db_path).unwrap_or_else(|_| db_path.to_path_buf());
-    let normalized = abs.to_string_lossy().replace('\\', "/");
+    let abs_lossy = abs.to_string_lossy();
+    let stripped = if let Some(unc_rest) = abs_lossy.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc_rest}")
+    } else if let Some(rest) = abs_lossy.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        abs_lossy.into_owned()
+    };
+    let normalized = stripped.replace('\\', "/");
     let encoded = percent_encode_sqlite_uri_path(&normalized);
     if normalized.starts_with('/') {
         format!("file:{encoded}?immutable=1")

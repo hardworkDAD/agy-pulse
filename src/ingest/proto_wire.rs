@@ -527,7 +527,8 @@ fn normalize_workspace_uri(raw: Option<Cow<'_, str>>) -> Option<String> {
     if s.is_empty() {
         return None;
     }
-    if s.len() >= 7 && s[..7].eq_ignore_ascii_case("file://") {
+    s = percent_decode_lossy(&s);
+    if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("file://")) {
         let rest = &s[7..];
         if rest.starts_with('/')
             && rest.len() >= 3
@@ -539,7 +540,6 @@ fn normalize_workspace_uri(raw: Option<Cow<'_, str>>) -> Option<String> {
             s = rest.to_string();
         }
     }
-    s = percent_decode_lossy(&s);
     let is_windows_drive_root = s.len() >= 2
         && s.as_bytes()[0].is_ascii_alphabetic()
         && s.as_bytes()[1] == b':'

@@ -25,6 +25,8 @@ struct IsolatedEnv {
     ide_data_dir: PathBuf,
     global_cfg_dir: PathBuf,
     bin_dir: PathBuf,
+    local_app_data: PathBuf,
+    app_data: PathBuf,
     workspace_dir: PathBuf,
     tmp_dir: PathBuf,
 }
@@ -40,6 +42,8 @@ impl IsolatedEnv {
         let ide_data_dir = root.join("ide_data");
         let global_cfg_dir = root.join("global_cfg");
         let bin_dir = root.join("user_bin");
+        let local_app_data = root.join("local_app_data");
+        let app_data = root.join("app_data");
         let workspace_dir = root.join("ws");
         let tmp_dir = root.join("tmp");
 
@@ -51,6 +55,8 @@ impl IsolatedEnv {
             &ide_data_dir,
             &global_cfg_dir,
             &bin_dir,
+            &local_app_data,
+            &app_data,
             &workspace_dir,
             &tmp_dir,
         ] {
@@ -66,6 +72,8 @@ impl IsolatedEnv {
             ide_data_dir,
             global_cfg_dir,
             bin_dir,
+            local_app_data,
+            app_data,
             workspace_dir,
             tmp_dir,
         }
@@ -78,6 +86,10 @@ impl IsolatedEnv {
             .env("USERPROFILE", &self.home_dir)
             .env("XDG_DATA_HOME", &self.xdg_data_home)
             .env("XDG_CONFIG_HOME", &self.xdg_cfg_home)
+            .env("LOCALAPPDATA", &self.local_app_data)
+            .env("LocalAppData", &self.local_app_data)
+            .env("APPDATA", &self.app_data)
+            .env("AppData", &self.app_data)
             .env("AGY_PULSE_DATA_DIR", &self.cli_data_dir)
             .env("AGY_PULSE_IDE_DATA_DIR", &self.ide_data_dir)
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
@@ -86,6 +98,8 @@ impl IsolatedEnv {
             .env("AGY_PULSE_NO_OPEN", "1")
             .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
             .env("TMPDIR", &self.tmp_dir)
+            .env("TMP", &self.tmp_dir)
+            .env("TEMP", &self.tmp_dir)
             .env_remove("AGY_PULSE_FORCE_ASCII")
             .env_remove("AGY_PULSE_FORCE_UNICODE")
             .env_remove("AGY_PULSE_LANGUAGE")
@@ -331,7 +345,8 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         })
         .to_string();
 
-        let (code, out, err) = env.run_stdin(&agy_pulse_bin(), &stdin, &[]);
+        let (code, out, err) =
+            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
@@ -398,7 +413,8 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         })
         .to_string();
 
-        let (code, out, err) = env.run_stdin(&agy_pulse_bin(), &stdin, &[]);
+        let (code, out, err) =
+            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
@@ -569,7 +585,8 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         })
         .to_string();
 
-        let (code, out, err) = env.run_stdin(&agy_pulse_bin(), &stdin, &[]);
+        let (code, out, err) =
+            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
@@ -597,7 +614,8 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         )
         .unwrap();
 
-        let (c_empty, out_empty, err_empty) = env.run_stdin(&agy_pulse_bin(), "", &[]);
+        let (c_empty, out_empty, err_empty) =
+            env.run_stdin(&agy_pulse_bin(), "", &[("AGY_PULSE_FORCE_UNICODE", "1")]);
         assert_eq!(c_empty, 0);
         assert_eq!(err_empty, "");
         assert_eq!(
@@ -605,7 +623,11 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
             "ws │ Free\n◈ Unknown Model · Ctx ············ 0.0% (limit 512K)"
         );
 
-        let (c_bad, out_bad, err_bad) = env.run_stdin(&agy_pulse_bin(), "{not valid json", &[]);
+        let (c_bad, out_bad, err_bad) = env.run_stdin(
+            &agy_pulse_bin(),
+            "{not valid json",
+            &[("AGY_PULSE_FORCE_UNICODE", "1")],
+        );
         assert_eq!(c_bad, 0);
         assert_eq!(err_bad, "");
         assert_eq!(strip_ansi(&out_bad), strip_ansi(&out_empty));
@@ -655,7 +677,8 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
         })
         .to_string();
 
-        let (code, out, err) = env.run_stdin(&agy_pulse_bin(), &stdin, &[]);
+        let (code, out, err) =
+            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
@@ -703,7 +726,8 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
         })
         .to_string();
 
-        let (code, out, err) = env.run_stdin(&agy_pulse_bin(), &stdin, &[]);
+        let (code, out, err) =
+            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
         assert_eq!(code, 0, "stderr: {err}");
         assert_eq!(
             strip_ansi(&out),
@@ -759,7 +783,11 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
             .to_string(),
         )
         .unwrap();
-        let (code, out, _) = env.run_stdin(&agy_pulse_bin(), &narrow_stdin, &[("COLUMNS", "64")]);
+        let (code, out, _) = env.run_stdin(
+            &agy_pulse_bin(),
+            &narrow_stdin,
+            &[("COLUMNS", "64"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+        );
         assert_eq!(code, 0);
         let plain = strip_ansi(&out);
         for line in plain.lines() {
