@@ -6,6 +6,11 @@
 
 | 文档 | 内容 |
 |---|---|
+| [../GLOSSARY.md](../GLOSSARY.md) | 领域术语表（状态栏、网页看板、单窗对话、任务树、账本、配额等标准概念边界） |
+| [rust-v2-architecture.md](rust-v2-architecture.md) | **Rust v2.0.0 重写共识归档与深模块架构蓝图**（范围裁剪、7 大深模块接口、防屎山红线与实施路线） |
+| [adr/0001-rust-single-binary-v2.md](adr/0001-rust-single-binary-v2.md) | ADR-0001：采用单一原生 Rust 二进制重构本地运行时（v2.0.0） |
+| [adr/0002-remove-cloud-quota-requests.md](adr/0002-remove-cloud-quota-requests.md) | ADR-0002：移除向反重力/Google 服务端主动发请求的云端配额模块 |
+| [adr/0003-deep-module-single-crate.md](adr/0003-deep-module-single-crate.md) | ADR-0003：采用高内聚深模块与纯数据契约实现模块解耦 |
 | [reference.md](reference.md) | 完整参考手册（English）：CLI 参数全表、账本与看板机制、配置项全表、环境变量与目录树 |
 | [reference_zh.md](reference_zh.md) | 完整参考手册（中文）：CLI 参数全表、账本与看板机制、配置项全表、环境变量与目录树 |
 | [architecture.md](architecture.md) | 系统架构（English）：两层设计、模块依赖图、v1.0.0 架构升级 |
