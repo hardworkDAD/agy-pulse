@@ -1,0 +1,1015 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rusqlite::{Connection, params};
+use serde_json::Value;
+use tempfile::TempDir;
+
+use agy_pulse::config::LanguageSetting;
+use agy_pulse::dashboard::{
+    DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_DASHBOARD_PORT, DashboardAction,
+    DashboardServer, DashboardServerConfig, parse_dashboard_args,
+};
+
+fn agypl_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_agypl"))
+}
+
+fn agy_pulse_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_agy-pulse"))
+}
+
+struct IsolatedEnv {
+    _temp: TempDir,
+    home_dir: PathBuf,
+    cli_data_dir: PathBuf,
+    ide_data_dir: PathBuf,
+    global_cfg_dir: PathBuf,
+    xdg_cfg_dir: PathBuf,
+    workspace_dir: PathBuf,
+}
+
+impl IsolatedEnv {
+    fn new() -> Self {
+        let temp = TempDir::new().expect("create temp dir");
+        let root = temp.path();
+        let home_dir = root.join("home");
+        let cli_data_dir = root.join("cli_data");
+        let ide_data_dir = root.join("ide_data");
+        let global_cfg_dir = root.join("global_cfg");
+        let xdg_cfg_dir = root.join("xdg_cfg");
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&cli_data_dir).unwrap();
+        fs::create_dir_all(&ide_data_dir).unwrap();
+        fs::create_dir_all(&global_cfg_dir).unwrap();
+        fs::create_dir_all(&xdg_cfg_dir).unwrap();
+        fs::create_dir_all(&workspace_dir).unwrap();
+        Self {
+            _temp: temp,
+            home_dir,
+            cli_data_dir,
+            ide_data_dir,
+            global_cfg_dir,
+            xdg_cfg_dir,
+            workspace_dir,
+        }
+    }
+
+    fn ledger_path(&self) -> PathBuf {
+        self.cli_data_dir.join("agy-pulse-ledger.sqlite")
+    }
+
+    fn base_cmd(&self, bin: &Path) -> Command {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(&self.workspace_dir)
+            .env("HOME", &self.home_dir)
+            .env("USERPROFILE", &self.home_dir)
+            .env("XDG_DATA_HOME", self.home_dir.join(".local/share"))
+            .env("XDG_CONFIG_HOME", &self.xdg_cfg_dir)
+            .env("AGY_PULSE_DATA_DIR", &self.cli_data_dir)
+            .env("AGY_PULSE_IDE_DATA_DIR", &self.ide_data_dir)
+            .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
+            .env("LC_ALL", "en_US.UTF-8")
+            .env("LANG", "en_US.UTF-8");
+        cmd
+    }
+}
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+// --- Minimal Protobuf encoders for test host conversation DBs ---
+
+fn encode_varint(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    while v >= 0x80 {
+        out.push(((v & 0x7f) as u8) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+    out
+}
+
+fn pb_varint(field_num: u32, val: u64) -> Vec<u8> {
+    let mut out = encode_varint(u64::from(field_num) << 3);
+    out.extend(encode_varint(val));
+    out
+}
+
+fn pb_bytes(field_num: u32, payload: &[u8]) -> Vec<u8> {
+    let mut out = encode_varint((u64::from(field_num) << 3) | 2);
+    out.extend(encode_varint(payload.len() as u64));
+    out.extend_from_slice(payload);
+    out
+}
+
+fn pb_str(field_num: u32, s: &str) -> Vec<u8> {
+    pb_bytes(field_num, s.as_bytes())
+}
+
+fn pb_timestamp_ms(field_num: u32, ts_ms: i64) -> Vec<u8> {
+    let sec = (ts_ms / 1000) as u64;
+    let nanos = ((ts_ms % 1000) * 1_000_000) as u64;
+    let mut inner = pb_varint(1, sec);
+    if nanos > 0 {
+        inner.extend(pb_varint(2, nanos));
+    }
+    pb_bytes(field_num, &inner)
+}
+
+fn pb_duration_sec(field_num: u32, sec: u64, nanos: u64) -> Vec<u8> {
+    let mut inner = Vec::new();
+    if sec > 0 {
+        inner.extend(pb_varint(1, sec));
+    }
+    if nanos > 0 {
+        inner.extend(pb_varint(2, nanos));
+    }
+    pb_bytes(field_num, &inner)
+}
+
+fn build_step_metadata_blob(ts_ms: i64) -> Vec<u8> {
+    pb_timestamp_ms(1, ts_ms)
+}
+
+fn build_trajectory_blob(
+    workspace_uri: &str,
+    branch: &str,
+    created_at_ms: i64,
+    cascade_id: Option<&str>,
+) -> Vec<u8> {
+    let mut ws = pb_str(1, workspace_uri);
+    ws.extend(pb_str(4, branch));
+    let mut out = pb_bytes(1, &ws);
+    out.extend(pb_timestamp_ms(2, created_at_ms));
+    if let Some(cid) = cascade_id {
+        out.extend(pb_str(6, cid));
+    }
+    out
+}
+
+struct GenStepSpec<'a> {
+    display_name: &'a str,
+    input_tokens: u64,
+    cache_read_tokens: u64,
+    output_tokens: u64,
+    stream_sec: Option<(u64, u64)>,
+    ttft_sec: Option<(u64, u64)>,
+    parent_cascade_id: Option<&'a str>,
+    root_cascade_id: Option<&'a str>,
+}
+
+fn build_gen_blob(step_indices: &[u64], entries: &[GenStepSpec<'_>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &idx in step_indices {
+        out.extend(pb_varint(2, idx));
+    }
+    for e in entries {
+        let mut f1 = pb_str(21, e.display_name);
+        let mut usage = Vec::new();
+        if e.input_tokens > 0 {
+            usage.extend(pb_varint(2, e.input_tokens));
+        }
+        if e.output_tokens > 0 {
+            usage.extend(pb_varint(3, e.output_tokens));
+        }
+        if e.cache_read_tokens > 0 {
+            usage.extend(pb_varint(5, e.cache_read_tokens));
+        }
+        f1.extend(pb_bytes(4, &usage));
+        if let Some((sec, nanos)) = e.ttft_sec {
+            f1.extend(pb_duration_sec(11, sec, nanos));
+        }
+        if let Some((sec, nanos)) = e.stream_sec {
+            f1.extend(pb_duration_sec(12, sec, nanos));
+        }
+        for (k, v) in [
+            ("parent_cascade_id", e.parent_cascade_id),
+            ("root_cascade_id", e.root_cascade_id),
+        ] {
+            if let Some(val) = v {
+                let mut kv = pb_str(1, k);
+                kv.extend(pb_str(2, val));
+                f1.extend(pb_bytes(20, &kv));
+            }
+        }
+        out.extend(pb_bytes(1, &f1));
+    }
+    out
+}
+
+fn write_conv_db(
+    db_path: &Path,
+    trajectory: Option<&[u8]>,
+    steps: &[(i64, Vec<u8>)],
+    gen_rows: &[(i64, Vec<u8>)],
+) {
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let conn = Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS steps (idx INTEGER PRIMARY KEY, metadata BLOB);
+         CREATE TABLE IF NOT EXISTS gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+         CREATE TABLE IF NOT EXISTS trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);",
+    )
+    .unwrap();
+    for (idx, meta) in steps {
+        conn.execute(
+            "INSERT INTO steps (idx, metadata) VALUES (?1, ?2)",
+            params![idx, meta],
+        )
+        .unwrap();
+    }
+    for (idx, data) in gen_rows {
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![idx, data],
+        )
+        .unwrap();
+    }
+    if let Some(traj) = trajectory {
+        conn.execute(
+            "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?1)",
+            params![traj],
+        )
+        .unwrap();
+    }
+}
+
+struct HttpResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl HttpResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        let target = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(k, _)| k.to_ascii_lowercase() == target)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+fn send_raw_http(
+    port: u16,
+    method: &str,
+    target: &str,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    let mut req = format!("{method} {target} HTTP/1.1\r\n");
+    let mut has_host = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("host") {
+            has_host = true;
+        }
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if !has_host {
+        req.push_str(&format!("Host: 127.0.0.1:{port}\r\n"));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .expect("HTTP response header/body separator");
+    let mut lines = head.lines();
+    let status_line = lines.next().expect("status line");
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .expect("status code")
+        .parse()
+        .expect("parse status code");
+    let parsed_headers = lines
+        .filter_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            Some((k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect();
+
+    HttpResponse {
+        status,
+        headers: parsed_headers,
+        body: body.to_string(),
+    }
+}
+
+fn current_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+#[test]
+fn t07_loopback_binding_port_fallback_security_headers_and_403_405_404() {
+    let env = IsolatedEnv::new();
+
+    // 1. CLI argument parsing parity
+    let defaults = parse_dashboard_args(&[], None);
+    assert_eq!(defaults.port, DEFAULT_DASHBOARD_PORT);
+    assert!(defaults.open);
+    assert_eq!(defaults.host, "127.0.0.1");
+    assert_eq!(defaults.lang, LanguageSetting::Auto);
+    assert!(!defaults.no_sync);
+    assert_eq!(defaults.action, DashboardAction::Serve);
+
+    let parsed = parse_dashboard_args(
+        &[
+            "dash".into(),
+            "--port".into(),
+            "4123".into(),
+            "--no-open".into(),
+            "--no-sync".into(),
+            "--zh".into(),
+        ],
+        None,
+    );
+    assert_eq!(parsed.port, 4123);
+    assert!(!parsed.open);
+    assert!(parsed.no_sync);
+    assert_eq!(parsed.lang, LanguageSetting::Zh);
+
+    let invalid_port = parse_dashboard_args(&["--port=99999".into()], None);
+    assert_eq!(invalid_port.port, DEFAULT_DASHBOARD_PORT);
+
+    // 2. Non-loopback host binding must be rejected
+    for bad_host in ["0.0.0.0", "localhost", "::1", "192.168.1.10"] {
+        let err = DashboardServer::start(DashboardServerConfig {
+            host: bad_host.to_string(),
+            port: 0,
+            no_sync: true,
+            ledger_path: Some(env.ledger_path()),
+            ..Default::default()
+        })
+        .err()
+        .expect("non-127.0.0.1 host must error");
+        assert!(
+            err.to_string().contains("127.0.0.1"),
+            "error must mention 127.0.0.1: {err}"
+        );
+    }
+
+    // 3. Port collision automatically falls back to ephemeral port
+    let blocker = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let occupied_port = blocker.local_addr().unwrap().port();
+
+    let mut server = DashboardServer::start(DashboardServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: occupied_port,
+        no_sync: true,
+        ledger_path: Some(env.ledger_path()),
+        ..Default::default()
+    })
+    .expect("dashboard server starts with fallback port");
+
+    let info = server.info().clone();
+    assert_eq!(info.host, "127.0.0.1");
+    assert_ne!(info.port, occupied_port);
+    assert!(info.port > 0);
+    assert_eq!(info.url, format!("http://127.0.0.1:{}", info.port));
+    drop(blocker);
+
+    // 4. GET /?lang=zh returns zero-CDN embedded HTML + CSP & security headers
+    let html_res = send_raw_http(info.port, "GET", "/?lang=zh", &[]);
+    assert_eq!(html_res.status, 200);
+    assert_eq!(
+        html_res.header("content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(html_res.header("x-content-type-options"), Some("nosniff"));
+    assert_eq!(html_res.header("cache-control"), Some("no-store"));
+    assert_eq!(html_res.header("x-frame-options"), Some("DENY"));
+    assert_eq!(html_res.header("referrer-policy"), Some("no-referrer"));
+    let csp = html_res
+        .header("content-security-policy")
+        .expect("CSP header present");
+    assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("connect-src 'self'"));
+    assert!(html_res.body.starts_with("<!DOCTYPE html>"));
+    assert!(html_res.body.contains("<html lang=\"zh-CN\""));
+    assert!(html_res.body.contains("var INITIAL_LANG = \"zh\";"));
+    assert!(html_res.body.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+    assert!(
+        !html_res.body.contains("http://") && !html_res.body.contains("https://"),
+        "embedded HTML must contain zero external URLs"
+    );
+    for ui_id in [
+        "range-pills",
+        "source-pills",
+        "filter-granularity",
+        "filter-model",
+        "filter-workspace",
+        "filter-subagents",
+        "btn-sync",
+        "btn-export-csv",
+        "btn-export-json",
+        "btn-lang",
+        "btn-theme",
+        "session-tbody",
+    ] {
+        assert!(
+            html_res.body.contains(&format!("id=\"{ui_id}\"")),
+            "missing UI element #{ui_id}"
+        );
+    }
+
+    // HEAD / returns 200 with empty body and Content-Length > 0
+    let head_res = send_raw_http(info.port, "HEAD", "/index.html", &[]);
+    assert_eq!(head_res.status, 200);
+    assert!(head_res.body.is_empty());
+    let head_len: usize = head_res
+        .header("content-length")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(head_len > 50_000);
+
+    // 5. Host header DNS rebinding protection -> 403
+    let evil_host = format!("evil.com:{}", info.port);
+    let bad_host_res = send_raw_http(
+        info.port,
+        "GET",
+        "/api/overview",
+        &[("Host", &evil_host)],
+    );
+    assert_eq!(bad_host_res.status, 403);
+
+    // localhost:<port> Host is allowed
+    let local_host = format!("localhost:{}", info.port);
+    let ok_host_res = send_raw_http(
+        info.port,
+        "GET",
+        "/api/health",
+        &[("Host", &local_host)],
+    );
+    assert_eq!(ok_host_res.status, 200);
+
+    // 6. Origin header validation on POST /api/ping and POST /api/sync -> 403 for cross-site
+    for path in ["/api/ping", "/api/sync"] {
+        let bad_origin = send_raw_http(
+            info.port,
+            "POST",
+            path,
+            &[("Origin", "https://evil.com")],
+        );
+        assert_eq!(bad_origin.status, 403, "{path} must reject evil Origin");
+
+        let wrong_port_origin = format!("http://127.0.0.1:{}", info.port.saturating_add(1));
+        let bad_port = send_raw_http(
+            info.port,
+            "POST",
+            path,
+            &[("Origin", &wrong_port_origin)],
+        );
+        assert_eq!(bad_port.status, 403, "{path} must reject wrong port Origin");
+
+        let good_origin = format!("http://localhost:{}", info.port);
+        let ok_origin = send_raw_http(
+            info.port,
+            "POST",
+            path,
+            &[("Origin", &good_origin)],
+        );
+        assert_eq!(ok_origin.status, 200, "{path} must allow localhost Origin");
+    }
+
+    // 7. 405 Method Not Allowed & 404 Not Found
+    assert_eq!(send_raw_http(info.port, "GET", "/api/sync", &[]).status, 405);
+    assert_eq!(send_raw_http(info.port, "POST", "/api/overview", &[]).status, 405);
+    assert_eq!(send_raw_http(info.port, "DELETE", "/api/health", &[]).status, 405);
+    assert_eq!(send_raw_http(info.port, "GET", "/nope", &[]).status, 404);
+
+    server.shutdown();
+}
+
+#[test]
+fn t07_multidimensional_filtering_cascade_tree_and_cli_e2e() {
+    let env = IsolatedEnv::new();
+    let now = current_ms();
+    let t_recent = now - 3_600_000; // 1h ago
+    let t_sub_a = now - 2_400_000; // 40m ago
+    let t_sub_b = now - 1_200_000; // 20m ago
+    let t_ide_2d = now - 2 * 24 * 3_600_000; // 2d ago
+    let t_old_20d = now - 20 * 24 * 3_600_000; // 20d ago
+
+    // CLI Cascade root: cli-root-1
+    write_conv_db(
+        &env.cli_data_dir.join("conversations").join("cli-root-1.db"),
+        Some(&build_trajectory_blob(
+            "file:///work/alpha",
+            "main",
+            t_recent,
+            Some("cli-root-1"),
+        )),
+        &[(1, build_step_metadata_blob(t_recent))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Gemini 4 Carbon (High)",
+                    input_tokens: 100_000,
+                    cache_read_tokens: 400_000,
+                    output_tokens: 10_000,
+                    stream_sec: Some((50, 0)), // 200 tok/s
+                    ttft_sec: Some((2, 0)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    // Child 1 of cli-root-1
+    write_conv_db(
+        &env.cli_data_dir.join("conversations").join("cli-sub-a.db"),
+        None,
+        &[(1, build_step_metadata_blob(t_sub_a))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Claude 4.5 Haiku",
+                    input_tokens: 20_000,
+                    cache_read_tokens: 80_000,
+                    output_tokens: 5_000,
+                    stream_sec: Some((25, 0)), // 200 tok/s
+                    ttft_sec: Some((1, 0)),
+                    parent_cascade_id: Some("cli-root-1"),
+                    root_cascade_id: Some("cli-root-1"),
+                }],
+            ),
+        )],
+    );
+
+    // Grandchild of cli-root-1 (parent = cli-sub-a)
+    write_conv_db(
+        &env.cli_data_dir.join("conversations").join("cli-sub-b.db"),
+        None,
+        &[(1, build_step_metadata_blob(t_sub_b))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Gemini 4 Carbon (High)",
+                    input_tokens: 10_000,
+                    cache_read_tokens: 40_000,
+                    output_tokens: 2_000,
+                    stream_sec: Some((10, 0)), // 200 tok/s
+                    ttft_sec: Some((0, 500_000_000)),
+                    parent_cascade_id: Some("cli-sub-a"),
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    // IDE Cascade 2 days ago
+    write_conv_db(
+        &env.ide_data_dir.join("conversations").join("ide-root-1.db"),
+        Some(&build_trajectory_blob(
+            "file:///work/beta",
+            "feat/ui",
+            t_ide_2d,
+            Some("ide-root-1"),
+        )),
+        &[(1, build_step_metadata_blob(t_ide_2d))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Claude 4.6 Sonnet",
+                    input_tokens: 50_000,
+                    cache_read_tokens: 150_000,
+                    output_tokens: 4_000,
+                    stream_sec: Some((20, 0)),
+                    ttft_sec: Some((1, 500_000_000)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    // Old CLI Cascade 20 days ago
+    write_conv_db(
+        &env.cli_data_dir.join("conversations").join("cli-old-1.db"),
+        Some(&build_trajectory_blob(
+            "file:///work/alpha",
+            "legacy",
+            t_old_20d,
+            Some("cli-old-1"),
+        )),
+        &[(1, build_step_metadata_blob(t_old_20d))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Gemini 4 Carbon (High)",
+                    input_tokens: 30_000,
+                    cache_read_tokens: 90_000,
+                    output_tokens: 3_000,
+                    stream_sec: Some((15, 0)),
+                    ttft_sec: Some((1, 0)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    // Independent expected USD billing totals matching statusline rates:
+    // - Gemini 4 Carbon: $2.00/M in, $0.10/M cache_read, $10.00/M out
+    // - Claude 4.5 Haiku: $0.80/M in, $0.08/M cache_read, $4.00/M out
+    // - Claude 4.6 Sonnet: $3.00/M in, $0.30/M cache_read, $15.00/M out
+    let cost_cli_main: f64 = 0.34;
+    let cost_cli_sub_a: f64 = 0.0424;
+    let cost_cli_sub_b: f64 = 0.044;
+    let cost_ide: f64 = 0.255;
+    let cost_old: f64 = 0.099;
+
+    let source_roots = vec![
+        agy_pulse::ledger::SourceRoot {
+            root: env.cli_data_dir.clone(),
+            source: agy_pulse::ledger::LedgerSource::Cli,
+        },
+        agy_pulse::ledger::SourceRoot {
+            root: env.ide_data_dir.clone(),
+            source: agy_pulse::ledger::LedgerSource::Ide,
+        },
+    ];
+
+    let mut server = DashboardServer::start(DashboardServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        ledger_path: Some(env.ledger_path()),
+        source_roots: Some(source_roots),
+        ..Default::default()
+    })
+    .expect("start dashboard server");
+    let port = server.info().port;
+
+    // 7d overview: cli-root-1 (with 2 subagents) + ide-root-1
+    let ov_7d: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=7d", &[]).body,
+    )
+    .unwrap();
+    let expected_cli_tree = cost_cli_main + cost_cli_sub_a + cost_cli_sub_b;
+    let expected_7d_total = expected_cli_tree + cost_ide;
+    assert!(
+        (ov_7d["summary"]["totalCostUsd"].as_f64().unwrap() - expected_7d_total).abs() < 1e-9
+    );
+    assert!(
+        (ov_7d["summary"]["mainCostUsd"].as_f64().unwrap() - (cost_cli_main + cost_ide)).abs()
+            < 1e-9
+    );
+    assert!(
+        (ov_7d["summary"]["subagentCostUsd"].as_f64().unwrap()
+            - (cost_cli_sub_a + cost_cli_sub_b))
+            .abs()
+            < 1e-9
+    );
+    assert_eq!(ov_7d["summary"]["rootSessionCount"], 2);
+    assert_eq!(ov_7d["summary"]["subagentSessionCount"], 2);
+    assert_eq!(ov_7d["summary"]["totalSteps"], 4);
+
+    let sessions = ov_7d["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+    let cli_root = sessions
+        .iter()
+        .find(|s| s["rootConversationId"] == "cli-root-1")
+        .expect("cli-root-1 present");
+    assert_eq!(cli_root["source"], "cli");
+    assert_eq!(cli_root["workspaceLabel"], "alpha");
+    assert_eq!(cli_root["subagentCount"], 2);
+    assert!((cli_root["totalCostUsd"].as_f64().unwrap() - expected_cli_tree).abs() < 1e-9);
+    let children = cli_root["children"].as_array().unwrap();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0]["conversationId"], "cli-sub-a");
+    assert!((children[0]["costUsd"].as_f64().unwrap() - cost_cli_sub_a).abs() < 1e-9);
+    assert_eq!(children[1]["conversationId"], "cli-sub-b");
+    assert!((children[1]["costUsd"].as_f64().unwrap() - cost_cli_sub_b).abs() < 1e-9);
+
+    // 30d includes cli-old-1
+    let ov_30d: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=30d", &[]).body,
+    )
+    .unwrap();
+    assert!(
+        (ov_30d["summary"]["totalCostUsd"].as_f64().unwrap() - (expected_7d_total + cost_old))
+            .abs()
+            < 1e-9
+    );
+    assert_eq!(ov_30d["summary"]["rootSessionCount"], 3);
+
+    // 24h excludes ide-root-1 (2d ago) and cli-old-1 (20d ago)
+    let ov_24h: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=24h", &[]).body,
+    )
+    .unwrap();
+    assert!((ov_24h["summary"]["totalCostUsd"].as_f64().unwrap() - expected_cli_tree).abs() < 1e-9);
+    assert_eq!(ov_24h["summary"]["rootSessionCount"], 1);
+
+    // Source filters: cli vs ide
+    let ov_ide: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=7d&source=ide", &[]).body,
+    )
+    .unwrap();
+    assert!((ov_ide["summary"]["totalCostUsd"].as_f64().unwrap() - cost_ide).abs() < 1e-9);
+    assert_eq!(ov_ide["summary"]["rootSessionCount"], 1);
+
+    let ov_cli: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=7d&source=cli", &[]).body,
+    )
+    .unwrap();
+    assert!((ov_cli["summary"]["totalCostUsd"].as_f64().unwrap() - expected_cli_tree).abs() < 1e-9);
+
+    // Model filter (percent-encoded space)
+    let ov_haiku: Value = serde_json::from_str(
+        &send_raw_http(
+            port,
+            "GET",
+            "/api/overview?range=7d&model=Haiku%204.5",
+            &[],
+        )
+        .body,
+    )
+    .unwrap();
+    assert!((ov_haiku["summary"]["totalCostUsd"].as_f64().unwrap() - cost_cli_sub_a).abs() < 1e-9);
+
+    // Workspace filter
+    let ov_ws: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=7d&workspace=beta", &[]).body,
+    )
+    .unwrap();
+    assert!((ov_ws["summary"]["totalCostUsd"].as_f64().unwrap() - cost_ide).abs() < 1e-9);
+
+    // includeSubagents=0
+    let ov_no_sub: Value = serde_json::from_str(
+        &send_raw_http(
+            port,
+            "GET",
+            "/api/overview?range=7d&includeSubagents=0",
+            &[],
+        )
+        .body,
+    )
+    .unwrap();
+    assert!(
+        (ov_no_sub["summary"]["totalCostUsd"].as_f64().unwrap() - (cost_cli_main + cost_ide)).abs()
+            < 1e-9
+    );
+    assert_eq!(ov_no_sub["summary"]["subagentSessionCount"], 0);
+
+    // Custom epoch range + hour granularity
+    let ov_custom: Value = serde_json::from_str(
+        &send_raw_http(
+            port,
+            "GET",
+            &format!(
+                "/api/overview?range=custom&from={}&to={}&granularity=hour",
+                now - 5_000_000,
+                now
+            ),
+            &[],
+        )
+        .body,
+    )
+    .unwrap();
+    assert_eq!(ov_custom["meta"]["range"], "custom");
+    assert_eq!(ov_custom["meta"]["granularity"], "hour");
+    assert!(
+        (ov_custom["summary"]["totalCostUsd"].as_f64().unwrap() - expected_cli_tree).abs() < 1e-9
+    );
+
+    server.shutdown();
+
+    // Cross-process CLI verification: `agypl dashboard --no-open --port 0 --lang zh`
+    let mut child = env
+        .base_cmd(&agypl_bin())
+        .args(["dashboard", "--no-open", "--port", "0", "--lang", "zh"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn agypl dashboard");
+
+    let stdout = child.stdout.take().expect("stdout piped");
+    let _guard = ChildGuard(child);
+    let mut reader = BufReader::new(stdout);
+    let mut bound_url = None;
+    for _ in 0..10 {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        if let Some(pos) = line.find("http://127.0.0.1:") {
+            let rest = &line[pos..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '.' && c != '/')
+                .unwrap_or(rest.len());
+            bound_url = Some(rest[..end].to_string());
+            break;
+        }
+    }
+    let url = bound_url.expect("agypl dashboard printed listening URL");
+    let cli_port: u16 = url
+        .trim_start_matches("http://127.0.0.1:")
+        .parse()
+        .expect("parse CLI bound port");
+
+    let cli_html = send_raw_http(cli_port, "GET", "/", &[]);
+    assert_eq!(cli_html.status, 200);
+    assert!(cli_html.body.contains("var INITIAL_LANG = \"zh\";"));
+
+    let cli_ov: Value = serde_json::from_str(
+        &send_raw_http(cli_port, "GET", "/api/overview?range=7d", &[]).body,
+    )
+    .unwrap();
+    assert!(
+        (cli_ov["summary"]["totalCostUsd"].as_f64().unwrap() - expected_7d_total).abs() < 1e-9
+    );
+
+    // Also verify `agy-pulse --dashboard --help` prints dashboard usage and exits 0
+    let help_out = env
+        .base_cmd(&agy_pulse_bin())
+        .args(["--dashboard", "--help"])
+        .output()
+        .unwrap();
+    assert!(help_out.status.success());
+    let help_text = String::from_utf8_lossy(&help_out.stdout);
+    assert!(help_text.contains("--port") && help_text.contains("--no-open"));
+}
+
+#[test]
+fn t07_csv_json_exports_static_routes_and_sync_api() {
+    let env = IsolatedEnv::new();
+    let now = current_ms();
+    let t1 = now - 600_000;
+
+    write_conv_db(
+        &env.cli_data_dir.join("conversations").join("exp-cli.db"),
+        Some(&build_trajectory_blob(
+            "file:///work/export-proj",
+            "main",
+            t1,
+            Some("exp-cli"),
+        )),
+        &[(1, build_step_metadata_blob(t1))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Gemini 4 Carbon (High)",
+                    input_tokens: 50_000,
+                    cache_read_tokens: 200_000,
+                    output_tokens: 4_000,
+                    stream_sec: Some((20, 0)),
+                    ttft_sec: Some((1, 0)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    let source_roots = vec![
+        agy_pulse::ledger::SourceRoot {
+            root: env.cli_data_dir.clone(),
+            source: agy_pulse::ledger::LedgerSource::Cli,
+        },
+        agy_pulse::ledger::SourceRoot {
+            root: env.ide_data_dir.clone(),
+            source: agy_pulse::ledger::LedgerSource::Ide,
+        },
+    ];
+
+    let mut server = DashboardServer::start(DashboardServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        no_sync: true,
+        idle_timeout_ms: 30_000,
+        ledger_path: Some(env.ledger_path()),
+        source_roots: Some(source_roots),
+        ..Default::default()
+    })
+    .unwrap();
+    let port = server.info().port;
+
+    // Static routes: /icon.svg & /manifest.webmanifest
+    let icon_res = send_raw_http(port, "GET", "/icon.svg", &[]);
+    assert_eq!(icon_res.status, 200);
+    assert_eq!(
+        icon_res.header("content-type"),
+        Some("image/svg+xml; charset=utf-8")
+    );
+    assert_eq!(icon_res.body, DASHBOARD_ICON_SVG);
+
+    let manifest_res = send_raw_http(port, "GET", "/manifest.webmanifest", &[]);
+    assert_eq!(manifest_res.status, 200);
+    assert_eq!(
+        manifest_res.header("content-type"),
+        Some("application/manifest+json; charset=utf-8")
+    );
+    let manifest_json: Value = serde_json::from_str(&manifest_res.body).unwrap();
+    assert_eq!(manifest_json["short_name"], "agy-pulse");
+    assert_eq!(manifest_json["icons"][0]["src"], "/icon.svg");
+
+    // /api/health
+    let health_res = send_raw_http(port, "GET", "/api/health", &[]);
+    assert_eq!(health_res.status, 200);
+    let health_json: Value = serde_json::from_str(&health_res.body).unwrap();
+    assert_eq!(health_json["ok"], true);
+    assert_eq!(health_json["app"], DASHBOARD_APP_ID);
+    assert_eq!(health_json["port"], port);
+    assert_eq!(health_json["idleTimeoutMs"], 30_000);
+
+    // POST /api/sync ingests exp-cli.db
+    let sync_res = send_raw_http(port, "POST", "/api/sync", &[]);
+    assert_eq!(sync_res.status, 200);
+    let sync_json: Value = serde_json::from_str(&sync_res.body).unwrap();
+    assert_eq!(sync_json["ok"], true);
+    assert_eq!(sync_json["totalDbs"], 1);
+    assert_eq!(sync_json["cliDbs"], 1);
+    assert_eq!(sync_json["newlySyncedDbs"], 1);
+    assert_eq!(sync_json["stepsUpserted"], 1);
+
+    // /api/export.csv for timeseries, models, sessions
+    let csv_ts = send_raw_http(port, "GET", "/api/export.csv?kind=timeseries&range=7d", &[]);
+    assert_eq!(csv_ts.status, 200);
+    assert_eq!(csv_ts.header("content-type"), Some("text/csv; charset=utf-8"));
+    assert_eq!(
+        csv_ts.header("content-disposition"),
+        Some("attachment; filename=\"agy-pulse-telemetry-7d.csv\"")
+    );
+    assert!(csv_ts.body.starts_with("bucketKey,bucketStartMs,label,costUsd,"));
+    assert!(csv_ts.body.lines().count() >= 2);
+
+    let csv_models = send_raw_http(port, "GET", "/api/export.csv?kind=models&range=7d", &[]);
+    assert_eq!(csv_models.status, 200);
+    assert!(csv_models.body.starts_with("model,costUsd,costSharePct,"));
+    assert!(csv_models.body.contains("Carbon"));
+
+    let csv_sessions = send_raw_http(
+        port,
+        "GET",
+        "/api/export.csv?kind=sessions&range=all",
+        &[],
+    );
+    assert_eq!(csv_sessions.status, 200);
+    assert_eq!(
+        csv_sessions.header("content-disposition"),
+        Some("attachment; filename=\"agy-pulse-telemetry-all.csv\"")
+    );
+    assert!(csv_sessions.body.starts_with("rootConversationId,source,workspace,"));
+    assert!(csv_sessions.body.contains("exp-cli"));
+
+    // /api/export.json
+    let json_exp = send_raw_http(port, "GET", "/api/export.json?range=30d&source=cli", &[]);
+    assert_eq!(json_exp.status, 200);
+    assert_eq!(
+        json_exp.header("content-type"),
+        Some("application/json; charset=utf-8")
+    );
+    assert_eq!(
+        json_exp.header("content-disposition"),
+        Some("attachment; filename=\"agy-pulse-telemetry-30d.json\"")
+    );
+    let exported: Value = serde_json::from_str(&json_exp.body).unwrap();
+    assert_eq!(exported["meta"]["backend"], "sqlite");
+    assert_eq!(exported["meta"]["source"], "cli");
+    assert_eq!(exported["sessions"][0]["rootConversationId"], "exp-cli");
+
+    server.shutdown();
+}

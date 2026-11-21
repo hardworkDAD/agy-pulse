@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 
 use crate::domain::{TokenUsage, calculate_token_cost};
 use crate::ingest::HostReader;
@@ -36,7 +37,8 @@ pub struct LedgerSyncOptions {
     pub now_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LedgerSyncReport {
     pub ok: bool,
     pub total_dbs: usize,

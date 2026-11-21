@@ -1,6 +1,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 pub mod config;
+pub mod dashboard;
 pub mod domain;
 pub mod ingest;
 pub mod ledger;
@@ -190,6 +191,12 @@ pub fn run_cli() -> i32 {
     {
         println!("agy-pulse v{VERSION}");
         return 0;
+    }
+
+    if matches!(first, Some("dashboard" | "dash" | "ui"))
+        || args.iter().any(|a| a == "--dashboard")
+    {
+        return dashboard::run_dashboard_cli(&args);
     }
 
     if matches!(first, Some("stats" | "report")) || args.iter().any(|a| a == "--stats") {
