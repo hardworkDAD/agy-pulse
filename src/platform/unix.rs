@@ -208,12 +208,12 @@ pub(super) fn resolve_claude_desktop_config_path() -> Option<PathBuf> {
     let home = super::home_dir()?;
     #[cfg(target_os = "macos")]
     {
-        return Some(
+        Some(
             home.join("Library")
                 .join("Application Support")
                 .join("Claude")
                 .join("claude_desktop_config.json"),
-        );
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {

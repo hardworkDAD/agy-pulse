@@ -1,48 +1,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use rusqlite::{Connection, params};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use agy_pulse::render::{ansi_display_width, strip_ansi};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn agy_pulse_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_agy-pulse"))
-}
-
-fn agypl_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_agypl"))
-}
-
-fn preferred_release_or_test_bins() -> (PathBuf, PathBuf) {
-    let release_dir = repo_root().join("target").join("release");
-    let exe_suffix = std::env::consts::EXE_SUFFIX;
-    let rel_primary = release_dir.join(format!("agy-pulse{exe_suffix}"));
-    let rel_alias = release_dir.join(format!("agypl{exe_suffix}"));
-    if rel_primary.is_file() && rel_alias.is_file() {
-        (rel_primary, rel_alias)
-    } else {
-        (agy_pulse_bin(), agypl_bin())
-    }
 }
 
 struct IsolatedEnv {
@@ -881,7 +852,41 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
 
 #[cfg(unix)]
 mod unix_packaging_e2e {
+    use std::io::{BufRead, BufReader, Read};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::Child;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use sha2::{Digest, Sha256};
+
     use super::*;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn agypl_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_agypl"))
+    }
+
+    fn preferred_release_or_test_bins() -> (PathBuf, PathBuf) {
+        let release_dir = repo_root().join("target").join("release");
+        let exe_suffix = std::env::consts::EXE_SUFFIX;
+        let rel_primary = release_dir.join(format!("agy-pulse{exe_suffix}"));
+        let rel_alias = release_dir.join(format!("agypl{exe_suffix}"));
+        if rel_primary.is_file() && rel_alias.is_file() {
+            (rel_primary, rel_alias)
+        } else {
+            (agy_pulse_bin(), agypl_bin())
+        }
+    }
 
     struct MockResponse {
         status: u16,
