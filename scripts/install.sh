@@ -92,7 +92,7 @@ extract_expected_sha256() {
       n = split(name, parts, "/")
       base = parts[n]
       if (name == target || base == target) {
-        if (hash ~ /^[0-9a-f]{64}$/) {
+        if (length(hash) == 64 && hash ~ /^[0-9a-f]+$/) {
           print hash
           exit
         }

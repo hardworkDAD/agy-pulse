@@ -85,6 +85,7 @@ impl IsolatedEnv {
             .env("AGY_PULSE_DATA_DIR", &self.cli_data_dir)
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
             .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
+            .env("AGY_PULSE_DISABLE_UPDATE_CHECK", "1")
             .env_remove("AGY_PULSE_FORCE_ASCII")
             .env_remove("AGY_PULSE_FORCE_UNICODE")
             .env_remove("AGY_PULSE_LANGUAGE")
@@ -786,7 +787,8 @@ fn t05_concurrent_statusline_and_stats_processes_have_no_sqlite_busy_failures() 
                 .env("AGY_PULSE_DATA_DIR", &cli_dir)
                 .env("AGY_PULSE_IDE_DATA_DIR", &ide_dir)
                 .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &gcfg)
-                .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1");
+                .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
+                .env("AGY_PULSE_DISABLE_UPDATE_CHECK", "1");
 
             if is_stats {
                 let out = cmd

@@ -86,6 +86,7 @@ impl IsolatedEnv {
             .env("AGY_PULSE_DATA_DIR", &self.data_dir)
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
             .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
+            .env("AGY_PULSE_DISABLE_UPDATE_CHECK", "1")
             .env_remove("AGY_PULSE_FORCE_ASCII")
             .env_remove("AGY_PULSE_FORCE_UNICODE")
             .env_remove("AGY_PULSE_LANGUAGE")

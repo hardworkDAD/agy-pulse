@@ -945,6 +945,7 @@ mod unix_packaging_e2e {
                 while !stop_flag.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            let _ = stream.set_nonblocking(false);
                             let h = Arc::clone(&handler);
                             thread::spawn(move || {
                                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));

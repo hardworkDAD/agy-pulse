@@ -188,6 +188,7 @@ impl LocalHttpServer {
             while !stop_flag.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
                         let h = Arc::clone(&handler);
                         thread::spawn(move || {
                             handle_http_connection(stream, &*h);

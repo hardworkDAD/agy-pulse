@@ -265,6 +265,7 @@ fn run_accept_loop(listener: TcpListener, shared: Arc<ServerSharedState>) {
         }
         match listener.accept() {
             Ok((mut stream, _addr)) => {
+                let _ = stream.set_nonblocking(false);
                 let conn_shared = Arc::clone(&shared);
                 thread::spawn(move || {
                     handle_connection(&mut stream, &conn_shared);

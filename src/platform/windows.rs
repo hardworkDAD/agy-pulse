@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, STILL_ACTIVE, SetHandleInformation,
+};
 use windows_sys::Win32::System::Console::{
     CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
     GetConsoleMode, GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE,
@@ -187,7 +189,6 @@ pub(super) fn resolve_claude_desktop_config_path() -> Option<PathBuf> {
 }
 
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-const DETACHED_PROCESS: u32 = 0x0000_0008;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub(super) fn install_shutdown_signal_handler() {}
@@ -197,12 +198,23 @@ pub(super) fn shutdown_signal_requested() -> bool {
 }
 
 pub(super) fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<u32> {
+    // Clear inheritance on standard handles before spawning so a detached child
+    // never keeps parent pipe write ends open (which would block `Command::output()`).
+    for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: Queries standard handles of the current process and clears `HANDLE_FLAG_INHERIT` when valid.
+        unsafe {
+            let handle = GetStdHandle(std_handle);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                let _ = SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
     let child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .spawn()?;
     Ok(child.id())
 }
