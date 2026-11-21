@@ -1,6 +1,7 @@
 mod accounting;
 mod model;
 mod pricing;
+mod quota;
 
 pub use accounting::{
     format_usd, is_bedrock_model_id, is_vertex_model_id, resolve_cascade_cost_usd,
@@ -12,3 +13,9 @@ pub use model::{
     resolve_model_display_name,
 };
 pub use pricing::{ModelPricing, calculate_token_cost};
+pub use quota::{
+    CriticalWindow, NamedProviderQuota, ProviderQuota, ProviderQuotaSummary, QuotaWindow,
+    QuotaWindowKind, format_quota_percent, format_reset_countdown, format_reset_duration,
+    has_valid_provider_quota, is_openai_provider_key, is_quota_window_expired,
+    parse_iso8601_to_epoch_ms, pick_critical_window, prune_expired_provider_quota,
+};

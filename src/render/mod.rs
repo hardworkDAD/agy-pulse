@@ -1,6 +1,7 @@
 mod context_bar;
 mod i18n;
 mod layout;
+mod quota_table;
 mod width;
 
 pub use layout::render_statusline;

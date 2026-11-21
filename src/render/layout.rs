@@ -7,6 +7,7 @@ use super::context_bar::{
     render_model_cache_line,
 };
 use super::i18n::{BOLD, RESET, get_language_text, resolve_palette};
+use super::quota_table::render_quota_section;
 use super::width::{
     ansi_display_width, format_tokens, sanitize_terminal_text, simplify_model_name,
     truncate_ansi_to_display_width,
@@ -102,6 +103,7 @@ pub fn render_statusline(
             bar: "█",
             empty: "░",
             vbar: "│",
+            hbar: "─",
             ellipsis: "…",
         }
     } else {
@@ -109,6 +111,7 @@ pub fn render_statusline(
             bar: "#",
             empty: "-",
             vbar: "|",
+            hbar: "-",
             ellipsis: "...",
         }
     };
@@ -398,6 +401,13 @@ pub fn render_statusline(
     }
     if !line2.is_empty() {
         lines.push(line2);
+    }
+
+    if let Some(quota_block) =
+        render_quota_section(snapshot, config, term, &palette, &glyph, &divider)
+        && !quota_block.is_empty()
+    {
+        lines.push(quota_block);
     }
 
     let show_context_monitor = d.show_context_monitor.unwrap_or(false);

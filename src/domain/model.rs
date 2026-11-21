@@ -1,3 +1,5 @@
+use super::quota::ProviderQuotaSummary;
+
 /// Pure in-memory domain value types representing a single statusline pulse snapshot.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelIdentity {
@@ -67,6 +69,8 @@ pub struct PulseSnapshot {
     pub output_speed_tok_s: Option<f64>,
     pub ttft_sec: Option<f64>,
     pub update_available_version: Option<String>,
+    pub observed_at_ms: i64,
+    pub quota: Option<ProviderQuotaSummary>,
 }
 
 const MODEL_DISPLAY_NAMES: &[(&str, &str)] = &[

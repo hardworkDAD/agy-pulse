@@ -15,6 +15,7 @@ pub(super) struct Glyphs {
     pub bar: &'static str,
     pub empty: &'static str,
     pub vbar: &'static str,
+    pub hbar: &'static str,
     pub ellipsis: &'static str,
 }
 
@@ -47,9 +48,9 @@ pub(super) fn create_progress_bar(percent: f64, style: &ProgressBarStyle<'_>) ->
         } else {
             style.default_color
         }
-    } else if safe_pct <= (1.0 - style.crit_thresh) * 100.0 {
+    } else if safe_pct <= 100.0 - style.crit_thresh * 100.0 {
         style.palette.critical
-    } else if safe_pct <= (1.0 - style.warn_thresh) * 100.0 {
+    } else if safe_pct <= 100.0 - style.warn_thresh * 100.0 {
         style.palette.warning
     } else {
         style.palette.primary

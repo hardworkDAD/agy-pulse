@@ -3,14 +3,19 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::domain::{
-    ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity, PulseSnapshot, TokenUsage,
-    WorkspaceInfo, resolve_model_display_name,
+    ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity, ProviderQuotaSummary,
+    PulseSnapshot, QuotaWindow, TokenUsage, WorkspaceInfo, is_openai_provider_key,
+    parse_iso8601_to_epoch_ms, resolve_model_display_name,
 };
 use crate::platform;
 
 use super::IngestResult;
 
-pub(super) fn parse_host_stdin(stdin_text: &str, fallback_cwd: &Path) -> IngestResult {
+pub(super) fn parse_host_stdin(
+    stdin_text: &str,
+    fallback_cwd: &Path,
+    observed_at_ms: i64,
+) -> IngestResult {
     let trimmed = stdin_text.trim();
     if trimmed.is_empty() {
         return IngestResult {
@@ -19,6 +24,7 @@ pub(super) fn parse_host_stdin(stdin_text: &str, fallback_cwd: &Path) -> IngestR
                     username: platform::current_username(),
                     ..Default::default()
                 },
+                observed_at_ms,
                 ..Default::default()
             },
             workspace_dir: fallback_cwd.to_path_buf(),
@@ -35,6 +41,7 @@ pub(super) fn parse_host_stdin(stdin_text: &str, fallback_cwd: &Path) -> IngestR
                         username: platform::current_username(),
                         ..Default::default()
                     },
+                    observed_at_ms,
                     ..Default::default()
                 },
                 workspace_dir: fallback_cwd.to_path_buf(),
@@ -48,6 +55,7 @@ pub(super) fn parse_host_stdin(stdin_text: &str, fallback_cwd: &Path) -> IngestR
                         username: platform::current_username(),
                         ..Default::default()
                     },
+                    observed_at_ms,
                     ..Default::default()
                 },
                 workspace_dir: fallback_cwd.to_path_buf(),
@@ -80,6 +88,9 @@ pub(super) fn parse_host_stdin(stdin_text: &str, fallback_cwd: &Path) -> IngestR
 
     let native_total_usd = extract_native_cost(&root);
     let context = find_context_window(&root, 0).map(parse_context_window);
+    let quota = root
+        .get("quota")
+        .and_then(|q| parse_stdin_quota(q, observed_at_ms));
 
     IngestResult {
         snapshot: PulseSnapshot {
@@ -100,11 +111,116 @@ pub(super) fn parse_host_stdin(stdin_text: &str, fallback_cwd: &Path) -> IngestR
             },
             terminal_width,
             task_count,
+            observed_at_ms,
+            quota,
             ..Default::default()
         },
         workspace_dir,
         diagnostics: Vec::new(),
     }
+}
+
+fn parse_reset_time_ms(val: Option<&Value>) -> Option<i64> {
+    let v = val?;
+    match v {
+        Value::String(s) => parse_iso8601_to_epoch_ms(s),
+        Value::Number(n) => {
+            let num = n.as_f64().filter(|x| x.is_finite() && *x > 0.0)?;
+            // Epoch seconds (< 100 billion) vs epoch milliseconds (>= 100 billion).
+            if num >= 100_000_000_000.0 {
+                Some(num.round() as i64)
+            } else {
+                Some((num * 1000.0).round() as i64)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_quota_window(entry: &Value) -> Option<QuotaWindow> {
+    let map = entry.as_object()?;
+    let raw_fraction = map
+        .get("remaining_fraction")
+        .or_else(|| map.get("remainingFraction"))
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())?;
+    let remaining_fraction = raw_fraction.clamp(0.0, 1.0);
+    let reset_time_ms = parse_reset_time_ms(
+        map.get("reset_time").or_else(|| map.get("resetTime")),
+    );
+    Some(QuotaWindow {
+        remaining_fraction,
+        reset_time_ms,
+    })
+}
+
+fn parse_stdin_quota(quota_val: &Value, observed_at_ms: i64) -> Option<ProviderQuotaSummary> {
+    let map = quota_val.as_object()?;
+    let mut summary = ProviderQuotaSummary::default();
+    let mut any_assigned = false;
+
+    if let Some(entry) = map.get("gemini-5h")
+        && let Some(win) = parse_quota_window(entry)
+    {
+        summary.google.five_hour = Some(win);
+        any_assigned = true;
+    }
+    if let Some(entry) = map.get("gemini-weekly")
+        && let Some(win) = parse_quota_window(entry)
+    {
+        summary.google.weekly = Some(win);
+        any_assigned = true;
+    }
+
+    for key in ["anthropic-5h", "claude-5h", "3p-5h"] {
+        if let Some(entry) = map.get(key)
+            && let Some(win) = parse_quota_window(entry)
+        {
+            summary.claude.five_hour = Some(win);
+            any_assigned = true;
+        }
+    }
+    for key in ["anthropic-weekly", "claude-weekly", "3p-weekly"] {
+        if let Some(entry) = map.get(key)
+            && let Some(win) = parse_quota_window(entry)
+        {
+            summary.claude.weekly = Some(win);
+            any_assigned = true;
+        }
+    }
+
+    for (key, entry) in map {
+        let lower = key.to_ascii_lowercase();
+        if is_openai_provider_key(&lower) {
+            continue;
+        }
+        if lower.starts_with("argon")
+            && let Some(win) = parse_quota_window(entry)
+        {
+            if lower.contains("5h")
+                || lower.contains("five_hour")
+                || lower.contains("five-hour")
+                || lower.contains("fivehour")
+            {
+                summary.argon.five_hour = Some(win);
+            } else if lower.contains("week") {
+                summary.argon.weekly = Some(win);
+            } else {
+                let is_five_hour = win.reset_time_ms.is_some_and(|r| {
+                    let delta = r - observed_at_ms;
+                    delta > 0 && delta <= 6 * 3_600_000
+                });
+                if is_five_hour {
+                    summary.argon.five_hour = Some(win);
+                } else {
+                    summary.argon.weekly = Some(win);
+                }
+            }
+            any_assigned = true;
+        }
+    }
+
+    if any_assigned { Some(summary) } else { None }
 }
 
 fn extract_workspace_dir(root: &Value, fallback_cwd: &Path) -> PathBuf {
