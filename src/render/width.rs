@@ -215,6 +215,44 @@ pub fn truncate_ansi_to_display_width(input: &str, max_width: usize, ellipsis: &
     format!("{out}{safe_ellipsis}\x1b[0m")
 }
 
+/// Truncate plain text to `max_width` display columns (appending `ellipsis` if cut), without padding.
+pub fn truncate_plain_to_display_width(input: &str, max_width: usize, ellipsis: &str) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(input) <= max_width {
+        return input.to_string();
+    }
+    let ellipsis_width = display_width(ellipsis);
+    if ellipsis_width >= max_width {
+        let e_chars: Vec<char> = ellipsis.chars().collect();
+        let mut e_out = String::new();
+        let mut e_used = 0;
+        for idx in 0..e_chars.len() {
+            let w = unit_display_width(&e_chars, idx);
+            if e_used + w > max_width {
+                break;
+            }
+            e_out.push(e_chars[idx]);
+            e_used += w;
+        }
+        return e_out;
+    }
+    let budget = max_width - ellipsis_width;
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::new();
+    let mut used = 0;
+    for idx in 0..chars.len() {
+        let w = unit_display_width(&chars, idx);
+        if used + w > budget {
+            break;
+        }
+        out.push(chars[idx]);
+        used += w;
+    }
+    format!("{out}{ellipsis}")
+}
+
 /// Truncate plain text to `width` display columns (with `"..."`) or right-pad with spaces.
 pub(super) fn truncate_and_pad(input: &str, width: usize) -> String {
     let current_width = display_width(input);
@@ -241,7 +279,7 @@ pub(super) fn truncate_and_pad(input: &str, width: usize) -> String {
 }
 
 /// Format token count into compact lowercase form (`1.2M`, `150k`, `42`).
-pub(super) fn format_tokens(n: u64) -> String {
+pub fn format_tokens(n: u64) -> String {
     let val = n as f64;
     if val >= 999_950.0 {
         let mut s = format!("{:.1}", val / 1_000_000.0);

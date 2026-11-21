@@ -27,6 +27,9 @@ pub use proto_wire::{GenerationMetadataRow, GenerationTelemetryStep, TrajectoryM
 pub struct IngestResult {
     pub snapshot: PulseSnapshot,
     pub workspace_dir: PathBuf,
+    pub conversation_id: Option<String>,
+    pub rolling_cost_key: Option<String>,
+    pub child_conversation_ids: Vec<String>,
     pub diagnostics: Vec<String>,
 }
 
@@ -240,12 +243,70 @@ impl HostReader {
             workspace::resolve_git_branch(&parsed.workspace_dir);
         parsed.snapshot.workspace_meta = workspace::scan_workspace_metadata(&parsed.workspace_dir);
 
+        let child_conversation_ids: Vec<String> = scanned
+            .as_ref()
+            .map(|s| s.all_child_ids.clone())
+            .unwrap_or_default();
+        let rolling_cost_key = resolve_rolling_cost_key(
+            &parsed.snapshot,
+            transcript_path.as_deref(),
+            &parsed.workspace_dir,
+        );
+
         IngestResult {
             snapshot: parsed.snapshot,
             workspace_dir: parsed.workspace_dir,
+            conversation_id: effective_conv_id,
+            rolling_cost_key,
+            child_conversation_ids,
             diagnostics: parsed.diagnostics,
         }
     }
+}
+
+fn resolve_rolling_cost_key(
+    snapshot: &PulseSnapshot,
+    transcript_path: Option<&Path>,
+    workspace_dir: &Path,
+) -> Option<String> {
+    if let Some(sid) = snapshot
+        .host
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(sid.to_string());
+    }
+    if let Some(cid) = snapshot
+        .host
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(cid.to_string());
+    }
+    if let Some(tp) = transcript_path {
+        let raw = tp.to_string_lossy();
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let norm = trimmed.replace('\\', "/");
+            if let Some(idx) = norm.rfind("/brain/") {
+                let after = &norm[idx + "/brain/".len()..];
+                let first_seg = after.split('/').next().unwrap_or("").trim();
+                if !first_seg.is_empty() && first_seg != ".system_generated" {
+                    return Some(first_seg.to_string());
+                }
+            } else {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    if snapshot.has_conversation_identity && !workspace_dir.as_os_str().is_empty() {
+        return Some(format!("cwd:{}", workspace_dir.to_string_lossy()));
+    }
+    None
 }
 
 fn build_session_activity_context(

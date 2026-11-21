@@ -4,6 +4,7 @@ mod unix;
 mod windows;
 
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -106,6 +107,94 @@ pub fn get_antigravity_roots() -> Vec<PathBuf> {
         }
     }
     roots
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut out = PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Return ordered candidate Antigravity IDE data directories (`~/.gemini/antigravity`, etc.).
+/// Returns an empty list when `AGY_PULSE_DATA_DIR` is set without `AGY_PULSE_IDE_DATA_DIR`
+/// so isolated sandboxes/tests never accidentally scan the host's real IDE directory.
+pub fn get_antigravity_ide_roots() -> Vec<PathBuf> {
+    if let Ok(override_dir) = env::var("AGY_PULSE_IDE_DATA_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            return vec![PathBuf::from(trimmed)];
+        }
+    }
+
+    if let Ok(cli_override) = env::var("AGY_PULSE_DATA_DIR")
+        && !cli_override.trim().is_empty()
+    {
+        return Vec::new();
+    }
+
+    let mut raw_candidates = Vec::new();
+    if let Some(home) = home_dir() {
+        raw_candidates.push(home.join(".gemini").join("antigravity"));
+    }
+    for (var, suffix) in [
+        ("XDG_DATA_HOME", "antigravity"),
+        ("APPDATA", "antigravity"),
+        ("LOCALAPPDATA", "antigravity"),
+    ] {
+        if let Ok(val) = env::var(var) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                raw_candidates.push(PathBuf::from(trimmed).join(suffix));
+            }
+        }
+    }
+
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for candidate in raw_candidates {
+        let key = fs::canonicalize(&candidate).unwrap_or_else(|_| normalize_lexical_path(&candidate));
+        if seen.insert(key) {
+            deduped.push(candidate);
+        }
+    }
+    deduped
+}
+
+/// Create directory recursively with owner-only (`0700` on Unix) permissions.
+pub fn ensure_dir_0700(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::ensure_dir_0700(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::ensure_dir_0700(path)
+    }
+}
+
+/// Restrict file permissions to owner read/write (`0600` on Unix).
+pub fn set_file_0600(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::set_file_0600(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::set_file_0600(path)
+    }
 }
 
 /// Resolve a relative file path under the highest-priority existing Antigravity data root.

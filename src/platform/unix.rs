@@ -84,6 +84,19 @@ pub(super) fn file_unique_id(meta: &Metadata) -> u64 {
     meta.ino()
 }
 
+pub(super) fn ensure_dir_0700(path: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)
+}
+
+pub(super) fn set_file_0600(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(path, perms)
+}
+
 pub(super) fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let mut builder = fs::DirBuilder::new();

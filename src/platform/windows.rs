@@ -54,6 +54,14 @@ pub(super) fn file_unique_id(_meta: &Metadata) -> u64 {
     0
 }
 
+pub(super) fn ensure_dir_0700(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)
+}
+
+pub(super) fn set_file_0600(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 pub(super) fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

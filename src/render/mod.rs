@@ -6,7 +6,8 @@ mod width;
 
 pub use layout::render_statusline;
 pub use width::{
-    ansi_display_width, display_width, strip_ansi, truncate_ansi_to_display_width,
+    ansi_display_width, display_width, format_tokens, strip_ansi,
+    truncate_ansi_to_display_width, truncate_plain_to_display_width,
 };
 
 use crate::config::LanguageSetting;

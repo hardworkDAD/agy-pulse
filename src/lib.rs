@@ -3,6 +3,7 @@
 pub mod config;
 pub mod domain;
 pub mod ingest;
+pub mod ledger;
 pub mod platform;
 pub mod render;
 
@@ -73,6 +74,25 @@ fn read_stdin_with_timeout(timeout: Duration) -> (String, bool) {
     (String::from_utf8_lossy(&bytes).into_owned(), timed_out)
 }
 
+fn extract_seven_day_reset_at_ms(snapshot: &domain::PulseSnapshot) -> Option<i64> {
+    let q = snapshot.quota.as_ref()?;
+    for provider in [&q.google, &q.claude, &q.argon] {
+        if let Some(ref w) = provider.weekly
+            && let Some(rt) = w.reset_time_ms
+        {
+            return Some(rt);
+        }
+    }
+    for extra in &q.extras {
+        if let Some(ref w) = extra.quota.weekly
+            && let Some(rt) = w.reset_time_ms
+        {
+            return Some(rt);
+        }
+    }
+    None
+}
+
 fn run_statusline_pipeline() {
     let (stdin_text, timed_out) = read_stdin_with_timeout(STDIN_HARD_TIMEOUT);
     if timed_out && stdin_text.trim().is_empty() {
@@ -80,7 +100,7 @@ fn run_statusline_pipeline() {
     }
 
     let fallback_cwd = env::current_dir().unwrap_or_default();
-    let ingest = HostReader::read_live_pulse(&stdin_text, &fallback_cwd);
+    let mut ingest = HostReader::read_live_pulse(&stdin_text, &fallback_cwd);
     if !ingest.diagnostics.is_empty() {
         platform::write_error_log_safely(&ingest.diagnostics.join("\n"));
     }
@@ -88,6 +108,63 @@ fn run_statusline_pipeline() {
     let cfg = config::load_config(&ingest.workspace_dir);
     if !cfg.enabled {
         return;
+    }
+
+    let show_daily = cfg.display.show_daily_cost.unwrap_or(false);
+    let show_weekly = cfg.display.show_weekly_cost.unwrap_or(false);
+    if ingest.snapshot.has_conversation_identity || show_daily || show_weekly {
+        let sync_opts = ledger::LedgerSyncOptions {
+            now_ms: Some(ingest.snapshot.observed_at_ms),
+            ..Default::default()
+        };
+        match ledger::LedgerStore::open_default() {
+            Ok(mut store) => {
+                if let Err(err) = store.sync_all_if_stale(60_000, &sync_opts) {
+                    platform::write_error_log_safely(&format!("Ledger full scan error: {err}"));
+                }
+                if let Some(ref conv_id) = ingest.conversation_id
+                    && let Err(err) = store.sync_conversation(
+                        conv_id,
+                        &ingest.child_conversation_ids,
+                        &sync_opts,
+                    )
+                {
+                    platform::write_error_log_safely(&format!(
+                        "Ledger conversation sync error: {err}"
+                    ));
+                }
+                let allow_routed = cfg.display.show_routed_cost.unwrap_or(false);
+                let live_cost_usd =
+                    domain::resolve_cascade_cost_usd(&ingest.snapshot, allow_routed);
+                let cursor_id = ingest.rolling_cost_key.as_deref().unwrap_or("");
+                let cascade_root_id = ingest
+                    .conversation_id
+                    .as_deref()
+                    .or(ingest.rolling_cost_key.as_deref());
+                let rolling_input = ledger::RollingCostInput {
+                    cursor_id,
+                    cascade_root_id,
+                    live_cost_usd,
+                    seven_day_reset_at_ms: extract_seven_day_reset_at_ms(&ingest.snapshot),
+                    now_ms: ingest.snapshot.observed_at_ms,
+                };
+                match store.record_rolling_costs(&rolling_input) {
+                    Ok(Some(totals)) => {
+                        ingest.snapshot.cost.today_usd = Some(totals.today_usd);
+                        ingest.snapshot.cost.week_usd = Some(totals.week_usd);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        platform::write_error_log_safely(&format!(
+                            "Ledger rolling cost error: {err}"
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                platform::write_error_log_safely(&format!("Ledger open error: {err}"));
+            }
+        }
     }
 
     let term = platform::detect_terminal_caps(
@@ -113,6 +190,10 @@ pub fn run_cli() -> i32 {
     {
         println!("agy-pulse v{VERSION}");
         return 0;
+    }
+
+    if matches!(first, Some("stats" | "report")) || args.iter().any(|a| a == "--stats") {
+        return ledger::run_stats_cli(&args);
     }
 
     if matches!(first, Some("help" | "--help" | "-h"))
