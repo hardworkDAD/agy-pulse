@@ -1,3 +1,7 @@
+pub mod wizard;
+
+pub use wizard::{WizardRunOptions, WizardRunOutcome, run_config_cli, run_wizard_loop};
+
 use std::fs;
 use std::path::Path;
 
@@ -214,13 +218,13 @@ impl Default for PulseConfig {
     }
 }
 
-fn read_json_object(path: &Path) -> Option<Value> {
+pub(crate) fn read_json_object(path: &Path) -> Option<Value> {
     let raw = fs::read_to_string(path).ok()?;
     let val: Value = serde_json::from_str(&raw).ok()?;
     if val.is_object() { Some(val) } else { None }
 }
 
-fn deep_merge_value(base: Value, override_val: Value) -> Value {
+pub(crate) fn deep_merge_value(base: Value, override_val: Value) -> Value {
     match (base, override_val) {
         (Value::Object(mut base_map), Value::Object(override_map)) => {
             for (k, v) in override_map {

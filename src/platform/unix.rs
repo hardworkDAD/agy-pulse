@@ -27,21 +27,29 @@ pub(super) fn detect_unicode_from_os() -> bool {
     false
 }
 
-pub(super) fn detect_live_tty_columns() -> Option<u16> {
+pub(super) fn detect_live_tty_size() -> Option<(u16, u16)> {
     for fd in [std::io::stdout().as_raw_fd(), std::io::stderr().as_raw_fd()] {
-        if let Some(cols) = query_fd_winsize(fd) {
-            return Some(cols);
+        if let Some(size) = query_fd_winsize(fd) {
+            return Some(size);
         }
     }
     if let Ok(tty) = OpenOptions::new().read(true).open("/dev/tty")
-        && let Some(cols) = query_fd_winsize(tty.as_raw_fd())
+        && let Some(size) = query_fd_winsize(tty.as_raw_fd())
     {
-        return Some(cols);
+        return Some(size);
     }
     None
 }
 
-fn query_fd_winsize(fd: i32) -> Option<u16> {
+pub(super) fn detect_live_tty_columns() -> Option<u16> {
+    detect_live_tty_size().map(|(cols, _)| cols)
+}
+
+pub(super) fn detect_live_tty_rows() -> Option<u16> {
+    detect_live_tty_size().map(|(_, rows)| rows)
+}
+
+fn query_fd_winsize(fd: i32) -> Option<(u16, u16)> {
     let mut ws = libc::winsize {
         ws_row: 0,
         ws_col: 0,
@@ -50,10 +58,52 @@ fn query_fd_winsize(fd: i32) -> Option<u16> {
     };
     // SAFETY: `ws` is a valid mutable `libc::winsize` struct passed to TIOCGWINSZ ioctl.
     let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
-    if rc == 0 && ws.ws_col > 0 {
-        Some(ws.ws_col)
+    if rc == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+        Some((ws.ws_col, ws.ws_row))
     } else {
         None
+    }
+}
+
+pub(super) fn is_stdin_stdout_tty() -> bool {
+    // SAFETY: `isatty` is safe for valid standard file descriptors.
+    unsafe { libc::isatty(libc::STDIN_FILENO) != 0 && libc::isatty(libc::STDOUT_FILENO) != 0 }
+}
+
+pub(super) struct RawTerminalGuardImpl {
+    fd: i32,
+    original: libc::termios,
+}
+
+impl RawTerminalGuardImpl {
+    pub(super) fn enter() -> std::io::Result<Self> {
+        let fd = libc::STDIN_FILENO;
+        // SAFETY: `original` is zero-initialized and populated by `tcgetattr` for `STDIN_FILENO`.
+        let mut original: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: `tcgetattr` writes to valid stack struct `original`.
+        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut raw = original;
+        raw.c_iflag &= !(libc::IXON | libc::ICRNL | libc::BRKINT | libc::INPCK | libc::ISTRIP);
+        raw.c_cflag |= libc::CS8;
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
+        raw.c_cc[libc::VMIN] = 1;
+        raw.c_cc[libc::VTIME] = 0;
+        // SAFETY: `tcsetattr` applies valid `termios` struct `raw` to `STDIN_FILENO`.
+        if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { fd, original })
+    }
+}
+
+impl Drop for RawTerminalGuardImpl {
+    fn drop(&mut self) {
+        // SAFETY: restores original `termios` attributes captured at `enter()`.
+        unsafe {
+            let _ = libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original);
+        }
     }
 }
 

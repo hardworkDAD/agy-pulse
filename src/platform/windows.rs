@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::System::Console::{
-    CONSOLE_SCREEN_BUFFER_INFO, GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle,
-    STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+    GetConsoleMode, GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE,
+    STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 
 pub(super) fn detect_unicode_from_os() -> bool {
@@ -14,7 +15,7 @@ pub(super) fn detect_unicode_from_os() -> bool {
     unsafe { GetConsoleOutputCP() == 65001 }
 }
 
-pub(super) fn detect_live_tty_columns() -> Option<u16> {
+pub(super) fn detect_live_tty_size() -> Option<(u16, u16)> {
     for std_handle in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
         // SAFETY: Querying standard console handle and populating stack-allocated buffer info.
         unsafe {
@@ -22,13 +23,67 @@ pub(super) fn detect_live_tty_columns() -> Option<u16> {
             let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
             if GetConsoleScreenBufferInfo(handle, &mut info) != 0 {
                 let width = info.srWindow.Right - info.srWindow.Left + 1;
-                if width > 0 {
-                    return Some(width as u16);
+                let height = info.srWindow.Bottom - info.srWindow.Top + 1;
+                if width > 0 && height > 0 {
+                    return Some((width as u16, height as u16));
                 }
             }
         }
     }
     None
+}
+
+pub(super) fn detect_live_tty_columns() -> Option<u16> {
+    detect_live_tty_size().map(|(cols, _)| cols)
+}
+
+pub(super) fn detect_live_tty_rows() -> Option<u16> {
+    detect_live_tty_size().map(|(_, rows)| rows)
+}
+
+pub(super) fn is_stdin_stdout_tty() -> bool {
+    // SAFETY: `GetStdHandle` and `GetConsoleMode` succeed only when attached to console handles.
+    unsafe {
+        let in_handle = GetStdHandle(STD_INPUT_HANDLE);
+        let out_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut in_mode: u32 = 0;
+        let mut out_mode: u32 = 0;
+        GetConsoleMode(in_handle, &mut in_mode) != 0
+            && GetConsoleMode(out_handle, &mut out_mode) != 0
+    }
+}
+
+pub(super) struct RawTerminalGuardImpl {
+    orig_in_mode: u32,
+}
+
+impl RawTerminalGuardImpl {
+    pub(super) fn enter() -> std::io::Result<Self> {
+        // SAFETY: Queries and updates console input mode on `STD_INPUT_HANDLE`.
+        unsafe {
+            let in_handle = GetStdHandle(STD_INPUT_HANDLE);
+            let mut orig_in_mode: u32 = 0;
+            if GetConsoleMode(in_handle, &mut orig_in_mode) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let raw_mode =
+                orig_in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+            if SetConsoleMode(in_handle, raw_mode) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self { orig_in_mode })
+        }
+    }
+}
+
+impl Drop for RawTerminalGuardImpl {
+    fn drop(&mut self) {
+        // SAFETY: Restores original console input mode on `STD_INPUT_HANDLE`.
+        unsafe {
+            let in_handle = GetStdHandle(STD_INPUT_HANDLE);
+            let _ = SetConsoleMode(in_handle, self.orig_in_mode);
+        }
+    }
 }
 
 pub(super) fn write_file_0600_no_symlink(path: &Path, message: &str) {

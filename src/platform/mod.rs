@@ -73,6 +73,56 @@ pub fn detect_terminal_caps(
     TerminalCaps { unicode, columns }
 }
 
+/// Detect live terminal row count from OS TTY/console if available.
+pub fn detect_live_tty_rows() -> Option<u16> {
+    #[cfg(unix)]
+    {
+        unix::detect_live_tty_rows()
+    }
+    #[cfg(windows)]
+    {
+        windows::detect_live_tty_rows()
+    }
+}
+
+/// Returns `true` when both standard input and standard output are interactive terminals.
+pub fn is_stdin_stdout_tty() -> bool {
+    #[cfg(unix)]
+    {
+        unix::is_stdin_stdout_tty()
+    }
+    #[cfg(windows)]
+    {
+        windows::is_stdin_stdout_tty()
+    }
+}
+
+/// RAII guard that enters raw terminal input mode and restores original settings on `Drop`.
+pub struct RawTerminalGuard {
+    #[cfg(unix)]
+    _inner: unix::RawTerminalGuardImpl,
+    #[cfg(windows)]
+    _inner: windows::RawTerminalGuardImpl,
+}
+
+impl RawTerminalGuard {
+    /// Switch standard input into unbuffered raw mode until the guard is dropped.
+    pub fn enter() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                _inner: unix::RawTerminalGuardImpl::enter()?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                _inner: windows::RawTerminalGuardImpl::enter()?,
+            })
+        }
+    }
+}
+
 /// Resolve current user's home directory from environment variables.
 pub fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")

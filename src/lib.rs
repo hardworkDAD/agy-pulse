@@ -196,6 +196,10 @@ pub fn run_cli() -> i32 {
         return ledger::run_stats_cli(&args);
     }
 
+    if matches!(first, Some("config")) || args.iter().any(|a| a == "--config") {
+        return config::run_config_cli();
+    }
+
     if matches!(first, Some("help" | "--help" | "-h"))
         || args.iter().any(|a| a == "--help" || a == "-h")
     {
