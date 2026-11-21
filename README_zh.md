@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 ![零第三方依赖](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)
-![Node.js >= 20](https://img.shields.io/badge/Node.js-%3E%3D20-339933.svg)
+![Node.js >= 22.5](https://img.shields.io/badge/Node.js-%3E%3D22.5-339933.svg)
 
 > **Antigravity CLI (`agy`) 全能单进程状态栏、实时上下文与压缩上限监控、永久遥测账本（`stats` / `dashboard`）与云端配额追踪插件。**
 
@@ -23,7 +23,7 @@ my-project │ Google AI Pro │ plan │ 输出: 42.6 tok/s (首字 0.8s)
 
 ## 核心特性
 
-- **零外部依赖单进程**：纯 Node.js（>= 20）运行，无任何第三方 npm 依赖，SWR 配额刷新不阻塞状态栏热路径。
+- **零外部依赖单进程**：纯 Node.js 运行（推荐 >= 22.5 使用内置 `node:sqlite`，Node 20 自动降级为 JSON 账本），无任何第三方 npm 依赖，SWR 配额刷新不阻塞状态栏热路径。
 - **实时上下文与压缩上限监控**：原生 SQLite Protobuf 解码服务端压缩上限、分模型累计缓存命中，达到 85%+ 红色告警 `即将触发压缩`。
 - **云端配额、费用与流式速率追踪**：聚合厂商/模型配额、统一费率估算、加权 `tok/s` 与首字延迟，以及活跃 `/swarm` 子代理速率。
 - **永久 SQLite 账本与免终端桌面看板**：内置 `node:sqlite` 账本合并归档 CLI 与 Antigravity IDE 遥测，支持 `agypl dashboard open` 一键独立窗口直开。

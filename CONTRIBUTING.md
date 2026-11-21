@@ -4,7 +4,7 @@ Thank you for your interest in contributing to **agy-pulse**! Please read this g
 
 ## Prerequisites
 
-- **Node.js >= 20** (check with `node -v`)
+- **Node.js >= 22.5** (Node.js 24 LTS recommended for built-in `node:sqlite` and running the full test suite; runtime degrades gracefully to JSON ledger on Node 20)
 - **Zero external npm dependencies**: there is no `npm install` step; everything runs on Node.js built-in modules.
 
 ## Development & Submission Workflow

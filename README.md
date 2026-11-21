@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 ![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)
-![Node.js >= 20](https://img.shields.io/badge/Node.js-%3E%3D20-339933.svg)
+![Node.js >= 22.5](https://img.shields.io/badge/Node.js-%3E%3D22.5-339933.svg)
 
 > **All-in-one single-process status line, real-time context & compaction monitor, permanent telemetry ledger (`stats` / `dashboard`), and cloud quota tracker for Antigravity CLI (`agy`).**
 
@@ -23,7 +23,7 @@ Includes a built-in offline Web Dashboard (`agypl dashboard`) and 4 quota layout
 
 ## Features
 
-- **Zero-Dependency Single Process**: Pure Node.js (>= 20) runtime with zero external npm dependencies and non-blocking SWR quota caching.
+- **Zero-Dependency Single Process**: Pure Node.js (>= 22.5 for built-in `node:sqlite`; degrades to JSON ledger on Node 20) runtime with zero external npm dependencies and non-blocking SWR quota caching.
 - **Context & Server Compaction Monitor**: Native SQLite Protobuf compaction-limit decoding, turn-by-turn cache efficiency, and `Compaction imminent` alerts at 85%+.
 - **Cloud Quota, Cost & Streaming Speed**: Tracks provider/model quotas, unified session pricing, weighted `tok/s` + TTFT latency, and active `/swarm` subagent speeds.
 - **Permanent Ledger & One-Click Dashboard**: Built-in `node:sqlite` ledger merges Antigravity CLI & IDE telemetry; open a standalone offline Web Dashboard without a terminal via `agypl dashboard open`.
