@@ -150,6 +150,25 @@ pub(super) fn set_file_0600(path: &Path) -> std::io::Result<()> {
     fs::set_permissions(path, perms)
 }
 
+pub(super) fn create_exclusive_file_0600(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    if let Some(parent) = path.parent() {
+        ensure_dir_0700(parent)?;
+    }
+    match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(mut file) => {
+            file.write_all(bytes)?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 pub(super) fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let mut builder = fs::DirBuilder::new();

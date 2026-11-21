@@ -124,6 +124,24 @@ pub(super) fn set_file_0600(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+pub(super) fn create_exclusive_file_0600(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    if let Some(parent) = path.parent() {
+        ensure_dir_0700(parent)?;
+    }
+    match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            file.write_all(bytes)?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 pub(super) fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

@@ -183,6 +183,36 @@ fn format_turn_cache_badge(
     format!("{style}{label} {hit_rate:.1}%{absolute}{RESET}")
 }
 
+fn format_dashboard_url_segment(raw_url: Option<&str>, palette: &ThemePalette) -> String {
+    let Some(raw) = raw_url else {
+        return String::new();
+    };
+    let sanitized = sanitize_terminal_text(raw, 120);
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return String::new();
+    }
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return String::new();
+    };
+    if parsed.scheme() != "http" {
+        return String::new();
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return String::new();
+    }
+    let Some(host) = parsed.host_str() else {
+        return String::new();
+    };
+    if !host.eq_ignore_ascii_case("127.0.0.1") && !host.eq_ignore_ascii_case("localhost") {
+        return String::new();
+    }
+    if !parsed.port_or_known_default().is_some_and(|p| p >= 1) {
+        return String::new();
+    }
+    format!("{}{trimmed}{RESET}", palette.cyan)
+}
+
 /// Pure function rendering the multi-line statusline output from a `PulseSnapshot`,
 /// `PulseConfig`, `TerminalCaps`, and pre-resolved `LanguageSetting`.
 pub fn render_statusline(
@@ -212,6 +242,7 @@ pub fn render_statusline(
     let show_turn_cache_hit_rate = d.show_turn_cache_hit_rate.unwrap_or(false);
     let show_breadcrumbs = d.show_breadcrumbs.unwrap_or(true);
     let allow_routed_cost = d.show_routed_cost.unwrap_or(false);
+    let show_dashboard_url = d.show_dashboard_url.unwrap_or(true);
     let is_compact = d.quota_style == QuotaStyle::Compact;
 
     let text = get_language_text(resolved_lang);
@@ -407,11 +438,18 @@ pub fn render_statusline(
         _ => String::new(),
     };
 
+    let dashboard_url_seg = if show_dashboard_url {
+        format_dashboard_url_segment(snapshot.dashboard_url.as_deref(), &palette)
+    } else {
+        String::new()
+    };
+
     struct Line1Opts {
         child_limit: usize,
         include_child_ttft: bool,
         include_main_ttft: bool,
         include_child_speed: bool,
+        include_dashboard_url: bool,
         include_update: bool,
         include_branch: bool,
         include_dir: bool,
@@ -471,6 +509,9 @@ pub fn render_statusline(
                 }
             }
         }
+        if opts.include_dashboard_url && !dashboard_url_seg.is_empty() {
+            parts.push(dashboard_url_seg.clone());
+        }
         if opts.include_update && !update_seg.is_empty() {
             parts.push(update_seg.clone());
         }
@@ -482,6 +523,7 @@ pub fn render_statusline(
         include_child_ttft: true,
         include_main_ttft: true,
         include_child_speed: true,
+        include_dashboard_url: true,
         include_update: true,
         include_branch: true,
         include_dir: true,
@@ -493,7 +535,7 @@ pub fn render_statusline(
         && ansi_display_width(&line1) > cols
     {
         let mut step = 0u8;
-        while step <= 8 {
+        while step <= 9 {
             let applied = match step {
                 0 if display_child_speeds.len() > 2 => {
                     line1_opts.child_limit = 2;
@@ -520,14 +562,18 @@ pub fn render_statusline(
                     true
                 }
                 6 => {
-                    line1_opts.include_branch = false;
+                    line1_opts.include_dashboard_url = false;
                     true
                 }
                 7 => {
-                    line1_opts.include_dir = false;
+                    line1_opts.include_branch = false;
                     true
                 }
                 8 => {
+                    line1_opts.include_dir = false;
+                    true
+                }
+                9 => {
                     line1_opts.include_user = false;
                     true
                 }

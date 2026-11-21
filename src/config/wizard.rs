@@ -162,6 +162,7 @@ enum BoolDisplayField {
     DailyCost,
     WeeklyCost,
     RoutedCost,
+    DashboardUrl,
 }
 
 struct BoolFieldMeta {
@@ -268,6 +269,12 @@ const BOOL_FIELDS: &[BoolFieldMeta] = &[
         label: "Show Routed Child Cost",
         default_on: false,
     },
+    BoolFieldMeta {
+        field: BoolDisplayField::DashboardUrl,
+        json_key: "showDashboardUrl",
+        label: "Show Dashboard URL (Auto-Start)",
+        default_on: true,
+    },
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -311,6 +318,7 @@ const MENU_ITEMS: &[MenuItem] = &[
     MenuItem::BoolDisplay(BoolDisplayField::DailyCost),
     MenuItem::BoolDisplay(BoolDisplayField::WeeklyCost),
     MenuItem::BoolDisplay(BoolDisplayField::RoutedCost),
+    MenuItem::BoolDisplay(BoolDisplayField::DashboardUrl),
     MenuItem::Enabled,
     MenuItem::Save,
     MenuItem::Cancel,
@@ -396,6 +404,7 @@ fn read_display_bool(config: &PulseConfig, field: BoolDisplayField) -> bool {
         BoolDisplayField::DailyCost => d.show_daily_cost,
         BoolDisplayField::WeeklyCost => d.show_weekly_cost,
         BoolDisplayField::RoutedCost => d.show_routed_cost,
+        BoolDisplayField::DashboardUrl => d.show_dashboard_url,
     };
     opt.unwrap_or_else(|| bool_field_meta(field).default_on)
 }
@@ -419,6 +428,7 @@ fn write_display_bool(config: &mut PulseConfig, field: BoolDisplayField, val: bo
         BoolDisplayField::DailyCost => &mut d.show_daily_cost,
         BoolDisplayField::WeeklyCost => &mut d.show_weekly_cost,
         BoolDisplayField::RoutedCost => &mut d.show_routed_cost,
+        BoolDisplayField::DashboardUrl => &mut d.show_dashboard_url,
     };
     *slot = Some(val);
 }
@@ -777,6 +787,7 @@ fn build_sample_pulse_snapshot(observed_at_ms: i64) -> PulseSnapshot {
         image_exhausted: None,
         ttft_sec: Some(2.4),
         update_available_version: None,
+        dashboard_url: Some("http://127.0.0.1:3789".to_string()),
         observed_at_ms,
         quota: Some(ProviderQuotaSummary {
             google: ProviderQuota {

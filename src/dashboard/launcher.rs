@@ -1,23 +1,32 @@
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use url::Url;
 
-use crate::config::LanguageSetting;
+use crate::config::{LanguageSetting, PulseConfig};
 use crate::platform::{self, DesktopOs};
 
-use super::{DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_IDLE_TIMEOUT_SEC};
+use super::{
+    DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_DASHBOARD_PORT, DEFAULT_IDLE_TIMEOUT_SEC,
+    LOOPBACK_HOST,
+};
 
 pub const DASHBOARD_STATE_FILENAME: &str = "agy-pulse-dashboard.json";
+pub const DASHBOARD_SPAWN_LOCK_FILENAME: &str = "agy-pulse-dashboard.lock";
 pub const DASHBOARD_SHORTCUT_MARKER: &str = "agy-pulse-dashboard-shortcut";
 pub const DASHBOARD_ICON_MARKER: &str = "agy-pulse-dashboard-icon";
+pub const STATUSLINE_IDLE_TIMEOUT_SEC: u64 = 1800;
+pub const SPAWN_LOCK_TTL_MS: u64 = 10_000;
+pub const DASHBOARD_PING_THROTTLE_MS: u64 = 5 * 60 * 1000;
 
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+const PING_TIMEOUT_MS: u64 = 150;
 const DAEMON_START_TIMEOUT: Duration = Duration::from_millis(8_000);
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_millis(3_000);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -154,6 +163,344 @@ pub fn clear_dashboard_state_if_owner(owner_pid: u32) -> bool {
         return false;
     }
     fs::remove_file(path).is_ok()
+}
+
+/// Statusline-facing dashboard discovery and auto-start metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusLineDashboardInfo {
+    pub running: bool,
+    pub spawned: bool,
+    pub url: String,
+    pub host: String,
+    pub port: u16,
+    pub pid: Option<u32>,
+    pub idle_timeout_ms: u64,
+    pub started_at: String,
+    pub state_mtime_ms: i64,
+}
+
+/// Outcome returned by `touch_running_dashboard`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TouchDashboardResult {
+    Skipped(&'static str),
+    Pinged { ok: bool },
+    Respawned { ok: bool },
+}
+
+/// Validate that `raw` is a clean `http://` loopback URL (`127.0.0.1` or `localhost`)
+/// without credentials, whitespace, control characters, or invalid ports.
+pub fn is_valid_loopback_dashboard_url(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed
+            .chars()
+            .any(|c| c.is_whitespace() || (c as u32) < 0x20 || c == '\x7F')
+    {
+        return false;
+    }
+    let Ok(parsed) = Url::parse(trimmed) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if !host.eq_ignore_ascii_case("127.0.0.1") && !host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    parsed.port_or_known_default().is_some_and(|p| p >= 1)
+}
+
+/// Resolve the preferred dashboard port (`AGY_PULSE_DASHBOARD_PORT` > `config.display.dashboard_port` > `3789`).
+pub fn resolve_dashboard_port(config: &PulseConfig) -> u16 {
+    if let Ok(raw) = env::var("AGY_PULSE_DASHBOARD_PORT") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty()
+            && let Ok(port) = trimmed.parse::<u16>()
+            && port >= 1
+        {
+            return port;
+        }
+    }
+    if let Some(port) = config.display.dashboard_port
+        && port >= 1
+    {
+        return port;
+    }
+    DEFAULT_DASHBOARD_PORT
+}
+
+/// Resolve idle auto-exit seconds for statusline-launched dashboards
+/// (`AGY_PULSE_DASHBOARD_IDLE_SEC` > `config.display.dashboard_idle_timeout_sec` > `1800`).
+pub fn resolve_statusline_idle_timeout_sec(config: &PulseConfig) -> u64 {
+    if let Ok(raw) = env::var("AGY_PULSE_DASHBOARD_IDLE_SEC") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty()
+            && let Ok(sec) = trimmed.parse::<u64>()
+        {
+            return sec;
+        }
+    }
+    if let Some(sec) = config.display.dashboard_idle_timeout_sec {
+        return sec;
+    }
+    STATUSLINE_IDLE_TIMEOUT_SEC
+}
+
+/// Return the spawn lock file path (`agy-pulse-dashboard.lock`).
+pub fn dashboard_spawn_lock_path() -> PathBuf {
+    platform::resolve_antigravity_path(DASHBOARD_SPAWN_LOCK_FILENAME)
+}
+
+/// Acquire an exclusive spawn lock file (`0600`), reclaiming expired locks older than `ttl_ms`.
+pub fn acquire_dashboard_spawn_lock(ttl_ms: u64) -> bool {
+    let lock_path = dashboard_spawn_lock_path();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let payload = format!("{{\"pid\":{},\"ts\":{now_ms}}}", std::process::id());
+
+    for _attempt in 0..2 {
+        match platform::create_exclusive_file_0600(&lock_path, payload.as_bytes()) {
+            Ok(true) => return true,
+            Ok(false) => {
+                let Ok(meta) = fs::metadata(&lock_path) else {
+                    return false;
+                };
+                let Ok(modified) = meta.modified() else {
+                    return false;
+                };
+                let age_ms = SystemTime::now()
+                    .duration_since(modified)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                if age_ms < ttl_ms {
+                    return false;
+                }
+                if fs::remove_file(&lock_path).is_err() {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// Remove the dashboard spawn lock file if present.
+pub fn release_dashboard_spawn_lock() -> bool {
+    fs::remove_file(dashboard_spawn_lock_path()).is_ok()
+}
+
+/// Inspect `agy-pulse-dashboard.json` and local process liveness without performing any network I/O.
+/// Cleans up stale state files when the recorded PID is no longer alive.
+pub fn get_running_dashboard_info() -> Option<StatusLineDashboardInfo> {
+    let state = read_dashboard_state()?;
+    if state.app != DASHBOARD_APP_ID {
+        return None;
+    }
+    if !platform::is_process_alive(state.pid) {
+        clear_dashboard_state_if_owner(state.pid);
+        return None;
+    }
+
+    let trimmed_host = state.host.trim();
+    let host = if trimmed_host.eq_ignore_ascii_case("localhost") {
+        "localhost".to_string()
+    } else {
+        LOOPBACK_HOST.to_string()
+    };
+
+    let raw_url = if !state.url.trim().is_empty() {
+        state.url.trim().to_string()
+    } else {
+        format!("http://{host}:{}", state.port)
+    };
+    if !is_valid_loopback_dashboard_url(&raw_url) {
+        return None;
+    }
+
+    let state_mtime_ms = fs::metadata(dashboard_state_path())
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    Some(StatusLineDashboardInfo {
+        running: true,
+        spawned: false,
+        url: raw_url,
+        host,
+        port: state.port,
+        pid: Some(state.pid),
+        idle_timeout_ms: state.idle_timeout_ms,
+        started_at: state.started_at,
+        state_mtime_ms,
+    })
+}
+
+/// Spawn a detached background dashboard daemon without waiting for HTTP readiness.
+pub fn spawn_background_dashboard_detached(
+    port: u16,
+    idle_timeout_sec: u64,
+    lang: LanguageSetting,
+    no_sync: bool,
+) -> io::Result<u32> {
+    let exe_path = env::current_exe()?;
+    let port_str = port.to_string();
+    let idle_str = idle_timeout_sec.to_string();
+    let mut args: Vec<&str> = vec![
+        "dashboard",
+        "--serve-background",
+        "--no-open",
+        "--port",
+        &port_str,
+        "--idle-timeout",
+        &idle_str,
+    ];
+    match lang {
+        LanguageSetting::Zh => args.extend(["--lang", "zh"]),
+        LanguageSetting::En => args.extend(["--lang", "en"]),
+        LanguageSetting::Auto => {}
+    }
+    if no_sync {
+        args.push("--no-sync");
+    }
+    platform::spawn_detached(&exe_path, &args)
+}
+
+/// Resolve the dashboard URL for statusline rendering, optionally spawning the daemon non-blockingly.
+pub fn resolve_dashboard_url_for_statusline(
+    config: &PulseConfig,
+    lang: LanguageSetting,
+    auto_start: bool,
+) -> Option<StatusLineDashboardInfo> {
+    if let Some(running) = get_running_dashboard_info() {
+        return Some(running);
+    }
+    if !auto_start {
+        return None;
+    }
+
+    let port = resolve_dashboard_port(config);
+    let idle_sec = resolve_statusline_idle_timeout_sec(config);
+    let spawned = if acquire_dashboard_spawn_lock(SPAWN_LOCK_TTL_MS) {
+        if spawn_background_dashboard_detached(port, idle_sec, lang, false).is_ok() {
+            true
+        } else {
+            release_dashboard_spawn_lock();
+            return None;
+        }
+    } else {
+        false
+    };
+
+    Some(StatusLineDashboardInfo {
+        running: false,
+        spawned,
+        url: format!("http://{LOOPBACK_HOST}:{port}"),
+        host: LOOPBACK_HOST.to_string(),
+        port,
+        pid: None,
+        idle_timeout_ms: idle_sec.saturating_mul(1000),
+        started_at: String::new(),
+        state_mtime_ms: 0,
+    })
+}
+
+/// Send a short-timeout `POST /api/ping` keep-alive to a loopback dashboard server.
+pub fn ping_dashboard(host: &str, port: u16, timeout_ms: u64) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let ip: IpAddr = if host.eq_ignore_ascii_case("localhost") {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else if let Ok(parsed) = host.parse::<IpAddr>()
+        && parsed.is_loopback()
+    {
+        parsed
+    } else {
+        return false;
+    };
+
+    let timeout = Duration::from_millis(timeout_ms.max(1));
+    let addr = SocketAddr::new(ip, port);
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, timeout) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    let req = format!(
+        "POST /api/ping HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).is_err() || stream.flush().is_err() {
+        return false;
+    }
+
+    let mut raw = Vec::with_capacity(256);
+    let mut chunk = [0u8; 256];
+    while raw.len() < 512 {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&chunk[..n]);
+                if raw.windows(2).any(|w| w == b"\r\n") {
+                    break;
+                }
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&raw);
+    text.lines().next().is_some_and(|line| line.contains(" 200 "))
+}
+
+/// Throttled keep-alive ping and self-healing respawn for a running dashboard instance.
+pub fn touch_running_dashboard(
+    info: &StatusLineDashboardInfo,
+    config: &PulseConfig,
+    lang: LanguageSetting,
+    auto_start: bool,
+    now_ms: i64,
+) -> TouchDashboardResult {
+    if !info.running {
+        return TouchDashboardResult::Skipped("not_running");
+    }
+    if info.idle_timeout_ms == 0 {
+        return TouchDashboardResult::Skipped("no_idle_timeout");
+    }
+
+    let throttle_ms = (info.idle_timeout_ms / 3).clamp(1_000, DASHBOARD_PING_THROTTLE_MS);
+    if info.state_mtime_ms > 0
+        && now_ms.saturating_sub(info.state_mtime_ms) < throttle_ms as i64
+    {
+        return TouchDashboardResult::Skipped("throttled");
+    }
+
+    if ping_dashboard(&info.host, info.port, PING_TIMEOUT_MS) {
+        let _ = platform::touch_file_mtime(&dashboard_state_path());
+        return TouchDashboardResult::Pinged { ok: true };
+    }
+
+    if let Some(pid) = info.pid {
+        clear_dashboard_state_if_owner(pid);
+    }
+    if auto_start && acquire_dashboard_spawn_lock(SPAWN_LOCK_TTL_MS) {
+        let port = resolve_dashboard_port(config);
+        let idle_sec = resolve_statusline_idle_timeout_sec(config);
+        if spawn_background_dashboard_detached(port, idle_sec, lang, false).is_ok() {
+            return TouchDashboardResult::Respawned { ok: true };
+        }
+        release_dashboard_spawn_lock();
+    }
+    TouchDashboardResult::Pinged { ok: false }
 }
 
 /// Probe `GET /api/health` on `host:port` to verify a live `agy-pulse-dashboard` instance.

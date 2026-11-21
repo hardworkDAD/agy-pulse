@@ -371,6 +371,25 @@ pub fn file_unique_id(meta: &std::fs::Metadata) -> u64 {
     }
 }
 
+/// Atomically create a new file with `0600` permissions (Unix) using `O_CREAT | O_EXCL` semantics.
+/// Returns `Ok(true)` if created, `Ok(false)` if the file already exists.
+pub fn create_exclusive_file_0600(path: &Path, bytes: &[u8]) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        unix::create_exclusive_file_0600(path, bytes)
+    }
+    #[cfg(windows)]
+    {
+        windows::create_exclusive_file_0600(path, bytes)
+    }
+}
+
+/// Refresh a file's modification timestamp (`mtime`) to the current wall-clock time.
+pub fn touch_file_mtime(path: &Path) -> io::Result<()> {
+    let file = fs::OpenOptions::new().write(true).open(path)?;
+    file.set_modified(std::time::SystemTime::now())
+}
+
 /// Atomically write a cache file with restricted permissions via sibling temporary file + rename.
 pub fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]

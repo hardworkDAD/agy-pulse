@@ -96,6 +96,7 @@ Run `agypl config` for the interactive wizard, create `./agy-pulse.config.json` 
     "showCurrentDir": true,
     "showCycleMode": true,
     "showSpeed": true,
+    "showDashboardUrl": true,
     "showModel": false,
     "showCost": false,
     "breadcrumbCount": 3,
@@ -109,7 +110,7 @@ Run `agypl config` for the interactive wizard, create `./agy-pulse.config.json` 
 }
 ```
 
-See [Reference Manual](./docs/reference.md#configuration-reference) for all configuration fields and environment variables.
+See [Reference Manual](./docs/reference.md#configuration-reference) for all configuration fields (`display.dashboardPort`, `display.dashboardIdleTimeoutSec`, etc.) and environment variables (`AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_NO_DASHBOARD_AUTOSTART`, etc.).
 
 ## Uninstall
 

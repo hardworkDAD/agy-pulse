@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::dashboard::{
-    DASHBOARD_STATE_FILENAME, DEFAULT_DASHBOARD_PORT, LOOPBACK_HOST, stop_background_dashboard,
-    uninstall_desktop_shortcuts,
+    DASHBOARD_SPAWN_LOCK_FILENAME, DASHBOARD_STATE_FILENAME, DEFAULT_DASHBOARD_PORT,
+    LOOPBACK_HOST, stop_background_dashboard, uninstall_desktop_shortcuts,
 };
 use crate::platform;
 
@@ -30,6 +30,7 @@ const EXTRA_CACHE_TARGETS: &[&str] = &[
     "agy-pulse-update-status.json",
     "agy-pulse-compaction-cache.json",
     DASHBOARD_STATE_FILENAME,
+    DASHBOARD_SPAWN_LOCK_FILENAME,
     "daily-cost.json",
     "speed-cache",
     "transcript-cache",

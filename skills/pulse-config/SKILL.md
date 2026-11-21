@@ -47,6 +47,7 @@ Use `ask_question` (or ask concisely) to confirm scope and desired options / 使
     "showCurrentDir": true,
     "showCycleMode": true,
     "showSpeed": true,
+    "showDashboardUrl": true,
     "showModel": false,
     "showTokenBar": false,
     "showContextBar": false,
@@ -83,6 +84,9 @@ Use `ask_question` (or ask concisely) to confirm scope and desired options / 使
 | `display.showCurrentDir` | `boolean` | `true` | Current directory basename on Line 1 / 状态栏首行当前目录名 |
 | `display.showCycleMode` | `boolean` | `true` | Interactive cycle mode badge (`auto` / `accept-edits` / `plan` / `best-of-n`) on Line 1 / 状态栏首行交互模式徽章 |
 | `display.showSpeed` | `boolean` | `true` | Output speed (`tok/s`) & TTFT on Line 1 / 状态栏首行输出速率与首字延迟 |
+| `display.showDashboardUrl` | `boolean` | `true` | Show local Web Dashboard URL on Line 1 and silently auto-start & keep it alive while `agy` is active (disable auto-start with `AGY_PULSE_NO_DASHBOARD_AUTOSTART=1`) / 状态栏显示本地网页看板网址并静默自动拉起保活（设 `AGY_PULSE_NO_DASHBOARD_AUTOSTART=1` 可禁止自动拉起） |
+| `display.dashboardPort` | `number` (optional) | `3789` | Preferred loopback port for status-line auto-started dashboard (overridden by `AGY_PULSE_DASHBOARD_PORT`) / 状态栏自动拉起网页看板的首选端口（优先级低于 `AGY_PULSE_DASHBOARD_PORT`） |
+| `display.dashboardIdleTimeoutSec` | `number` (optional) | `1800` | Idle auto-exit timeout in seconds for status-line auto-started dashboard (`0` disables idle exit; overridden by `AGY_PULSE_DASHBOARD_IDLE_SEC`) / 状态栏自动拉起网页看板的空闲退出秒数（`0` 常驻不自动退出；优先级低于 `AGY_PULSE_DASHBOARD_IDLE_SEC`） |
 | `display.modelSpeedExpireMinutes` | `number` (optional) | `5` | Auto-hide model speed & TTFT after N idle minutes / 超过指定分钟未调用自动隐藏对应模型速度与首字 |
 | `display.modelSpeedExpireTurns` | `number` (optional) | `30` | Auto-hide main/child model speed & TTFT after N idle turns / 超过指定轮次未调用自动隐藏对应模型速度与首字 |
 | `display.showModel` | `boolean` | `false` | Model name on Line 1 / 状态栏首行模型名 |

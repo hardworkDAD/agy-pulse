@@ -26,11 +26,12 @@
   - Embedded zero-CDN frontend (`include_str!`) served over `127.0.0.1` with `Host`/`Origin` validation and CSP headers.
   - Redesigned background keepalive around live page instances (`/api/keepalive` SSE + `/api/ping` + `pagehide` `/api/disconnect` beacon with reload grace), keeping the **Dashboard** online even when minimized or backgrounded in a browser tab until all pages close.
   - Preserved single-instance daemon management (`open`, `stop`, `status`), Chromium `--app` window launch, and fingerprint-guarded desktop shortcuts (`install-shortcut` / `uninstall-shortcut`).
+  - Added statusline Line 1 local Web Dashboard URL rendering and silent background auto-start/keepalive (`display.showDashboardUrl` default `true`, `display.dashboardPort` default `3789`, `display.dashboardIdleTimeoutSec` default `1800`), coordinated via exclusive spawn lock (`agy-pulse-dashboard.lock`), throttled `/api/ping` renewal + stale-instance respawn, loopback URL sanitization, and env overrides (`AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_NO_DASHBOARD_AUTOSTART=1`).
 - **Native Installer, Safe Uninstaller & 5-Platform Release Pipeline (`src/ops/`, `scripts/`, `.github/workflows/`)**:
   - Added `agypl install`, `agypl uninstall [--purge-ledger]`, and `agypl update` (HTTPS-enforced with `https -> http` downgrade rejection and `SHA256SUMS` verification).
   - Rewrote `scripts/install.sh`, `scripts/install.ps1`, `scripts/deploy-local.sh`, `uninstall.sh`, `uninstall.ps1`, and `release.sh` with zero Node.js dependency.
   - Added `.github/workflows/ci.yml` (Linux/macOS/Windows `clippy` + `test`) and `.github/workflows/release.yml` packaging all 5 official targets (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`) with unified `SHA256SUMS`.
-  - Added `tests/t01`–`tests/t10` black-box integration and golden parity test suites.
+  - Added `tests/t01`–`tests/t11` black-box integration and golden parity test suites.
 
 ## [1.0.0] - 2026-11-18
 

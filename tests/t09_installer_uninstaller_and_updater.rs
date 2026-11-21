@@ -107,6 +107,7 @@ impl IsolatedEnv {
             .env("AGY_PULSE_GLOBAL_CONFIG_DIR", &self.global_cfg_dir)
             .env("AGY_PULSE_BIN_DIR", &self.bin_dir)
             .env("AGY_PULSE_NO_OPEN", "1")
+            .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
             .env("TMPDIR", &self.tmp_dir)
             .env("LC_ALL", "en_US.UTF-8")
             .env("LANG", "en_US.UTF-8");

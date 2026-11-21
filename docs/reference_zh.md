@@ -211,6 +211,7 @@ bash uninstall.sh        # macOS / Linux
     "showCurrentDir": true,
     "showCycleMode": true,
     "showSpeed": true,
+    "showDashboardUrl": true,
     "showModel": false,
     "showTokenBar": false,
     "showContextBar": false,
@@ -253,6 +254,9 @@ bash uninstall.sh        # macOS / Linux
 | `display.showCurrentDir` | `boolean` | `true` | 第 1 行 | 是否显示当前工作区目录名 |
 | `display.showCycleMode` | `boolean` | `true` | 第 1 行 | 是否显示 `agy` 交互模式徽章（`auto`、`accept-edits`、`plan`、`best-of-n`） |
 | `display.showSpeed` | `boolean` | `true` | 第 1 行 | 是否显示主模型流式加权均速与 TTFT，及最多 3 个活跃子模型速率 |
+| `display.showDashboardUrl` | `boolean` | `true` | 第 1 行 | 是否在第 1 行显示本地网页看板网址（如 `http://127.0.0.1:3789`），并在未运行时后台静默自动拉起与活跃续期 |
+| `display.dashboardPort` | `number` | `3789` | 网页看板 | 状态栏自动拉起网页看板时的首选本机端口（优先级低于 `AGY_PULSE_DASHBOARD_PORT`） |
+| `display.dashboardIdleTimeoutSec` | `number` | `1800` | 网页看板 | 状态栏自动拉起网页看板时的空闲自动退出秒数（默认 `1800` 秒即 30 分钟；设为 `0` 常驻不自动退出；优先级低于 `AGY_PULSE_DASHBOARD_IDLE_SEC`） |
 | `display.modelSpeedExpireMinutes` | `number` | `5` | 第 1 行 | 超过 N 分钟未调用自动隐藏速度与首字 |
 | `display.modelSpeedExpireTurns` | `number` | `30` | 第 1 行 | 超过 N 轮未调用自动隐藏速度与首字 |
 | `display.showModel` | `boolean` | `false` | 第 1 行 | 是否在状态栏首行显示模型名 |
@@ -293,7 +297,9 @@ bash uninstall.sh        # macOS / Linux
 | `AGY_PULSE_FORCE_UNICODE` | 设为 `1` 强制使用 Unicode 字符 |
 | `AGY_PULSE_LANGUAGE` | 强制界面语言（`en` / `zh` / `auto`） |
 | `AGY_PULSE_NO_OPEN` | 设为 `1` 阻止 `agypl dashboard` 自动打开浏览器 |
-| `AGY_PULSE_DASHBOARD_IDLE_SEC` | 覆盖后台无客户端连接时的孤儿空闲超时秒数（默认 `600`） |
+| `AGY_PULSE_NO_DASHBOARD_AUTOSTART` | 设为 `1` 时禁止状态栏自动拉起后台网页看板（若看板已在运行仍会显示其网址） |
+| `AGY_PULSE_DASHBOARD_PORT` | 覆盖状态栏自动拉起网页看板时的首选监听端口（默认 `3789`） |
+| `AGY_PULSE_DASHBOARD_IDLE_SEC` | 覆盖 `agypl dashboard open` / `--background`（默认 `600`）及状态栏自动拉起（默认 `1800`）的空闲自动退出秒数（`0` 表示不自动退出） |
 | `AGY_PULSE_DASHBOARD_CLOSE_GRACE_MS` | 覆盖最后一个页面关闭后的优雅退出宽限毫秒数 |
 | `AGY_PULSE_PROFILE_PATH` | 覆盖 `scripts/configure-utf8.ps1` 的 PowerShell Profile 路径 |
 | `COLUMNS` | 终端列宽兜底值 |
@@ -349,5 +355,5 @@ agy-pulse/
 ├── skills/pulse-config/SKILL.md       # Agent 交互式配置技能
 ├── docs/                              # 中英文架构、ADR、模块与参考文档
 └── tests/
-    └── t01..t10_*.rs                  # 黑盒集成测试、双端黄金对拍与打包 E2E 套件
+    └── t01..t11_*.rs                  # 黑盒集成测试、双端黄金对拍与打包 E2E 套件
 ```

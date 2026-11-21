@@ -10,7 +10,7 @@ pub mod platform;
 pub mod render;
 
 use std::env;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::panic;
 use std::sync::mpsc;
 use std::thread;
@@ -114,6 +114,24 @@ fn run_statusline_pipeline() {
         return;
     }
 
+    let locale = platform::read_locale_env();
+    let resolved_lang = resolve_language_from_locale(cfg.language, locale.as_deref());
+    let auto_start_dashboard =
+        env::var("AGY_PULSE_NO_DASHBOARD_AUTOSTART").ok().as_deref() != Some("1");
+    let show_dashboard_url = cfg.display.show_dashboard_url.unwrap_or(true);
+    let dashboard_info = if show_dashboard_url {
+        dashboard::resolve_dashboard_url_for_statusline(
+            &cfg,
+            resolved_lang,
+            auto_start_dashboard,
+        )
+    } else {
+        None
+    };
+    if let Some(ref info) = dashboard_info {
+        ingest.snapshot.dashboard_url = Some(info.url.clone());
+    }
+
     ingest.snapshot.update_available_version = ops::read_available_update_version();
     ops::maybe_spawn_background_update_check();
 
@@ -179,11 +197,22 @@ fn run_statusline_pipeline() {
         cfg.display.terminal_width,
         cfg.display.unicode,
     );
-    let locale = platform::read_locale_env();
-    let resolved_lang = resolve_language_from_locale(cfg.language, locale.as_deref());
     let output = render::render_statusline(&ingest.snapshot, &cfg, &term, resolved_lang);
     if !output.is_empty() {
         print!("{output}");
+        let _ = io::stdout().flush();
+    }
+
+    if let Some(ref info) = dashboard_info
+        && info.running
+    {
+        let _ = dashboard::touch_running_dashboard(
+            info,
+            &cfg,
+            resolved_lang,
+            auto_start_dashboard,
+            ingest.snapshot.observed_at_ms,
+        );
     }
 }
 

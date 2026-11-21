@@ -11,10 +11,18 @@ use crate::platform;
 use crate::render::resolve_language_from_locale;
 
 pub use launcher::{
-    BrowserLaunchSpec, BrowserOpenResult, DASHBOARD_ICON_MARKER, DASHBOARD_SHORTCUT_MARKER,
-    DASHBOARD_STATE_FILENAME, DashboardStateFile, EnsureDashboardResult, RunningDashboardInfo,
-    ShortcutInstallReport, ShortcutStatus, ShortcutUninstallReport, StopDashboardResult,
-    build_app_window_launch_spec, stop_background_dashboard, uninstall_desktop_shortcuts,
+    BrowserLaunchSpec, BrowserOpenResult, DASHBOARD_ICON_MARKER, DASHBOARD_PING_THROTTLE_MS,
+    DASHBOARD_SHORTCUT_MARKER, DASHBOARD_SPAWN_LOCK_FILENAME, DASHBOARD_STATE_FILENAME,
+    DashboardStateFile, EnsureDashboardResult, RunningDashboardInfo, SPAWN_LOCK_TTL_MS,
+    STATUSLINE_IDLE_TIMEOUT_SEC, ShortcutInstallReport, ShortcutStatus, ShortcutUninstallReport,
+    StatusLineDashboardInfo, StopDashboardResult, TouchDashboardResult,
+    acquire_dashboard_spawn_lock, build_app_window_launch_spec, clear_dashboard_state_if_owner,
+    dashboard_spawn_lock_path, dashboard_state_path, get_running_dashboard_info,
+    is_valid_loopback_dashboard_url, ping_dashboard, probe_dashboard_health, read_dashboard_state,
+    release_dashboard_spawn_lock, resolve_dashboard_port, resolve_dashboard_url_for_statusline,
+    resolve_statusline_idle_timeout_sec, spawn_background_dashboard_detached,
+    stop_background_dashboard, touch_running_dashboard, uninstall_desktop_shortcuts,
+    write_dashboard_state,
 };
 pub use server::{DashboardError, DashboardServer, DashboardServerConfig, DashboardServerInfo};
 
@@ -484,6 +492,15 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
             let auto_open = should_auto_open(&args);
             let app_mode = args.app_mode;
             let idle_timeout_ms = args.idle_timeout_sec.saturating_mul(1000);
+
+            if args.background_serve
+                && args.port > 0
+                && launcher::probe_dashboard_health(LOOPBACK_HOST, args.port).is_some()
+            {
+                launcher::release_dashboard_spawn_lock();
+                return 0;
+            }
+
             let cfg = DashboardServerConfig {
                 host: args.host,
                 port: args.port,
@@ -497,6 +514,7 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
             let mut server = match DashboardServer::start(cfg) {
                 Ok(s) => s,
                 Err(err) => {
+                    launcher::release_dashboard_spawn_lock();
                     eprintln!("agy-pulse dashboard error: {err}");
                     return 1;
                 }
@@ -504,20 +522,23 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
 
             let info = server.info().clone();
             let owner_pid = std::process::id();
+            let state = DashboardStateFile {
+                app: DASHBOARD_APP_ID.to_string(),
+                pid: owner_pid,
+                port: info.port,
+                host: info.host.clone(),
+                url: info.url.clone(),
+                idle_timeout_ms,
+                started_at: info.started_at.clone(),
+            };
+            if let Err(err) = launcher::write_dashboard_state(&state)
+                && args.background_serve
+            {
+                eprintln!("agy-pulse dashboard warning: failed to write state file: {err}");
+            }
+            launcher::release_dashboard_spawn_lock();
 
             if args.background_serve {
-                let state = DashboardStateFile {
-                    app: DASHBOARD_APP_ID.to_string(),
-                    pid: owner_pid,
-                    port: info.port,
-                    host: info.host.clone(),
-                    url: info.url.clone(),
-                    idle_timeout_ms,
-                    started_at: info.started_at.clone(),
-                };
-                if let Err(err) = launcher::write_dashboard_state(&state) {
-                    eprintln!("agy-pulse dashboard warning: failed to write state file: {err}");
-                }
                 server.wait_until_stopped();
                 launcher::clear_dashboard_state_if_owner(owner_pid);
                 return 0;
@@ -557,6 +578,7 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
             }
 
             server.wait_until_stopped();
+            launcher::clear_dashboard_state_if_owner(owner_pid);
             0
         }
     }

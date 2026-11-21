@@ -209,6 +209,7 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
     "showCurrentDir": true,
     "showCycleMode": true,
     "showSpeed": true,
+    "showDashboardUrl": true,
     "showModel": false,
     "showTokenBar": false,
     "showContextBar": false,
@@ -251,6 +252,9 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 | `display.showCurrentDir` | `boolean` | `true` | Line 1 | Current working directory basename |
 | `display.showCycleMode` | `boolean` | `true` | Line 1 | Interactive cycle mode badge (`auto`, `accept-edits`, `plan`, `best-of-n`) |
 | `display.showSpeed` | `boolean` | `true` | Line 1 | Main weighted output `tok/s` + TTFT and up to 3 active child model speeds |
+| `display.showDashboardUrl` | `boolean` | `true` | Line 1 | Show local Web Dashboard URL (`http://127.0.0.1:3789`) on Line 1, silently auto-starting and keeping the background dashboard alive while `agy` is active |
+| `display.dashboardPort` | `number` | `3789` | Dashboard | Preferred loopback port when status line auto-starts the background dashboard (overridden by `AGY_PULSE_DASHBOARD_PORT`) |
+| `display.dashboardIdleTimeoutSec` | `number` | `1800` | Dashboard | Idle auto-exit timeout in seconds for the status-line auto-started dashboard (`0` keeps it running without idle exit; overridden by `AGY_PULSE_DASHBOARD_IDLE_SEC`) |
 | `display.modelSpeedExpireMinutes` | `number` | `5` | Line 1 | Hide main/child model speed & TTFT after N idle minutes |
 | `display.modelSpeedExpireTurns` | `number` | `30` | Line 1 | Hide main/child model speed & TTFT after N idle turns |
 | `display.showModel` | `boolean` | `false` | Line 1 | Active model name on Line 1 |
@@ -291,7 +295,9 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 | `AGY_PULSE_FORCE_UNICODE` | Set `1` to force Unicode output |
 | `AGY_PULSE_LANGUAGE` | Force UI language (`en`, `zh`, `auto`) |
 | `AGY_PULSE_NO_OPEN` | Set `1` to prevent `agypl dashboard` from opening a browser |
-| `AGY_PULSE_DASHBOARD_IDLE_SEC` | Override background orphan idle timeout in seconds (default `600`) |
+| `AGY_PULSE_NO_DASHBOARD_AUTOSTART` | Set `1` to prevent Statusline rendering from auto-starting the background dashboard (still displays URL if already running) |
+| `AGY_PULSE_DASHBOARD_PORT` | Override preferred loopback port for status-line dashboard auto-start (default `3789`) |
+| `AGY_PULSE_DASHBOARD_IDLE_SEC` | Override idle auto-exit timeout in seconds for `agypl dashboard open` / `--background` (default `600`) and status-line auto-start (default `1800`; `0` disables idle exit) |
 | `AGY_PULSE_DASHBOARD_CLOSE_GRACE_MS` | Override close-grace window in milliseconds after the last page disconnects |
 | `AGY_PULSE_PROFILE_PATH` | Override PowerShell profile path for `scripts/configure-utf8.ps1` |
 | `COLUMNS` | Fallback terminal column width |
@@ -347,5 +353,5 @@ agy-pulse/
 ├── skills/pulse-config/SKILL.md       # Agent config skill
 ├── docs/                              # Architecture, ADRs, module & reference docs (en / zh)
 └── tests/
-    └── t01..t10_*.rs                  # Black-box integration, parity & packaging test suites
+    └── t01..t11_*.rs                  # Black-box integration, parity & packaging test suites
 ```

@@ -113,6 +113,7 @@ impl IsolatedEnv {
             .env("AGY_PULSE_BIN_DIR", &self.bin_dir)
             .env("AGY_PULSE_DISABLE_UPDATE_CHECK", "1")
             .env("AGY_PULSE_NO_OPEN", "1")
+            .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
             .env("TMPDIR", &self.tmp_dir)
             .env_remove("AGY_PULSE_FORCE_ASCII")
             .env_remove("AGY_PULSE_FORCE_UNICODE")

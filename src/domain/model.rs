@@ -137,6 +137,7 @@ pub struct PulseSnapshot {
     pub image_exhausted: Option<ImageQuotaExhausted>,
     pub ttft_sec: Option<f64>,
     pub update_available_version: Option<String>,
+    pub dashboard_url: Option<String>,
     pub observed_at_ms: i64,
     pub quota: Option<ProviderQuotaSummary>,
 }
