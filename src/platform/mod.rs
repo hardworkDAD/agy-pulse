@@ -195,6 +195,42 @@ pub fn write_error_log_safely(message: &str) {
     windows::write_file_0600_no_symlink(&log_path, message);
 }
 
+/// Return a platform-specific unique file identifier (inode on Unix, 0 fallback on Windows).
+pub fn file_unique_id(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        unix::file_unique_id(meta)
+    }
+    #[cfg(windows)]
+    {
+        windows::file_unique_id(meta)
+    }
+}
+
+/// Atomically write a cache file with restricted permissions via sibling temporary file + rename.
+pub fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::write_atomic_0600(path, bytes)
+    }
+    #[cfg(windows)]
+    {
+        windows::write_atomic_0600(path, bytes)
+    }
+}
+
+/// Resolve platform-appropriate `claude_desktop_config.json` path if discoverable.
+pub fn resolve_claude_desktop_config_path() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        unix::resolve_claude_desktop_config_path()
+    }
+    #[cfg(windows)]
+    {
+        windows::resolve_claude_desktop_config_path()
+    }
+}
+
 /// Run a local command with a hard timeout, returning trimmed stdout if exit code is 0.
 pub fn run_command_with_timeout(
     program: &str,

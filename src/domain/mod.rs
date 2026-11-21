@@ -8,9 +8,10 @@ pub use accounting::{
     resolve_native_cost_usd,
 };
 pub use model::{
-    ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity, PulseSnapshot, TokenUsage,
-    WorkspaceInfo, is_usage_cache_inclusive, model_includes_cache_in_input,
-    resolve_model_display_name,
+    ChildModelSpeed, ContextWindowSnapshot, CostSnapshot, HostIdentity, ImageQuotaExhausted,
+    ModelIdentity, ModelTokenTotals, PulseSnapshot, TokenUsage, TurnCacheMetrics, TurnPeakByMode,
+    WorkspaceInfo, WorkspaceMetadata, calculate_turn_cache_metrics, compact_model_name,
+    is_usage_cache_inclusive, model_includes_cache_in_input, resolve_model_display_name,
 };
 pub use pricing::{ModelPricing, calculate_token_cost};
 pub use quota::{

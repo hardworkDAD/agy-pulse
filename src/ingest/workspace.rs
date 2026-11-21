@@ -1,7 +1,11 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde_json::Value;
+
+use crate::domain::WorkspaceMetadata;
 use crate::platform;
 
 /// Resolve the display basename of the workspace directory.
@@ -97,4 +101,179 @@ fn read_head_branch(git_dir: &Path) -> Option<String> {
         return Some("HEAD".to_string());
     }
     None
+}
+
+/// Pure offline scan of workspace memory files, rule documents, git hooks, and configured MCP servers.
+pub(super) fn scan_workspace_metadata(cwd: &Path) -> WorkspaceMetadata {
+    let memory_file = detect_memory_file(cwd);
+    let rules_count = count_rule_documents(cwd);
+    let hooks_count = count_git_hooks(cwd);
+    let mcp_count = count_mcp_servers();
+
+    WorkspaceMetadata {
+        memory_file,
+        breadcrumbs: Vec::new(),
+        rules_count,
+        mcp_count,
+        hooks_count,
+    }
+}
+
+fn detect_memory_file(cwd: &Path) -> Option<String> {
+    const CANDIDATES: &[&str] = &[
+        "AGENTS.md",
+        "agents.md",
+        "GEMINI.md",
+        "gemini.md",
+        "CLAUDE.md",
+        "claude.md",
+        "MEMORY.md",
+        "memory.md",
+    ];
+
+    if let Ok(rd) = fs::read_dir(cwd) {
+        let names: HashSet<String> = rd
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        for &candidate in CANDIDATES {
+            if names.contains(candidate) && cwd.join(candidate).is_file() {
+                return Some(candidate.to_string());
+            }
+        }
+    } else {
+        for &candidate in CANDIDATES {
+            if cwd.join(candidate).is_file() {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+
+    if let Some(home) = platform::home_dir() {
+        let normalized = cwd.to_string_lossy().replace('\\', "/");
+        let project_key = normalized.replace(':', "").replace('/', "-");
+        let project_memory = home
+            .join(".claude")
+            .join("projects")
+            .join(project_key)
+            .join("memory")
+            .join("MEMORY.md");
+        if project_memory.is_file() {
+            return Some("MEMORY.md".to_string());
+        }
+    }
+
+    None
+}
+
+fn count_md_files_in_dir(dir: &Path) -> u64 {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0u64;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("md")
+            && entry.file_type().is_ok_and(|ft| ft.is_file())
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn count_rule_documents(cwd: &Path) -> u64 {
+    let mut dirs: Vec<PathBuf> = vec![
+        cwd.join(".claude").join("rules"),
+        cwd.join(".cursor").join("rules"),
+        cwd.join(".github").join("rules"),
+        cwd.join(".gemini").join("rules"),
+        cwd.join(".antigravity").join("rules"),
+    ];
+    for root in platform::get_antigravity_roots() {
+        dirs.push(root.join("rules"));
+    }
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut total = 0u64;
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let key = fs::canonicalize(&dir).unwrap_or(dir);
+        if seen.insert(key.clone()) {
+            total += count_md_files_in_dir(&key);
+        }
+    }
+    total
+}
+
+fn count_git_hooks(cwd: &Path) -> u64 {
+    let Some(git_dir) = locate_git_dir(cwd) else {
+        return 0;
+    };
+    let mut hooks_dir = git_dir.join("hooks");
+    if !hooks_dir.is_dir()
+        && let Some(raw_path) = platform::run_command_with_timeout(
+            "git",
+            &["rev-parse", "--git-path", "hooks"],
+            cwd,
+            Duration::from_millis(300),
+        )
+    {
+        let p = PathBuf::from(raw_path);
+        hooks_dir = if p.is_absolute() { p } else { cwd.join(p) };
+    }
+
+    let Ok(rd) = fs::read_dir(&hooks_dir) else {
+        return 0;
+    };
+    let mut count = 0u64;
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(".sample") || name_str.ends_with(".disabled") {
+            continue;
+        }
+        if entry.metadata().is_ok_and(|m| m.is_file()) {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn count_mcp_entries_in_file(path: &Path) -> u64 {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return 0;
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+        return 0;
+    };
+    let Some(mcps) = val.get("mcpServers").or_else(|| val.get("mcp")) else {
+        return 0;
+    };
+    mcps.as_object().map(|m| m.len() as u64).unwrap_or(0)
+}
+
+fn count_mcp_servers() -> u64 {
+    let mut candidates = vec![
+        platform::resolve_antigravity_path("settings.json"),
+        platform::resolve_antigravity_path("mcp_config.json"),
+    ];
+    if let Some(claude_cfg) = platform::resolve_claude_desktop_config_path() {
+        candidates.push(claude_cfg);
+    }
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut total = 0u64;
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        let key = fs::canonicalize(&path).unwrap_or(path);
+        if seen.insert(key.clone()) {
+            total += count_mcp_entries_in_file(&key);
+        }
+    }
+    total
 }

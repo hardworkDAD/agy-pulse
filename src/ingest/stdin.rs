@@ -9,65 +9,73 @@ use crate::domain::{
 };
 use crate::platform;
 
-use super::IngestResult;
+pub(super) struct ParsedStdin {
+    pub snapshot: PulseSnapshot,
+    pub workspace_dir: PathBuf,
+    pub transcript_path: Option<PathBuf>,
+    pub api_duration_ms: Option<u64>,
+    pub stdin_total_output_tokens: Option<u64>,
+    pub stdin_current_usage_val: Option<Value>,
+    pub stdin_context_window_val: Option<Value>,
+    pub diagnostics: Vec<String>,
+}
+
+fn empty_parsed_stdin(
+    fallback_cwd: &Path,
+    observed_at_ms: i64,
+    diagnostics: Vec<String>,
+) -> ParsedStdin {
+    ParsedStdin {
+        snapshot: PulseSnapshot {
+            host: HostIdentity {
+                username: platform::current_username(),
+                ..Default::default()
+            },
+            observed_at_ms,
+            ..Default::default()
+        },
+        workspace_dir: fallback_cwd.to_path_buf(),
+        transcript_path: None,
+        api_duration_ms: None,
+        stdin_total_output_tokens: None,
+        stdin_current_usage_val: None,
+        stdin_context_window_val: None,
+        diagnostics,
+    }
+}
 
 pub(super) fn parse_host_stdin(
     stdin_text: &str,
     fallback_cwd: &Path,
     observed_at_ms: i64,
-) -> IngestResult {
+) -> ParsedStdin {
     let trimmed = stdin_text.trim();
     if trimmed.is_empty() {
-        return IngestResult {
-            snapshot: PulseSnapshot {
-                host: HostIdentity {
-                    username: platform::current_username(),
-                    ..Default::default()
-                },
-                observed_at_ms,
-                ..Default::default()
-            },
-            workspace_dir: fallback_cwd.to_path_buf(),
-            diagnostics: Vec::new(),
-        };
+        return empty_parsed_stdin(fallback_cwd, observed_at_ms, Vec::new());
     }
 
     let root: Value = match serde_json::from_str::<Value>(trimmed) {
         Ok(val) if val.is_object() => val,
         Ok(_) => {
-            return IngestResult {
-                snapshot: PulseSnapshot {
-                    host: HostIdentity {
-                        username: platform::current_username(),
-                        ..Default::default()
-                    },
-                    observed_at_ms,
-                    ..Default::default()
-                },
-                workspace_dir: fallback_cwd.to_path_buf(),
-                diagnostics: vec!["Host stdin JSON root must be an object".to_string()],
-            };
+            return empty_parsed_stdin(
+                fallback_cwd,
+                observed_at_ms,
+                vec!["Host stdin JSON root must be an object".to_string()],
+            );
         }
         Err(err) => {
-            return IngestResult {
-                snapshot: PulseSnapshot {
-                    host: HostIdentity {
-                        username: platform::current_username(),
-                        ..Default::default()
-                    },
-                    observed_at_ms,
-                    ..Default::default()
-                },
-                workspace_dir: fallback_cwd.to_path_buf(),
-                diagnostics: vec![format!("Failed to parse host stdin JSON: {err}")],
-            };
+            return empty_parsed_stdin(
+                fallback_cwd,
+                observed_at_ms,
+                vec![format!("Failed to parse host stdin JSON: {err}")],
+            );
         }
     };
 
     let workspace_dir = extract_workspace_dir(&root, fallback_cwd);
     let conversation_id = extract_non_empty_str(root.get("conversation_id"));
     let session_id = extract_non_empty_str(root.get("session_id"));
-    let transcript_path = extract_non_empty_str(root.get("transcript_path"));
+    let transcript_path = extract_non_empty_str(root.get("transcript_path")).map(PathBuf::from);
     let has_conversation_identity =
         conversation_id.is_some() || session_id.is_some() || transcript_path.is_some();
 
@@ -85,14 +93,21 @@ pub(super) fn parse_host_stdin(
         .map(|w| w as u16);
 
     let task_count = root.get("task_count").and_then(Value::as_u64).unwrap_or(0);
+    let api_duration_ms = as_u64_non_neg(root.get("cost").and_then(|c| c.get("total_api_duration_ms")))
+        .or_else(|| as_u64_non_neg(root.get("total_api_duration_ms")));
 
     let native_total_usd = extract_native_cost(&root);
-    let context = find_context_window(&root, 0).map(parse_context_window);
+    let cw_val = find_context_window(&root, 0).cloned();
+    let stdin_current_usage_val = cw_val.as_ref().and_then(|cw| cw.get("current_usage")).cloned();
+    let stdin_total_output_tokens = cw_val
+        .as_ref()
+        .and_then(|cw| as_u64_non_neg(cw.get("total_output_tokens")));
+    let context = cw_val.as_ref().map(parse_context_window);
     let quota = root
         .get("quota")
         .and_then(|q| parse_stdin_quota(q, observed_at_ms));
 
-    IngestResult {
+    ParsedStdin {
         snapshot: PulseSnapshot {
             has_conversation_identity,
             model,
@@ -116,6 +131,11 @@ pub(super) fn parse_host_stdin(
             ..Default::default()
         },
         workspace_dir,
+        transcript_path,
+        api_duration_ms,
+        stdin_total_output_tokens,
+        stdin_current_usage_val,
+        stdin_context_window_val: cw_val,
         diagnostics: Vec::new(),
     }
 }
@@ -318,7 +338,7 @@ fn is_context_window_obj(val: &Value) -> bool {
         || map.get("current_usage").is_some_and(Value::is_object)
 }
 
-fn find_context_window(val: &Value, depth: u8) -> Option<&Value> {
+pub(super) fn find_context_window(val: &Value, depth: u8) -> Option<&Value> {
     if depth > 4 {
         return None;
     }
@@ -341,7 +361,7 @@ fn find_context_window(val: &Value, depth: u8) -> Option<&Value> {
     None
 }
 
-fn as_u64_non_neg(val: Option<&Value>) -> Option<u64> {
+pub(super) fn as_u64_non_neg(val: Option<&Value>) -> Option<u64> {
     let v = val?;
     if let Some(u) = v.as_u64() {
         return Some(u);
@@ -355,7 +375,7 @@ fn as_u64_non_neg(val: Option<&Value>) -> Option<u64> {
     None
 }
 
-fn parse_token_usage(val: &Value) -> Option<TokenUsage> {
+pub(super) fn parse_token_usage(val: &Value) -> Option<TokenUsage> {
     let map = val.as_object()?;
     let input_tokens = as_u64_non_neg(map.get("input_tokens")).unwrap_or(0);
     let output_tokens = as_u64_non_neg(map.get("output_tokens")).unwrap_or(0);
@@ -379,7 +399,7 @@ fn parse_token_usage(val: &Value) -> Option<TokenUsage> {
     })
 }
 
-fn parse_context_window(cw: &Value) -> ContextWindowSnapshot {
+pub(super) fn parse_context_window(cw: &Value) -> ContextWindowSnapshot {
     let context_window_size = as_u64_non_neg(cw.get("context_window_size")).unwrap_or(0);
     let used_percentage = cw
         .get("used_percentage")

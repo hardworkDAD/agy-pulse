@@ -35,6 +35,59 @@ pub struct WorkspaceInfo {
     pub git_branch: Option<String>,
 }
 
+/// Offline-discovered workspace and host configuration metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceMetadata {
+    pub memory_file: Option<String>,
+    pub breadcrumbs: Vec<String>,
+    pub rules_count: u64,
+    pub mcp_count: u64,
+    pub hooks_count: u64,
+}
+
+/// Historical peak active turn tokens tracked separately by cache-inclusive vs cache-exclusive mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnPeakByMode {
+    pub inclusive_peak: u64,
+    pub exclusive_peak: u64,
+}
+
+/// Per-turn prompt cache hit metrics for statusline display.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnCacheMetrics {
+    pub available: bool,
+    pub cache_read: u64,
+    pub total_prompt: u64,
+    pub hit_rate: f64,
+}
+
+/// Active child/swarm model rolling output speed entry.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChildModelSpeed {
+    pub model: String,
+    pub speed_tok_s: f64,
+    pub ttft_sec: Option<f64>,
+    pub turns_ago: u64,
+    pub last_active_ms: i64,
+}
+
+/// Cumulative per-model token totals from transcript scanning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelTokenTotals {
+    pub model_key: String,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub steps: u64,
+}
+
+/// Active image model rate-limit exhaustion window extracted from structured transcript errors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageQuotaExhausted {
+    pub reset_time_ms: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostIdentity {
     pub conversation_id: Option<String>,
@@ -59,6 +112,7 @@ pub struct PulseSnapshot {
     pub model: Option<ModelIdentity>,
     pub host: HostIdentity,
     pub workspace: WorkspaceInfo,
+    pub workspace_meta: WorkspaceMetadata,
     pub context: Option<ContextWindowSnapshot>,
     pub cost: CostSnapshot,
     pub terminal_width: Option<u16>,
@@ -66,7 +120,18 @@ pub struct PulseSnapshot {
     pub compaction_count: u64,
     pub server_compaction_limit: Option<u64>,
     pub peak_raw_turn_tokens: u64,
+    pub turn_history_max_by_mode: TurnPeakByMode,
+    pub last_turn_usage: Option<TokenUsage>,
+    pub last_turn_model: Option<String>,
+    pub max_historical_cache: u64,
+    pub turn_cache_metrics: Option<TurnCacheMetrics>,
+    pub transcript_total_input_tokens: u64,
+    pub transcript_total_output_tokens: u64,
     pub output_speed_tok_s: Option<f64>,
+    pub main_model_last_active_ms: Option<i64>,
+    pub child_model_speeds: Vec<ChildModelSpeed>,
+    pub model_token_totals: Vec<ModelTokenTotals>,
+    pub image_exhausted: Option<ImageQuotaExhausted>,
     pub ttft_sec: Option<f64>,
     pub update_available_version: Option<String>,
     pub observed_at_ms: i64,
@@ -190,6 +255,80 @@ pub fn is_usage_cache_inclusive(model_name: &str, usage: &TokenUsage) -> bool {
         .iter()
         .any(|k| lower.contains(k));
     looks_anthropic && cache_total > 0 && usage.input_tokens >= cache_total
+}
+
+/// Calculate per-turn prompt cache hit rate respecting model cache-inclusive semantics.
+pub fn calculate_turn_cache_metrics(usage: &TokenUsage, model_name: &str) -> TurnCacheMetrics {
+    let cache_read = usage.cache_read_input_tokens;
+    let cache_write = usage.cache_creation_input_tokens;
+    let cache_total = cache_read.saturating_add(cache_write);
+    let inclusive = is_usage_cache_inclusive(model_name, usage);
+    let total_prompt = if inclusive {
+        usage.input_tokens
+    } else {
+        usage.input_tokens.saturating_add(cache_total)
+    };
+    if total_prompt == 0 {
+        return TurnCacheMetrics::default();
+    }
+    let hit_rate = ((cache_read as f64 * 100.0) / total_prompt as f64).clamp(0.0, 100.0);
+    TurnCacheMetrics {
+        available: true,
+        cache_read,
+        total_prompt,
+        hit_rate,
+    }
+}
+
+/// Produce a compact family label for a model name or ID (e.g. `Gemini 4 Carbon (High)` -> `Carbon`).
+pub fn compact_model_name(display_name: &str) -> String {
+    if display_name.is_empty() {
+        return String::new();
+    }
+    let lower = display_name.to_ascii_lowercase();
+    if lower.contains("orchestrator") {
+        if lower.contains("argon") {
+            return "Orch-A".to_string();
+        }
+        if lower.contains("neon") {
+            return "Orch-N".to_string();
+        }
+        return "Orch-C".to_string();
+    }
+    if lower.contains("hydrogen") {
+        return "Hydro".to_string();
+    }
+    if lower.contains("carbon") {
+        return "Carbon".to_string();
+    }
+    if lower.contains("argon") {
+        return "Argon".to_string();
+    }
+    if lower.contains("neon") {
+        return "Neon".to_string();
+    }
+    if lower.contains("flash") {
+        return "Flash".to_string();
+    }
+    if lower.contains("sonnet") {
+        return "Sonnet".to_string();
+    }
+    if lower.contains("opus") {
+        return "Opus".to_string();
+    }
+    if lower.contains("haiku") {
+        return "Haiku".to_string();
+    }
+    if lower.contains("gpt") {
+        return "GPT".to_string();
+    }
+    if lower.contains("deepseek") {
+        return "DeepSeek".to_string();
+    }
+    if lower.contains("pro") {
+        return "Pro".to_string();
+    }
+    display_name.chars().take(6).collect()
 }
 
 fn contains_word(haystack: &str, word: &str) -> bool {

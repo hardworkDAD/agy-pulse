@@ -68,6 +68,7 @@ pub(super) fn resolve_palette(theme: &ThemeConfig) -> ThemePalette {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LanguageText {
     pub is_zh: bool,
+    pub cache_badge_label: &'static str,
     pub cost_label: &'static str,
     pub today_label: &'static str,
     pub week_label: &'static str,
@@ -89,6 +90,7 @@ pub(super) struct LanguageText {
 
 const EN_TEXT: LanguageText = LanguageText {
     is_zh: false,
+    cache_badge_label: "cache",
     cost_label: "Cost",
     today_label: "Today",
     week_label: "Week",
@@ -110,6 +112,7 @@ const EN_TEXT: LanguageText = LanguageText {
 
 const ZH_TEXT: LanguageText = LanguageText {
     is_zh: true,
+    cache_badge_label: "cache",
     cost_label: "费用",
     today_label: "今日",
     week_label: "本周",

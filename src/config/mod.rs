@@ -115,6 +115,14 @@ impl Default for ThresholdsConfig {
     }
 }
 
+/// Threshold percentages (0..=100) for per-turn cache hit rate coloring.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheHitThresholdsConfig {
+    pub excellent: Option<f64>,
+    pub partial: Option<f64>,
+}
+
 /// Display flags and formatting options compatible with v1 `agy-pulse.config.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -142,6 +150,9 @@ pub struct DisplayConfig {
     pub column_width: Option<u16>,
     pub terminal_width: Option<u16>,
     pub username: Option<String>,
+    pub cache_hit_thresholds: Option<CacheHitThresholdsConfig>,
+    pub model_speed_expire_turns: Option<u64>,
+    pub model_speed_expire_minutes: Option<f64>,
 }
 
 impl DisplayConfig {
@@ -171,6 +182,9 @@ impl DisplayConfig {
             column_width: None,
             terminal_width: None,
             username: None,
+            cache_hit_thresholds: None,
+            model_speed_expire_turns: None,
+            model_speed_expire_minutes: None,
         }
     }
 }
