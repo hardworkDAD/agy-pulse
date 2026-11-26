@@ -8,8 +8,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
+
+static DEVICE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Supported desktop operating systems for launcher & shortcut path conventions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +353,93 @@ pub fn current_username() -> Option<String> {
         }
     }
     None
+}
+
+fn sanitize_hostname(raw: &str) -> Option<String> {
+    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let truncated: String = trimmed.chars().take(64).collect();
+    let final_trimmed = truncated.trim();
+    if final_trimmed.is_empty() {
+        None
+    } else {
+        Some(final_trimmed.to_string())
+    }
+}
+
+/// Detect the current machine hostname, stripped of control characters and capped at 64 chars.
+pub fn current_hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: `buf` is a valid mutable stack buffer passed to POSIX `gethostname`.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
+        if rc == 0 {
+            let raw = match std::ffi::CStr::from_bytes_until_nul(&buf) {
+                Ok(cstr) => cstr.to_string_lossy().into_owned(),
+                Err(_) => String::from_utf8_lossy(&buf).into_owned(),
+            };
+            if let Some(cleaned) = sanitize_hostname(&raw) {
+                return Some(cleaned);
+            }
+        }
+        if let Ok(val) = env::var("HOSTNAME")
+            && let Some(cleaned) = sanitize_hostname(&val)
+        {
+            return Some(cleaned);
+        }
+        if let Ok(contents) = fs::read_to_string("/etc/hostname")
+            && let Some(cleaned) = sanitize_hostname(&contents)
+        {
+            return Some(cleaned);
+        }
+        None
+    }
+    #[cfg(windows)]
+    {
+        env::var("COMPUTERNAME")
+            .ok()
+            .and_then(|val| sanitize_hostname(&val))
+    }
+}
+
+/// Generate an immutable random device identifier formatted as `dev_<16 hex>`.
+pub fn generate_device_id() -> String {
+    let seq = DEVICE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = Sha256::new();
+    let mut used_urandom = false;
+
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut buf = [0u8; 16];
+        if let Ok(mut f) = fs::File::open("/dev/urandom")
+            && f.read_exact(&mut buf).is_ok()
+        {
+            hasher.update(buf);
+            hasher.update(seq.to_le_bytes());
+            used_urandom = true;
+        }
+    }
+
+    if !used_urandom {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        hasher.update(nanos.to_le_bytes());
+        hasher.update(std::process::id().to_le_bytes());
+        hasher.update(seq.to_le_bytes());
+        if let Some(host) = current_hostname() {
+            hasher.update(host.as_bytes());
+        }
+    }
+
+    let digest = hasher.finalize();
+    format!("dev_{}", hex::encode(&digest[..8]))
 }
 
 /// Write a diagnostic line to `agy-pulse-error.log` safely without following symlinks.

@@ -88,6 +88,39 @@ impl LedgerStore {
         &self.ledger_path
     }
 
+    /// Return this machine's immutable local `device_id` stored in `ledger_meta`.
+    pub fn local_device_id(&self) -> Result<String, LedgerError> {
+        schema::read_local_device_id(&self.conn).map_err(LedgerError::from)
+    }
+
+    /// Atomically purge all remote-device rows and pull chunk states inside a single Immediate transaction,
+    /// preserving local device rows and push chunk states. Returns the number of deleted remote step rows.
+    pub fn clear_remote_data(&self) -> Result<usize, LedgerError> {
+        sync::clear_remote_data(&self.conn, self.max_retries)
+    }
+
+    /// Upsert a device metadata row in `sync_devices`.
+    pub fn upsert_sync_device(
+        &self,
+        account_id: &str,
+        device_id: &str,
+        device_name: &str,
+        is_local: bool,
+        last_seen_ms: i64,
+        plan_tier: Option<&str>,
+    ) -> Result<(), LedgerError> {
+        sync::upsert_sync_device(
+            &self.conn,
+            account_id,
+            device_id,
+            device_name,
+            is_local,
+            last_seen_ms,
+            plan_tier,
+            self.max_retries,
+        )
+    }
+
     /// Return `true` when `last_full_scan_ms` is absent or older than `max_age_ms`.
     pub fn is_full_scan_stale(&self, max_age_ms: i64, now_ms: i64) -> Result<bool, LedgerError> {
         sync::is_full_scan_stale(&self.conn, max_age_ms, now_ms)

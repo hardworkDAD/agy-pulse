@@ -1,16 +1,20 @@
 //! Pure in-memory domain model and calculations for host-provided model quota windows.
 
+use serde::{Deserialize, Serialize};
+
 /// Window duration bucket for a provider quota observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuotaWindowKind {
     FiveHour,
     Weekly,
 }
 
 /// Single quota window observation parsed from host standard input.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaWindow {
+    #[serde(default)]
     pub remaining_fraction: f64,
+    #[serde(default)]
     pub reset_time_ms: Option<i64>,
 }
 
@@ -22,21 +26,25 @@ pub struct CriticalWindow {
 }
 
 /// 5-hour and weekly quota windows for a single model provider.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProviderQuota {
     pub five_hour: Option<QuotaWindow>,
     pub weekly: Option<QuotaWindow>,
 }
 
 /// Extra dynamic provider quota entry (excluding filtered OpenAI keys).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NamedProviderQuota {
+    #[serde(default)]
     pub key: String,
+    #[serde(default)]
     pub quota: ProviderQuota,
 }
 
 /// Normalized provider-level quota summary extracted from host standard input.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProviderQuotaSummary {
     pub google: ProviderQuota,
     pub claude: ProviderQuota,

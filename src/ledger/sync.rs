@@ -7,7 +7,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use crate::domain::{TokenUsage, calculate_token_cost};
+use crate::domain::{
+    TokenUsage, UNASSIGNED_ACCOUNT_ID, calculate_token_cost, normalize_account_id,
+};
 use crate::ingest::HostReader;
 use crate::platform;
 
@@ -16,7 +18,9 @@ use super::query::{
     ConvLineageMeta, LedgerSource, local_date_key, local_today_bounds,
     resolve_root_conversation_id,
 };
-use super::schema::{DEFAULT_BUSY_RETRIES, run_with_busy_retry, run_with_busy_retry_n};
+use super::schema::{
+    DEFAULT_BUSY_RETRIES, read_local_device_id, run_with_busy_retry, run_with_busy_retry_n,
+};
 
 pub(super) const SYNC_THROTTLE_MS: i64 = 15_000;
 const ROLLING_CURSOR_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -424,26 +428,112 @@ fn upsert_batches(
 ) -> Result<usize, LedgerError> {
     run_with_busy_retry_n(max_retries, || {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let local_device_id = read_local_device_id(&tx)?;
         let mut steps_upserted = 0usize;
         {
+            let mut check_db_stmt = tx.prepare(
+                "SELECT account_id, device_id FROM ingested_dbs WHERE conversation_id = ?1",
+            )?;
+            let mut check_step_acct_stmt = tx.prepare(
+                "SELECT account_id FROM telemetry_steps
+                 WHERE conversation_id = ?1
+                   AND (device_id = ?2 OR device_id = '')
+                   AND account_id != 'unassigned'
+                   AND account_id != ''
+                 LIMIT 1",
+            )?;
             let mut db_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO ingested_dbs (
+                "INSERT INTO ingested_dbs (
                    conversation_id, db_path, sig, last_synced_ms,
                    workspace, branch, created_at_ms, cascade_id,
-                   parent_conversation_id, root_conversation_id, db_mtime_ms, source
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                   parent_conversation_id, root_conversation_id, db_mtime_ms, source,
+                   account_id, device_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 ON CONFLICT(conversation_id) DO UPDATE SET
+                   db_path = excluded.db_path,
+                   sig = excluded.sig,
+                   last_synced_ms = excluded.last_synced_ms,
+                   workspace = excluded.workspace,
+                   branch = excluded.branch,
+                   created_at_ms = excluded.created_at_ms,
+                   cascade_id = excluded.cascade_id,
+                   parent_conversation_id = excluded.parent_conversation_id,
+                   root_conversation_id = excluded.root_conversation_id,
+                   db_mtime_ms = excluded.db_mtime_ms,
+                   source = excluded.source,
+                   account_id = CASE
+                     WHEN ingested_dbs.account_id != 'unassigned' AND ingested_dbs.account_id != '' THEN ingested_dbs.account_id
+                     ELSE excluded.account_id
+                   END,
+                   device_id = excluded.device_id
+                 WHERE ingested_dbs.device_id = excluded.device_id OR ingested_dbs.device_id = ''",
             )?;
             let mut step_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO telemetry_steps (
+                "INSERT INTO telemetry_steps (
                    step_uid, conversation_id, gen_idx, entry_idx, step_index, ts_ms,
                    model, raw_model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                    cost_usd, stream_sec, ttft_sec, valid_stream, valid_ttft,
-                   parent_conversation_id, root_conversation_id, workspace, branch, source
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                   parent_conversation_id, root_conversation_id, workspace, branch, source,
+                   account_id, device_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                 ON CONFLICT(step_uid) DO UPDATE SET
+                   conversation_id = excluded.conversation_id,
+                   gen_idx = excluded.gen_idx,
+                   entry_idx = excluded.entry_idx,
+                   step_index = excluded.step_index,
+                   ts_ms = excluded.ts_ms,
+                   model = excluded.model,
+                   raw_model = excluded.raw_model,
+                   input_tokens = excluded.input_tokens,
+                   cache_read_tokens = excluded.cache_read_tokens,
+                   cache_write_tokens = excluded.cache_write_tokens,
+                   output_tokens = excluded.output_tokens,
+                   cost_usd = excluded.cost_usd,
+                   stream_sec = excluded.stream_sec,
+                   ttft_sec = excluded.ttft_sec,
+                   valid_stream = excluded.valid_stream,
+                   valid_ttft = excluded.valid_ttft,
+                   parent_conversation_id = excluded.parent_conversation_id,
+                   root_conversation_id = excluded.root_conversation_id,
+                   workspace = excluded.workspace,
+                   branch = excluded.branch,
+                   source = excluded.source,
+                   account_id = CASE
+                     WHEN telemetry_steps.account_id != 'unassigned' AND telemetry_steps.account_id != '' THEN telemetry_steps.account_id
+                     ELSE excluded.account_id
+                   END,
+                   device_id = excluded.device_id
+                 WHERE telemetry_steps.device_id = excluded.device_id OR telemetry_steps.device_id = ''",
             )?;
 
             for batch in batches {
                 let d = &batch.db_row;
+                let existing_row: Option<(String, String)> = check_db_stmt
+                    .query_row(params![d.conversation_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .optional()?;
+                if let Some((_, ref existing_dev)) = existing_row
+                    && !existing_dev.is_empty()
+                    && existing_dev != &local_device_id
+                {
+                    continue;
+                }
+
+                let existing_acct = existing_row
+                    .as_ref()
+                    .and_then(|(acct, _)| normalize_account_id(acct))
+                    .filter(|acct| acct != UNASSIGNED_ACCOUNT_ID);
+                let account_id = match existing_acct {
+                    Some(acct) => acct,
+                    None => check_step_acct_stmt
+                        .query_row(params![d.conversation_id, &local_device_id], |r| {
+                            r.get::<_, String>(0)
+                        })
+                        .optional()?
+                        .and_then(|s| normalize_account_id(&s))
+                        .filter(|acct| acct != UNASSIGNED_ACCOUNT_ID)
+                        .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string()),
+                };
+
                 db_stmt.execute(params![
                     d.conversation_id,
                     d.db_path,
@@ -457,9 +547,11 @@ fn upsert_batches(
                     d.root_conversation_id,
                     d.db_mtime_ms,
                     d.source.as_str(),
+                    &account_id,
+                    &local_device_id,
                 ])?;
                 for s in &batch.steps {
-                    step_stmt.execute(params![
+                    let changed = step_stmt.execute(params![
                         s.step_uid,
                         s.conversation_id,
                         s.gen_idx,
@@ -482,8 +574,12 @@ fn upsert_batches(
                         s.workspace,
                         s.branch,
                         s.source.as_str(),
+                        &account_id,
+                        &local_device_id,
                     ])?;
-                    steps_upserted += 1;
+                    if changed > 0 {
+                        steps_upserted += 1;
+                    }
                 }
             }
         }
@@ -506,6 +602,7 @@ pub(super) fn sync_all(
 ) -> Result<LedgerSyncReport, LedgerError> {
     let started = Instant::now();
     let now_ms = options.now_ms.unwrap_or_else(current_epoch_ms);
+    let local_device_id = read_local_device_id(conn)?;
     let source_roots = resolve_source_roots(options);
     let discovered = list_all_conversation_dbs(&source_roots);
 
@@ -519,19 +616,29 @@ pub(super) fn sync_all(
     }
 
     let mut existing: HashMap<String, (String, LedgerSource)> = HashMap::new();
+    let mut remote_owned_ids: HashSet<String> = HashSet::new();
     {
-        let mut stmt = conn.prepare("SELECT conversation_id, sig, source FROM ingested_dbs")?;
+        let mut stmt =
+            conn.prepare("SELECT conversation_id, sig, source, device_id FROM ingested_dbs")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let cid: String = row.get(0)?;
             let sig: String = row.get(1)?;
             let src_raw: String = row.get(2)?;
-            existing.insert(cid, (sig, LedgerSource::from_raw(&src_raw)));
+            let dev: String = row.get(3)?;
+            if !dev.is_empty() && dev != local_device_id {
+                remote_owned_ids.insert(cid);
+            } else {
+                existing.insert(cid, (sig, LedgerSource::from_raw(&src_raw)));
+            }
         }
     }
 
     let mut batches = Vec::new();
     for item in &discovered {
+        if remote_owned_ids.contains(&item.conversation_id) {
+            continue;
+        }
         let Some((sig, max_mtime_ms)) = get_db_signature(&item.db_path) else {
             continue;
         };
@@ -636,6 +743,7 @@ pub(super) fn sync_conversation(
 
     let now_ms = options.now_ms.unwrap_or_else(current_epoch_ms);
     let throttle_ms = options.throttle_ms.unwrap_or(SYNC_THROTTLE_MS).max(0);
+    let local_device_id = read_local_device_id(conn)?;
     let source_roots = resolve_source_roots(options);
 
     let mut targets: Vec<(&str, bool)> = vec![(conversation_id, false)];
@@ -657,21 +765,25 @@ pub(super) fn sync_conversation(
             continue;
         };
 
-        if !options.force {
-            let existing: Option<(String, LedgerSource, i64)> = conn
-                .query_row(
-                    "SELECT sig, source, last_synced_ms FROM ingested_dbs WHERE conversation_id = ?1",
-                    params![cid],
-                    |r| {
-                        let s: String = r.get(0)?;
-                        let src: String = r.get(1)?;
-                        let last_synced_ms: i64 = r.get(2)?;
-                        Ok((s, LedgerSource::from_raw(&src), last_synced_ms))
-                    },
-                )
-                .optional()?;
+        let existing: Option<(String, LedgerSource, i64, String)> = conn
+            .query_row(
+                "SELECT sig, source, last_synced_ms, device_id FROM ingested_dbs WHERE conversation_id = ?1",
+                params![cid],
+                |r| {
+                    let s: String = r.get(0)?;
+                    let src: String = r.get(1)?;
+                    let last_synced_ms: i64 = r.get(2)?;
+                    let dev: String = r.get(3)?;
+                    Ok((s, LedgerSource::from_raw(&src), last_synced_ms, dev))
+                },
+            )
+            .optional()?;
 
-            if let Some((prev_sig, prev_src, prev_last_synced_ms)) = existing {
+        if let Some((prev_sig, prev_src, prev_last_synced_ms, prev_dev)) = existing {
+            if !prev_dev.is_empty() && prev_dev != local_device_id {
+                continue;
+            }
+            if !options.force {
                 if prev_sig == sig && prev_src == source {
                     continue;
                 }
@@ -748,6 +860,7 @@ fn is_valid_amount(val: f64) -> bool {
 
 fn compute_db_cost_by_root(
     conn: &Connection,
+    local_device_id: &str,
     today_start_ms: i64,
     today_end_ms: i64,
     week_from_ms: i64,
@@ -757,9 +870,10 @@ fn compute_db_cost_by_root(
     {
         let mut stmt = conn.prepare(
             "SELECT conversation_id, parent_conversation_id, root_conversation_id, source
-             FROM ingested_dbs",
+             FROM ingested_dbs
+             WHERE device_id = ?1",
         )?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query(params![local_device_id])?;
         while let Some(row) = rows.next()? {
             let cid: String = row.get(0)?;
             if cid.is_empty() {
@@ -793,10 +907,17 @@ fn compute_db_cost_by_root(
                     SUM(CASE WHEN ts_ms >= ?1 AND ts_ms <= ?2 AND cost_usd >= 0.0 AND cost_usd < 1e308 THEN cost_usd ELSE 0.0 END),
                     SUM(CASE WHEN ts_ms >= ?3 AND ts_ms <= ?4 AND cost_usd >= 0.0 AND cost_usd < 1e308 THEN cost_usd ELSE 0.0 END)
              FROM telemetry_steps
-             WHERE input_tokens > 0 OR cache_read_tokens > 0 OR cache_write_tokens > 0 OR output_tokens > 0 OR cost_usd > 0.0
+             WHERE device_id = ?5
+               AND (input_tokens > 0 OR cache_read_tokens > 0 OR cache_write_tokens > 0 OR output_tokens > 0 OR cost_usd > 0.0)
              GROUP BY conversation_id",
         )?;
-        let mut rows = stmt.query(params![today_start_ms, today_end_ms, week_from_ms, now_ms])?;
+        let mut rows = stmt.query(params![
+            today_start_ms,
+            today_end_ms,
+            week_from_ms,
+            now_ms,
+            local_device_id
+        ])?;
         while let Some(row) = rows.next()? {
             let cid: String = row.get(0)?;
             let parent_cid = row.get::<_, Option<String>>(1)?.filter(|s| !s.is_empty());
@@ -864,8 +985,10 @@ pub(super) fn record_rolling_costs(
 
         // Aggregate ledger totals inside the Immediate transaction so DB reads and cursor anchor
         // updates observe a single atomic snapshot under concurrent sync writers.
+        let local_device_id = read_local_device_id(&tx)?;
         let db_by_root = compute_db_cost_by_root(
             &tx,
+            &local_device_id,
             today_start_ms,
             today_end_ms,
             db_week_from_ms,
@@ -1140,6 +1263,106 @@ pub(super) fn record_rolling_costs(
             today_usd,
             week_usd,
         }))
+    })
+    .map_err(LedgerError::from)
+}
+
+struct ImmediateTxGuard<'a> {
+    conn: &'a Connection,
+    committed: bool,
+}
+
+impl<'a> ImmediateTxGuard<'a> {
+    fn begin(conn: &'a Connection) -> Result<Self, rusqlite::Error> {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(Self {
+            conn,
+            committed: false,
+        })
+    }
+
+    fn commit(mut self) -> Result<(), rusqlite::Error> {
+        self.conn.execute_batch("COMMIT")?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ImmediateTxGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
+pub(super) fn clear_remote_data(conn: &Connection, max_retries: u32) -> Result<usize, LedgerError> {
+    run_with_busy_retry_n(max_retries, || {
+        let tx = ImmediateTxGuard::begin(conn)?;
+        let local_device_id = read_local_device_id(conn)?;
+        let deleted_steps = conn.execute(
+            "DELETE FROM telemetry_steps WHERE device_id != ?1",
+            params![&local_device_id],
+        )?;
+        conn.execute(
+            "DELETE FROM ingested_dbs WHERE device_id != ?1",
+            params![&local_device_id],
+        )?;
+        conn.execute(
+            "DELETE FROM sync_devices WHERE device_id != ?1",
+            params![&local_device_id],
+        )?;
+        conn.execute(
+            "DELETE FROM quota_snapshots WHERE device_id != ?1",
+            params![&local_device_id],
+        )?;
+        conn.execute("DELETE FROM sync_chunk_state WHERE direction = 'pull'", [])?;
+        tx.commit()?;
+        Ok(deleted_steps)
+    })
+    .map_err(LedgerError::from)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn upsert_sync_device(
+    conn: &Connection,
+    account_id: &str,
+    device_id: &str,
+    device_name: &str,
+    is_local: bool,
+    last_seen_ms: i64,
+    plan_tier: Option<&str>,
+    max_retries: u32,
+) -> Result<(), LedgerError> {
+    let normalized_account = normalize_account_id(account_id)
+        .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+    let trimmed_device_id = device_id.trim();
+    let trimmed_device_name = device_name.trim();
+    let effective_device_name = if trimmed_device_name.is_empty() {
+        trimmed_device_id
+    } else {
+        trimmed_device_name
+    };
+
+    run_with_busy_retry_n(max_retries, || {
+        conn.execute(
+            "INSERT INTO sync_devices (account_id, device_id, device_name, is_local, last_seen_ms, plan_tier)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(account_id, device_id) DO UPDATE SET
+               device_name = excluded.device_name,
+               is_local = excluded.is_local,
+               last_seen_ms = excluded.last_seen_ms,
+               plan_tier = excluded.plan_tier",
+            params![
+                &normalized_account,
+                trimmed_device_id,
+                effective_device_name,
+                i64::from(is_local),
+                last_seen_ms,
+                plan_tier,
+            ],
+        )?;
+        Ok(())
     })
     .map_err(LedgerError::from)
 }

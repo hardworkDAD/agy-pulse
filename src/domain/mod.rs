@@ -2,6 +2,7 @@ mod accounting;
 mod model;
 mod pricing;
 mod quota;
+mod sync;
 
 pub use accounting::{
     format_usd, is_bedrock_model_id, is_vertex_model_id, resolve_cascade_cost_usd,
@@ -20,3 +21,4 @@ pub use quota::{
     has_valid_provider_quota, is_openai_provider_key, is_quota_window_expired,
     parse_iso8601_to_epoch_ms, pick_critical_window, prune_expired_provider_quota,
 };
+pub use sync::{DeviceIdentity, QuotaSnapshot, UNASSIGNED_ACCOUNT_ID, normalize_account_id};
