@@ -500,6 +500,23 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
 }
 
+/// Exit without running cleanup that may wait on a blocked thread or stream.
+pub(crate) fn exit_immediately(code: i32) -> ! {
+    #[cfg(unix)]
+    // SAFETY: _exit terminates the current process without invoking exit handlers.
+    unsafe {
+        libc::_exit(code);
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+
+        // SAFETY: The pseudo-handle refers to the current process and needs no cleanup.
+        unsafe { TerminateProcess(GetCurrentProcess(), code as u32) };
+        std::process::exit(code);
+    }
+}
+
 /// Request graceful termination (SIGTERM on Unix, TerminateProcess on Windows) for a PID.
 pub fn terminate_process(pid: u32) -> io::Result<()> {
     #[cfg(unix)]

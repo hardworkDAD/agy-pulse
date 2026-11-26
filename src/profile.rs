@@ -27,9 +27,11 @@ pub(crate) enum Stage {
     LedgerBgSyncSpawn = 13,
     LedgerSyncConv = 14,
     LedgerRolling = 15,
-    RenderAndStdout = 16,
+    Render = 16,
     DashboardTouch = 17,
-    Done = 18,
+    WriteStdout = 18,
+    WriteProfileLog = 19,
+    Done = 20,
 }
 
 impl Stage {
@@ -50,9 +52,11 @@ impl Stage {
             13 => Self::LedgerBgSyncSpawn,
             14 => Self::LedgerSyncConv,
             15 => Self::LedgerRolling,
-            16 => Self::RenderAndStdout,
+            16 => Self::Render,
             17 => Self::DashboardTouch,
-            18 => Self::Done,
+            18 => Self::WriteStdout,
+            19 => Self::WriteProfileLog,
+            20 => Self::Done,
             _ => Self::Init,
         }
     }
@@ -75,8 +79,10 @@ impl Stage {
             Self::LedgerBgSyncSpawn => "ledger_bg_sync_spawn",
             Self::LedgerSyncConv => "ledger_sync_conv",
             Self::LedgerRolling => "ledger_rolling",
-            Self::RenderAndStdout => "render_stdout",
+            Self::Render => "render",
             Self::DashboardTouch => "dashboard_touch",
+            Self::WriteStdout => "stdout",
+            Self::WriteProfileLog => "profile_log",
             Self::Done => "done",
         }
     }
@@ -107,7 +113,12 @@ pub(crate) fn enter_stage_scope(stage: Arc<AtomicU8>) -> StageScopeGuard {
 pub(crate) fn set_stage(stage: Stage) {
     ACTIVE_STAGE.with(|cell| {
         if let Some(ref active) = *cell.borrow() {
-            active.store(stage as u8, Ordering::Release);
+            // A worker that outlives the fallback must not overwrite the output stage.
+            let stage = stage as u8;
+            let first_output_stage = Stage::WriteStdout as u8;
+            let _ = active.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (stage >= first_output_stage || current < first_output_stage).then_some(stage)
+            });
         }
     });
 }
@@ -156,8 +167,7 @@ impl Profiler {
             let _ = thread::Builder::new()
                 .name("agy-pulse-prof".to_string())
                 .spawn(move || {
-                    const CHECKPOINTS_MS: &[u64] =
-                        &[800, 2000, 4000, 6000, 10_000, 15_000, 30_000];
+                    const CHECKPOINTS_MS: &[u64] = &[800, 2000, 3500];
                     for &cp in CHECKPOINTS_MS {
                         loop {
                             if watch_done.load(Ordering::Acquire) {
@@ -198,19 +208,19 @@ impl Profiler {
     }
 
     pub(crate) fn finish(&self, summary: &str) {
+        let total = self.elapsed_ms();
+        if let Some(path) = &self.log_path
+            && total >= self.min_ms
+        {
+            self.stage
+                .store(Stage::WriteProfileLog as u8, Ordering::Release);
+            let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+            let pid = std::process::id();
+            let line = format!("[{ts}] pid={pid} DONE total={total}ms {summary}\n");
+            append_line(path, &line);
+        }
         self.stage.store(Stage::Done as u8, Ordering::Release);
         self.done.store(true, Ordering::Release);
-        let Some(ref path) = self.log_path else {
-            return;
-        };
-        let total = self.elapsed_ms();
-        if total < self.min_ms {
-            return;
-        }
-        let ts = chrono::Local::now().format("%H:%M:%S%.3f");
-        let pid = std::process::id();
-        let line = format!("[{ts}] pid={pid} DONE total={total}ms {summary}\n");
-        append_line(path, &line);
     }
 }
 

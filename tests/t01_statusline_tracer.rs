@@ -546,6 +546,76 @@ fn post_stdin_hard_cap_triggers_in_memory_fallback_and_exits_zero() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn statusline_exits_before_host_timeout_when_stdout_pipe_is_full() {
+    use std::io::{ErrorKind, pipe};
+    use std::os::fd::AsRawFd;
+    use std::thread;
+
+    let env = IsolatedEnv::new();
+    let (_reader, mut writer) = pipe().expect("create stdout pipe");
+    let fd = writer.as_raw_fd();
+    // SAFETY: writer owns an open file descriptor for the duration of these calls.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(flags >= 0);
+    // SAFETY: fd still belongs to writer and both flag values come from fcntl.
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    let buffer = [b'x'; 4096];
+    // Fill any space left after a larger write gets EAGAIN.
+    for chunk in [buffer.as_slice(), &buffer[..1]] {
+        loop {
+            match writer.write(chunk) {
+                Ok(bytes) => assert!(bytes > 0),
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) => panic!("fill stdout pipe: {err}"),
+            }
+        }
+    }
+    // SAFETY: Restore the original flags while writer still owns fd.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+
+    let profile_log = env.data_dir.join("statusline-profile.log");
+    let host_timeout = Duration::from_secs(5);
+    let start = Instant::now();
+    let mut child = env
+        .cmd(&agy_pulse_bin())
+        .env("AGY_PULSE_POST_STDIN_HARD_CAP_MS", "1")
+        .env("AGY_PULSE_PROFILE_LOG", &profile_log)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn statusline with a full stdout pipe");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"plan_tier":"Pro"}"#)
+        .unwrap();
+    // Keep the pipe reader open without draining it, as a stalled host would.
+    while start.elapsed() < host_timeout {
+        if let Some(status) = child.try_wait().expect("poll statusline") {
+            assert!(status.success(), "statusline exit status {status}");
+            let log = fs::read_to_string(&profile_log).expect("read statusline profile");
+            assert!(
+                log.lines()
+                    .any(|line| line.contains(" STALL ") && line.ends_with(" stage=stdout")),
+                "expected the profiler to identify blocked output: {log}"
+            );
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.kill().ok();
+    child.wait().expect("reap blocked statusline");
+    panic!("statusline exceeded the 5-second host timeout with blocked stdout");
+}
+
 #[test]
 fn pure_domain_and_render_boundary_invariants() {
     // 1) Routed cost filtering (Bedrock & Vertex)

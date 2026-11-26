@@ -29,6 +29,8 @@ const STDIN_HARD_TIMEOUT: Duration = Duration::from_millis(1500);
 const STATUSLINE_POST_STDIN_BUDGET: Duration = Duration::from_millis(900);
 const STATUSLINE_POST_STDIN_HARD_CAP: Duration = Duration::from_millis(2500);
 const STATUSLINE_TOTAL_HARD_CAP: Duration = Duration::from_millis(3500);
+// Leave time for the host to collect output and observe exit before its 5-second timeout.
+const STATUSLINE_EXIT_TIMEOUT: Duration = Duration::from_secs(4);
 const LEDGER_BG_SYNC_LOCK_FILENAME: &str = "agy-pulse-ledger-sync.lock";
 const LEDGER_BG_SYNC_SPAWNING_GRACE_MS: u64 = 5_000;
 const LEDGER_BG_SYNC_LOCK_TTL_MS: u64 = 30_000;
@@ -483,7 +485,7 @@ fn run_statusline_enriched(
         }
     }
 
-    profile::set_stage(profile::Stage::RenderAndStdout);
+    profile::set_stage(profile::Stage::Render);
     let t_render = Instant::now();
     let term = platform::detect_terminal_caps(
         ingest.snapshot.terminal_width,
@@ -527,8 +529,7 @@ fn run_statusline_enriched(
     }
 }
 
-fn run_statusline_pipeline() {
-    let process_start = Instant::now();
+fn run_statusline_pipeline(process_start: Instant) {
     let profiler = profile::Profiler::start_from_env();
     let _main_stage_guard = profile::enter_stage_scope(profiler.stage_handle());
 
@@ -557,42 +558,30 @@ fn run_statusline_pipeline() {
             let _ = tx.send(res);
         });
 
-    match spawn_res {
-        Ok(_) => match rx.recv_timeout(hard_cap) {
-            Ok(res) => {
-                if let Some(output) = res.output
-                    && !output.is_empty()
-                {
-                    print!("{output}");
-                    let _ = io::stdout().flush();
-                }
-                profiler.finish(&res.summary);
-            }
-            Err(_) => {
-                let fallback_out = render_hard_timeout_fallback(&stdin_text, &fallback_cwd);
-                if !fallback_out.is_empty() {
-                    print!("{fallback_out}");
-                    let _ = io::stdout().flush();
-                }
-                profiler.finish(&format!("stdin={stdin_ms} hard_timeout_fallback=1"));
-            }
-        },
-        Err(_) => {
-            let res =
-                run_statusline_enriched(&stdin_text, &fallback_cwd, stdin_ms, pipeline_deadline);
-            if let Some(output) = res.output
-                && !output.is_empty()
-            {
-                print!("{output}");
-                let _ = io::stdout().flush();
-            }
-            profiler.finish(&res.summary);
-        }
+    let result = match spawn_res {
+        Ok(_) => rx
+            .recv_timeout(hard_cap)
+            .unwrap_or_else(|_| StatuslineWorkerOutput {
+                output: Some(render_hard_timeout_fallback(&stdin_text, &fallback_cwd)),
+                summary: format!("stdin={stdin_ms} hard_timeout_fallback=1"),
+            }),
+        Err(_) => run_statusline_enriched(&stdin_text, &fallback_cwd, stdin_ms, pipeline_deadline),
+    };
+    if let Some(output) = result.output
+        && !output.is_empty()
+    {
+        profile::set_stage(profile::Stage::WriteStdout);
+        let mut stdout = io::stdout().lock();
+        let _ = stdout
+            .write_all(output.as_bytes())
+            .and_then(|()| stdout.flush());
     }
+    profiler.finish(&result.summary);
 }
 
 /// Primary CLI entrypoint shared by `agy-pulse` and `agypl` binaries.
 pub fn run_cli() -> i32 {
+    let process_start = Instant::now();
     let args: Vec<String> = env::args().skip(1).collect();
     let first = args.first().map(String::as_str);
 
@@ -644,9 +633,20 @@ pub fn run_cli() -> i32 {
         return 0;
     }
 
-    let res = panic::catch_unwind(run_statusline_pipeline);
+    let watchdog_thread = thread::Builder::new()
+        .name("agy-pulse-exit-watchdog".into())
+        .spawn(move || {
+            thread::sleep(STATUSLINE_EXIT_TIMEOUT.saturating_sub(process_start.elapsed()));
+            platform::exit_immediately(0);
+        });
+    if watchdog_thread.is_err() {
+        return 0;
+    }
+
+    let res = panic::catch_unwind(|| run_statusline_pipeline(process_start));
     if res.is_err() {
         platform::write_error_log_safely("Recovered from unexpected panic in statusline mode");
     }
-    0
+    // Keep the watchdog armed through normal process shutdown.
+    std::process::exit(0)
 }
