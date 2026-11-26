@@ -10,6 +10,10 @@ use super::LedgerError;
 
 pub(super) const DEFAULT_LEDGER_FILENAME: &str = "agy-pulse-ledger.sqlite";
 pub(super) const LEDGER_SCHEMA_VERSION: &str = "3";
+pub(super) const DEFAULT_BUSY_TIMEOUT_MS: u64 = 3000;
+pub(super) const STATUSLINE_BUSY_TIMEOUT_MS: u64 = 100;
+pub(super) const DEFAULT_BUSY_RETRIES: u32 = 15;
+pub(super) const STATUSLINE_BUSY_RETRIES: u32 = 2;
 
 const LEDGER_SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS ledger_meta (
@@ -79,7 +83,7 @@ fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
     )
 }
 
-pub(super) fn run_with_busy_retry<T, F>(mut op: F) -> Result<T, rusqlite::Error>
+pub(super) fn run_with_busy_retry_n<T, F>(max_retries: u32, mut op: F) -> Result<T, rusqlite::Error>
 where
     F: FnMut() -> Result<T, rusqlite::Error>,
 {
@@ -87,13 +91,20 @@ where
     loop {
         match op() {
             Ok(val) => return Ok(val),
-            Err(err) if is_sqlite_busy(&err) && attempt < 15 => {
+            Err(err) if is_sqlite_busy(&err) && attempt < max_retries => {
                 attempt += 1;
                 thread::sleep(Duration::from_millis(20 + u64::from(attempt) * 10));
             }
             Err(err) => return Err(err),
         }
     }
+}
+
+pub(super) fn run_with_busy_retry<T, F>(op: F) -> Result<T, rusqlite::Error>
+where
+    F: FnMut() -> Result<T, rusqlite::Error>,
+{
+    run_with_busy_retry_n(DEFAULT_BUSY_RETRIES, op)
 }
 
 fn has_table_column(conn: &Connection, table_name: &str, col_name: &str) -> Result<bool, rusqlite::Error> {
@@ -109,10 +120,36 @@ fn has_table_column(conn: &Connection, table_name: &str, col_name: &str) -> Resu
     Ok(false)
 }
 
-fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
-    // Enable WAL and busy_timeout first; retry if multiple cold-start processes race on init.
-    conn.busy_timeout(Duration::from_millis(3000))?;
-    run_with_busy_retry(|| {
+fn is_schema_already_initialized(conn: &Connection) -> bool {
+    let version_ok = conn
+        .query_row(
+            "SELECT value FROM ledger_meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .is_some_and(|v| v == LEDGER_SCHEMA_VERSION);
+    if !version_ok {
+        return false;
+    }
+    conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+        .ok()
+        .is_some_and(|jm| jm.eq_ignore_ascii_case("wal"))
+}
+
+fn ensure_schema(
+    conn: &Connection,
+    busy_timeout_ms: u64,
+    max_retries: u32,
+) -> Result<(), rusqlite::Error> {
+    // Enable busy_timeout first; avoid acquiring write locks on hot-path opens when schema is already current.
+    conn.busy_timeout(Duration::from_millis(busy_timeout_ms))?;
+    if is_schema_already_initialized(conn) {
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        return Ok(());
+    }
+
+    run_with_busy_retry_n(max_retries, || {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(LEDGER_SCHEMA_SQL)?;
@@ -135,14 +172,22 @@ fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     })
 }
 
-pub(super) fn open_ledger_connection(ledger_path: &Path) -> Result<Connection, LedgerError> {
+pub(super) fn open_ledger_connection_with_options(
+    ledger_path: &Path,
+    busy_timeout_ms: u64,
+    max_retries: u32,
+) -> Result<Connection, LedgerError> {
     if let Some(parent) = ledger_path.parent()
         && !parent.as_os_str().is_empty()
     {
         platform::ensure_dir_0700(parent)?;
     }
     let conn = Connection::open(ledger_path)?;
-    ensure_schema(&conn)?;
+    ensure_schema(&conn, busy_timeout_ms, max_retries)?;
     let _ = platform::set_file_0600(ledger_path);
     Ok(conn)
+}
+
+pub(super) fn open_ledger_connection(ledger_path: &Path) -> Result<Connection, LedgerError> {
+    open_ledger_connection_with_options(ledger_path, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_BUSY_RETRIES)
 }

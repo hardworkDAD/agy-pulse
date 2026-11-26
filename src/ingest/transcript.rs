@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -21,20 +22,21 @@ use super::speed_tracker::{
 };
 use super::stdin::find_context_window;
 
-const TRANSCRIPT_CACHE_VERSION: u32 = 10;
+const TRANSCRIPT_CACHE_VERSION: u32 = 11;
 const TRANSCRIPT_CACHE_HEAD_BYTES: usize = 256;
 const MAX_TRANSCRIPT_CACHE_FILES: usize = 32;
 const FULL_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_FULL_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FULL_TRANSCRIPT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CHILD_AGENTS: usize = 256;
+const MAX_CHILD_TAIL_READS: usize = 32;
+const STREAMING_DELTA_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_TRANSCRIPT_DELTA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RECENT_TOKEN_STEPS: usize = 512;
 const MAX_CHILD_TAIL_BYTES: u64 = 65_536;
 const MAX_CHILD_OPEN_TURN_MS: i64 = 120_000;
 const MIN_CHILD_API_DELTA_MS: i64 = 500;
-const MAX_MODEL_IDLE_TURNS: u64 = 30;
-const MAX_MODEL_IDLE_MS: i64 = 5 * 60 * 1000;
-const MAX_CHILD_MODELS_DISPLAY: usize = 3;
+const MAX_PERSISTED_CHILD_SPEEDS: usize = 32;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -147,6 +149,7 @@ struct TranscriptAccState {
     child_agents: BTreeMap<String, ChildAgentRecord>,
     persisted_child_speeds: BTreeMap<String, PersistedChildSpeed>,
     user_turns: u64,
+    last_user_input_ms: i64,
     has_planner_response: bool,
     model_last_seen_turn: BTreeMap<String, u64>,
     model_last_active_ms: BTreeMap<String, i64>,
@@ -173,6 +176,7 @@ pub(super) struct ChildActivitySummary {
 pub(super) struct ScannedTranscript {
     pub steps: u64,
     pub user_turns: u64,
+    pub last_user_input_ms: Option<i64>,
     pub has_planner_response: bool,
     pub usage: Option<Value>,
     pub last_turn_usage: Option<CachedTurnUsage>,
@@ -280,7 +284,7 @@ fn write_transcript_cache(
     let Ok(bytes) = serde_json::to_vec(&payload) else {
         return;
     };
-    if platform::write_atomic_0600(cache_path, &bytes).is_ok()
+    if platform::write_cache_atomic_0600(cache_path, &bytes).is_ok()
         && let Some(dir) = cache_path.parent()
     {
         prune_json_cache_dir(dir, MAX_TRANSCRIPT_CACHE_FILES);
@@ -665,6 +669,64 @@ fn prune_child_agents(child_agents: &mut BTreeMap<String, ChildAgentRecord>) {
     child_agents.retain(|id, _| keep.contains(id));
 }
 
+fn unquote_json_string_once(raw: &str) -> Cow<'_, str> {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2
+        && trimmed.starts_with('"')
+        && trimmed.ends_with('"')
+        && let Ok(unquoted) = serde_json::from_str::<String>(trimmed)
+    {
+        return Cow::Owned(unquoted);
+    }
+    Cow::Borrowed(trimmed)
+}
+
+fn extract_tool_arg_str(val: Option<&Value>) -> Option<String> {
+    let raw = val.and_then(Value::as_str)?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let unquoted = unquote_json_string_once(raw);
+    let trimmed = unquoted.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn extract_tool_arg_str_list(val: Option<&Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    match val {
+        Some(Value::Array(arr)) => {
+            for item in arr {
+                if let Some(s) = extract_tool_arg_str(Some(item)) {
+                    out.push(s);
+                }
+            }
+        }
+        Some(Value::String(raw)) => {
+            let unquoted = unquote_json_string_once(raw);
+            let candidate = unquoted.trim();
+            if candidate.starts_with('[')
+                && let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(candidate)
+            {
+                for item in &arr {
+                    if let Some(s) = extract_tool_arg_str(Some(item)) {
+                        out.push(s);
+                    }
+                }
+                return out;
+            }
+            if let Some(s) = extract_tool_arg_str(val) {
+                out.push(s);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 fn process_planner_tool_calls(
     tool_calls: Option<&Value>,
     acc: &mut TranscriptAccState,
@@ -699,21 +761,22 @@ fn process_planner_tool_calls(
 
         match tool_name {
             "invoke_subagent" => {
-                let model = args
-                    .and_then(|a| a.get("Model").or_else(|| a.get("model")))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                let raw_model = args
+                    .and_then(|a| extract_tool_arg_str(a.get("Model").or_else(|| a.get("model"))))
+                    .unwrap_or_default();
+                let model = if raw_model.eq_ignore_ascii_case("inherit") {
+                    String::new()
+                } else {
+                    raw_model
+                };
                 let role = args
-                    .and_then(|a| a.get("Role").or_else(|| a.get("role")))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                    .and_then(|a| extract_tool_arg_str(a.get("Role").or_else(|| a.get("role"))))
+                    .unwrap_or_default();
                 let type_name = args
-                    .and_then(|a| a.get("TypeName").or_else(|| a.get("typeName")))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                    .and_then(|a| {
+                        extract_tool_arg_str(a.get("TypeName").or_else(|| a.get("typeName")))
+                    })
+                    .unwrap_or_default();
                 acc.pending_subagent_hints.push(SubagentHint {
                     model,
                     role,
@@ -726,15 +789,14 @@ fn process_planner_tool_calls(
                 }
             }
             "send_message" => {
-                if let Some(recipient) = args
-                    .and_then(|a| {
+                if let Some(recipient) = args.and_then(|a| {
+                    extract_tool_arg_str(
                         a.get("Recipient")
                             .or_else(|| a.get("recipient"))
                             .or_else(|| a.get("conversationId"))
-                            .or_else(|| a.get("conversation_id"))
-                    })
-                    .and_then(Value::as_str)
-                    && let Some(child) = acc.child_agents.get_mut(recipient)
+                            .or_else(|| a.get("conversation_id")),
+                    )
+                }) && let Some(child) = acc.child_agents.get_mut(&recipient)
                 {
                     child.active = true;
                     child.killed = false;
@@ -747,9 +809,8 @@ fn process_planner_tool_calls(
             }
             "manage_subagents" => {
                 let action = args
-                    .and_then(|a| a.get("Action").or_else(|| a.get("action")))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                    .and_then(|a| extract_tool_arg_str(a.get("Action").or_else(|| a.get("action"))))
+                    .unwrap_or_default();
                 if action == "kill_all" {
                     for child in acc.child_agents.values_mut() {
                         if child.kind == "subagent" {
@@ -764,20 +825,8 @@ fn process_planner_tool_calls(
                             .or_else(|| a.get("ConversationId"))
                             .or_else(|| a.get("conversationId"))
                     });
-                    let mut ids: Vec<&str> = Vec::new();
-                    match raw_ids {
-                        Some(Value::Array(arr)) => {
-                            for v in arr {
-                                if let Some(s) = v.as_str() {
-                                    ids.push(s);
-                                }
-                            }
-                        }
-                        Some(Value::String(s)) => ids.push(s.as_str()),
-                        _ => {}
-                    }
-                    for target_id in ids {
-                        if let Some(child) = acc.child_agents.get_mut(target_id)
+                    for target_id in extract_tool_arg_str_list(raw_ids) {
+                        if let Some(child) = acc.child_agents.get_mut(&target_id)
                             && child.kind == "subagent"
                         {
                             child.active = false;
@@ -788,15 +837,13 @@ fn process_planner_tool_calls(
             }
             "post_message" => {
                 if let Some(msg_text) = args
-                    .and_then(|a| a.get("text").or_else(|| a.get("Text")))
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
+                    .and_then(|a| extract_tool_arg_str(a.get("text").or_else(|| a.get("Text"))))
                 {
-                    let mention_all = has_mention(msg_text, "all");
+                    let mention_all = has_mention(&msg_text, "all");
                     for child in acc.child_agents.values_mut() {
                         if child.kind == "swarm"
                             && !child.killed
-                            && (mention_all || has_mention(msg_text, &child.name))
+                            && (mention_all || has_mention(&msg_text, &child.name))
                         {
                             child.active = true;
                             child.last_active_turn = cur_turn;
@@ -1228,6 +1275,11 @@ fn process_transcript_entry(
 
     if entry_type == "USER_INPUT" {
         acc.user_turns += 1;
+        if let Some(ts) = valid_time_ms
+            && ts > 0
+        {
+            acc.last_user_input_ms = acc.last_user_input_ms.max(ts);
+        }
     }
 
     if entry_type == "SYSTEM_MESSAGE" {
@@ -1238,25 +1290,33 @@ fn process_transcript_entry(
             }
         }
         let cur_turn = effective_turn(acc);
-        if let Some(sender) = entry.get("sender").and_then(Value::as_str)
-            && let Some(child) = acc.child_agents.get_mut(sender)
-        {
-            child.last_active_turn = cur_turn;
-            if let Some(ts) = valid_time_ms {
-                child.last_active_ms = child.last_active_ms.max(ts);
+        let touch_sender = |agents: &mut BTreeMap<String, ChildAgentRecord>, sender: &str| {
+            if let Some(child) = agents.get_mut(sender) {
+                child.last_active_turn = cur_turn;
+                if let Some(ts) = valid_time_ms {
+                    child.last_active_ms = child.last_active_ms.max(ts);
+                }
+                return;
             }
+            for child in agents.values_mut() {
+                if !child.killed && child.name == sender {
+                    child.last_active_turn = cur_turn;
+                    if let Some(ts) = valid_time_ms {
+                        child.last_active_ms = child.last_active_ms.max(ts);
+                    }
+                }
+            }
+        };
+        if let Some(sender) = entry.get("sender").and_then(Value::as_str) {
+            touch_sender(&mut acc.child_agents, sender);
         }
         static SENDER_RE: OnceLock<Option<Regex>> = OnceLock::new();
         if !content_str.is_empty()
             && let Some(re) = SENDER_RE.get_or_init(|| Regex::new(r"\bsender=([^\s\]]+)").ok())
             && let Some(caps) = re.captures(content_str)
             && let Some(m) = caps.get(1)
-            && let Some(child) = acc.child_agents.get_mut(m.as_str())
         {
-            child.last_active_turn = cur_turn;
-            if let Some(ts) = valid_time_ms {
-                child.last_active_ms = child.last_active_ms.max(ts);
-            }
+            touch_sender(&mut acc.child_agents, m.as_str());
         }
     }
 
@@ -1508,6 +1568,7 @@ struct PendingChildPlanner {
     start_ms: i64,
     output_tokens: u64,
     model: String,
+    has_tool_calls: bool,
 }
 
 fn extract_child_output_tokens(
@@ -1669,9 +1730,7 @@ fn read_child_tail_telemetry(
                 .get("tool_calls")
                 .and_then(Value::as_array)
                 .is_some_and(|a| !a.is_empty());
-            if let Some(ts) = valid_time_ms
-                && !has_tool_calls
-            {
+            if let Some(ts) = valid_time_ms {
                 let m = if !raw_model.is_empty() {
                     raw_model.to_string()
                 } else {
@@ -1681,6 +1740,7 @@ fn read_child_tail_telemetry(
                     start_ms: ts,
                     output_tokens: tokens,
                     model: m,
+                    has_tool_calls,
                 });
             }
         }
@@ -1688,6 +1748,7 @@ fn read_child_tail_telemetry(
 
     let mut selected_speed = last_closed_speed;
     if let Some(pending) = pending_planner
+        && !pending.has_tool_calls
         && pending.output_tokens > 0
         && now_ms >= pending.start_ms
     {
@@ -1817,13 +1878,26 @@ fn merge_child_candidate(
     }
 }
 
+struct ResolvedChildSpeeds {
+    speeds: Vec<ChildModelSpeed>,
+    activities: Vec<ChildActivitySummary>,
+    tail_activities: Vec<(String, i64)>,
+    persisted_changed: bool,
+}
+
 fn resolve_child_model_speeds(
     transcript_path: &Path,
     acc: &mut TranscriptAccState,
     now_ms: i64,
-) -> (Vec<ChildModelSpeed>, Vec<(String, i64)>, bool) {
+    deadline: Option<Instant>,
+) -> ResolvedChildSpeeds {
     if acc.child_agents.is_empty() && acc.persisted_child_speeds.is_empty() {
-        return (Vec::new(), Vec::new(), false);
+        return ResolvedChildSpeeds {
+            speeds: Vec::new(),
+            activities: Vec::new(),
+            tail_activities: Vec::new(),
+            persisted_changed: false,
+        };
     }
     let (brain_dir, _) = resolve_brain_context(transcript_path);
     let current_turns = acc
@@ -1832,29 +1906,62 @@ fn resolve_child_model_speeds(
 
     let mut registered: Vec<ChildAgentRecord> = acc.child_agents.values().cloned().collect();
     registered.sort_by(|a, b| {
-        b.added_step
-            .cmp(&a.added_step)
+        let a_active = u8::from(a.active && !a.killed);
+        let b_active = u8::from(b.active && !b.killed);
+        b_active
+            .cmp(&a_active)
+            .then_with(|| b.added_step.cmp(&a.added_step))
             .then_with(|| b.last_active_ms.cmp(&a.last_active_ms))
     });
     registered.truncate(MAX_CHILD_AGENTS);
 
     let mut live_by_model: HashMap<String, MergedChildCandidate> = HashMap::new();
-    let mut unresolved: Vec<(ChildAgentRecord, i64)> = Vec::new();
+    let mut unresolved: Vec<(ChildAgentRecord, i64, u64)> = Vec::new();
     let mut model_last_active_ms = acc.model_last_active_ms.clone();
+    let mut child_activities: Vec<ChildActivitySummary> = Vec::with_capacity(registered.len());
 
-    for child in &registered {
-        let tail = brain_dir.as_ref().and_then(|bd| {
-            let cp = bd
-                .join(&child.id)
-                .join(".system_generated")
-                .join("logs")
-                .join("transcript.jsonl");
-            read_child_tail_telemetry(&cp, child, now_ms)
+    for (child_idx, child) in registered.iter().enumerate() {
+        let tail = if child_idx < MAX_CHILD_TAIL_READS
+            && !deadline.is_some_and(|d| Instant::now() >= d)
+        {
+            brain_dir.as_ref().and_then(|bd| {
+                let cp = bd
+                    .join(&child.id)
+                    .join(".system_generated")
+                    .join("logs")
+                    .join("transcript.jsonl");
+                read_child_tail_telemetry(&cp, child, now_ms)
+            })
+        } else {
+            None
+        };
+
+        let tail_latest_ms = tail.as_ref().map(|t| t.latest_event_ms).unwrap_or(0);
+        let child_last_active_ms = child.last_active_ms.max(tail_latest_ms);
+        let base_turn = child.last_active_turn.max(child.added_turn);
+        let child_last_active_turn = if acc.last_user_input_ms > 0
+            && tail_latest_ms >= acc.last_user_input_ms
+        {
+            current_turns
+        } else {
+            base_turn
+        };
+
+        let resolved_model_hint = tail
+            .as_ref()
+            .filter(|t| !t.latest_model_label.is_empty())
+            .map(|t| t.latest_model_label.clone())
+            .or_else(|| {
+                tail.as_ref()
+                    .and_then(|t| t.speed_result.as_ref())
+                    .map(|s| s.model_label.clone())
+            })
+            .unwrap_or_else(|| child.model_hint.clone());
+        child_activities.push(ChildActivitySummary {
+            model_hint: resolved_model_hint,
+            last_active_turn: child_last_active_turn,
+            last_active_ms: child_last_active_ms,
         });
-
-        let child_last_active_ms = child
-            .last_active_ms
-            .max(tail.as_ref().map(|t| t.latest_event_ms).unwrap_or(0));
 
         if let Some(ref t) = tail
             && t.latest_event_ms > 0
@@ -1884,17 +1991,17 @@ fn resolve_child_model_speeds(
                 sample.event_ms,
                 sample.mtime_ms,
                 child.added_step,
-                child.last_active_turn,
+                child_last_active_turn,
                 cand_last_active_ms,
             );
         } else {
-            unresolved.push((child.clone(), child_last_active_ms));
+            unresolved.push((child.clone(), child_last_active_ms, child_last_active_turn));
         }
     }
 
     let mut by_model: HashMap<String, MergedChildCandidate> = live_by_model.clone();
 
-    for (child, child_last_active_ms) in unresolved {
+    for (child, child_last_active_ms, child_last_active_turn) in unresolved {
         let hint = child.model_hint.trim();
         if hint.is_empty() {
             continue;
@@ -1927,7 +2034,7 @@ fn resolve_child_model_speeds(
                 ts,
                 mtime_ms,
                 child.added_step,
-                child.last_active_turn,
+                child_last_active_turn,
                 eff_last_ms,
             );
         }
@@ -2008,25 +2115,26 @@ fn resolve_child_model_speeds(
         }
     }
 
-    let before_len = acc.persisted_child_speeds.len();
-    acc.persisted_child_speeds.retain(|model_label, entry| {
-        let active_entry = by_model.get(model_label);
-        let last_turn = active_entry
-            .map(|a| a.last_active_turn)
-            .or(entry.last_active_turn)
-            .unwrap_or(current_turns);
-        let turns_ago = current_turns.saturating_sub(last_turn);
-        let entry_last_ms = active_entry
-            .map(|a| a.last_active_ms)
-            .unwrap_or(0)
-            .max(entry.last_active_ms.unwrap_or(0))
-            .max(entry.event_ms)
-            .max(entry.updated_at)
-            .max(model_last_active_ms.get(model_label).copied().unwrap_or(0));
-        let time_expired = entry_last_ms > 0 && (now_ms - entry_last_ms) > MAX_MODEL_IDLE_MS;
-        turns_ago <= MAX_MODEL_IDLE_TURNS && !time_expired
-    });
-    if acc.persisted_child_speeds.len() != before_len {
+    if acc.persisted_child_speeds.len() > MAX_PERSISTED_CHILD_SPEEDS {
+        let mut by_recency: Vec<(String, i64)> = acc
+            .persisted_child_speeds
+            .iter()
+            .map(|(k, v)| {
+                let ts = v
+                    .last_active_ms
+                    .unwrap_or(0)
+                    .max(v.event_ms)
+                    .max(v.updated_at);
+                (k.clone(), ts)
+            })
+            .collect();
+        by_recency.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let keep: HashSet<String> = by_recency
+            .into_iter()
+            .take(MAX_PERSISTED_CHILD_SPEEDS)
+            .map(|(k, _)| k)
+            .collect();
+        acc.persisted_child_speeds.retain(|k, _| keep.contains(k));
         persisted_changed = true;
     }
 
@@ -2036,33 +2144,28 @@ fn resolve_child_model_speeds(
             continue;
         }
         let turns_ago = current_turns.saturating_sub(item.last_active_turn);
-        if turns_ago > MAX_MODEL_IDLE_TURNS {
-            continue;
-        }
         let last_active_ms = item
             .last_active_ms
             .max(model_last_active_ms.get(&item.model).copied().unwrap_or(0));
-        if last_active_ms > 0 && (now_ms - last_active_ms) > MAX_MODEL_IDLE_MS {
-            continue;
-        }
         active_candidates.push((item, turns_ago, last_active_ms));
     }
 
     let tail_activities: Vec<(String, i64)> = model_last_active_ms.into_iter().collect();
 
     if active_candidates.is_empty() {
-        return (Vec::new(), tail_activities, persisted_changed);
+        return ResolvedChildSpeeds {
+            speeds: Vec::new(),
+            activities: child_activities,
+            tail_activities,
+            persisted_changed,
+        };
     }
 
     active_candidates.sort_by(|(a, _, _), (b, _, _)| {
         b.event_ms
             .cmp(&a.event_ms)
             .then_with(|| b.mtime_ms.cmp(&a.mtime_ms))
-    });
-    active_candidates.truncate(MAX_CHILD_MODELS_DISPLAY);
-    active_candidates.sort_by(|(a, _, _), (b, _, _)| {
-        a.first_order
-            .cmp(&b.first_order)
+            .then_with(|| a.first_order.cmp(&b.first_order))
             .then_with(|| a.model.cmp(&b.model))
     });
 
@@ -2076,7 +2179,12 @@ fn resolve_child_model_speeds(
             last_active_ms,
         })
         .collect();
-    (result, tail_activities, persisted_changed)
+    ResolvedChildSpeeds {
+        speeds: result,
+        activities: child_activities,
+        tail_activities,
+        persisted_changed,
+    }
 }
 
 /// Incrementally scan a host `transcript.jsonl` file using inode + 256-byte head SHA-256 caching,
@@ -2085,6 +2193,7 @@ pub(super) fn scan_transcript_incremental(
     transcript_path: &Path,
     main_model_ident: Option<&str>,
     now_ms: i64,
+    deadline: Option<Instant>,
 ) -> Option<ScannedTranscript> {
     let meta = fs::metadata(transcript_path).ok()?;
     if !meta.is_file() {
@@ -2103,67 +2212,281 @@ pub(super) fn scan_transcript_incremental(
 
     let mut cache_dirty = false;
     if offset < f_size
+        && !deadline.is_some_and(|d| Instant::now() >= d)
         && let Ok(mut file) = File::open(transcript_path)
         && file.seek(SeekFrom::Start(offset)).is_ok()
     {
-        let to_read = (f_size - offset) as usize;
-        let mut buf = vec![0u8; to_read];
-        let mut total_read = 0usize;
-        while total_read < to_read {
-            match file.read(&mut buf[total_read..]) {
-                Ok(0) => break,
-                Ok(n) => total_read += n,
-                Err(_) => break,
-            }
-        }
-        let view = &buf[..total_read];
-        if let Some(last_nl) = view.iter().rposition(|&b| b == b'\n') {
-            let chunk = String::from_utf8_lossy(&view[..=last_nl]);
-            offset += (last_nl + 1) as u64;
+        let start_offset = offset;
+        let raw_delta = f_size - start_offset;
+        let capped_delta = raw_delta.min(MAX_TRANSCRIPT_DELTA_BYTES);
 
-            let mut parsed_entries: Vec<Map<String, Value>> = Vec::new();
-            let mut needed_full_steps: HashSet<u64> = HashSet::new();
-            for line in chunk.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
+        if capped_delta <= STREAMING_DELTA_THRESHOLD_BYTES {
+            let to_read = capped_delta as usize;
+            let mut buf = vec![0u8; to_read];
+            let mut total_read = 0usize;
+            while total_read < to_read {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    break;
                 }
-                if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
-                    if obj
-                        .get("truncated_fields")
-                        .and_then(Value::as_array)
-                        .is_some_and(|arr| !arr.is_empty())
-                        && let Some(step) = as_u64_val(obj.get("step_index"))
-                    {
-                        needed_full_steps.insert(step);
+                match file.read(&mut buf[total_read..]) {
+                    Ok(0) => break,
+                    Ok(n) => total_read += n,
+                    Err(_) => break,
+                }
+            }
+            let view = &buf[..total_read];
+            if let Some(last_nl) = view.iter().rposition(|&b| b == b'\n') {
+                let mut parsed_entries: Vec<(Map<String, Value>, u64)> = Vec::new();
+                let mut needed_full_steps: HashSet<u64> = HashSet::new();
+                let mut line_start = 0usize;
+                let mut saw_skipped_line = false;
+
+                while line_start <= last_nl {
+                    let Some(rel_nl) = view[line_start..=last_nl].iter().position(|&b| b == b'\n')
+                    else {
+                        break;
+                    };
+                    let line_end = line_start + rel_nl;
+                    let next_off = start_offset + (line_end + 1) as u64;
+                    let line_str = String::from_utf8_lossy(&view[line_start..line_end]);
+                    line_start = line_end + 1;
+                    let trimmed = line_str.trim();
+                    if trimmed.is_empty() {
+                        saw_skipped_line = true;
+                        continue;
                     }
-                    parsed_entries.push(obj);
+                    if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+                        if obj
+                            .get("truncated_fields")
+                            .and_then(Value::as_array)
+                            .is_some_and(|arr| !arr.is_empty())
+                            && let Some(step) = as_u64_val(obj.get("step_index"))
+                        {
+                            needed_full_steps.insert(step);
+                        }
+                        parsed_entries.push((obj, next_off));
+                    } else {
+                        saw_skipped_line = true;
+                    }
+                }
+
+                let full_map = if needed_full_steps.is_empty()
+                    || deadline.is_some_and(|d| Instant::now() >= d)
+                {
+                    None
+                } else {
+                    Some(load_full_entries_map(transcript_path, &needed_full_steps))
+                };
+
+                if !deadline.is_some_and(|d| Instant::now() >= d) {
+                    let (_, main_conv_id) = resolve_brain_context(transcript_path);
+                    let mut completed_all = true;
+                    for (entry, next_off) in parsed_entries {
+                        if deadline.is_some_and(|d| Instant::now() >= d) {
+                            completed_all = false;
+                            break;
+                        }
+                        process_transcript_entry(
+                            entry,
+                            &mut state,
+                            main_conv_id.as_deref(),
+                            full_map.as_ref(),
+                            now_ms,
+                        );
+                        offset = next_off;
+                        cache_dirty = true;
+                    }
+                    if completed_all {
+                        let chunk_end = start_offset + (last_nl + 1) as u64;
+                        if chunk_end > offset || saw_skipped_line {
+                            offset = offset.max(chunk_end);
+                            cache_dirty = true;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Two-pass 64KB O(1)-memory streaming scan for huge deltas (>8MB, capped at 64MB per call).
+            let mut buf = vec![0u8; FULL_CHUNK_BYTES];
+            let mut carry: Vec<u8> = Vec::new();
+            let mut oversized = false;
+            let mut bytes_read_total = 0u64;
+            let mut consumed_bytes = 0u64;
+            let mut pending_len = 0u64;
+            let mut needed_full_steps: HashSet<u64> = HashSet::new();
+            let mut pass1_timed_out = false;
+
+            while bytes_read_total < capped_delta {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    pass1_timed_out = true;
+                    break;
+                }
+                let to_read =
+                    (capped_delta - bytes_read_total).min(FULL_CHUNK_BYTES as u64) as usize;
+                let Ok(n) = file.read(&mut buf[..to_read]) else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                bytes_read_total += n as u64;
+                let slice = &buf[..n];
+                let mut start = 0usize;
+                while start < slice.len() {
+                    if let Some(rel_nl) = slice[start..].iter().position(|&b| b == b'\n') {
+                        let end = start + rel_nl;
+                        let seg_len = (end - start + 1) as u64;
+                        consumed_bytes += pending_len + seg_len;
+                        pending_len = 0;
+
+                        if oversized {
+                            oversized = false;
+                            carry.clear();
+                        } else {
+                            let line_bytes: &[u8] = if carry.is_empty() {
+                                &slice[start..end]
+                            } else {
+                                carry.extend_from_slice(&slice[start..end]);
+                                &carry
+                            };
+                            let line_str = String::from_utf8_lossy(line_bytes);
+                            if line_str.contains("\"truncated_fields\"") {
+                                let trimmed = line_str.trim();
+                                if !trimmed.is_empty()
+                                    && let Ok(Value::Object(obj)) =
+                                        serde_json::from_str::<Value>(trimmed)
+                                    && obj
+                                        .get("truncated_fields")
+                                        .and_then(Value::as_array)
+                                        .is_some_and(|arr| !arr.is_empty())
+                                    && let Some(step) = as_u64_val(obj.get("step_index"))
+                                {
+                                    needed_full_steps.insert(step);
+                                }
+                            }
+                            carry.clear();
+                        }
+                        start = end + 1;
+                    } else {
+                        let tail = &slice[start..];
+                        pending_len += tail.len() as u64;
+                        if !oversized {
+                            if carry.len() + tail.len() > MAX_FULL_LINE_BYTES {
+                                oversized = true;
+                                carry.clear();
+                            } else {
+                                carry.extend_from_slice(tail);
+                            }
+                        }
+                        break;
+                    }
                 }
             }
 
-            let full_map = if needed_full_steps.is_empty() {
-                None
-            } else {
-                Some(load_full_entries_map(transcript_path, &needed_full_steps))
-            };
-            let (_, main_conv_id) = resolve_brain_context(transcript_path);
-            for entry in parsed_entries {
-                process_transcript_entry(
-                    entry,
-                    &mut state,
-                    main_conv_id.as_deref(),
-                    full_map.as_ref(),
-                    now_ms,
-                );
+            let pass1_end_offset = start_offset + consumed_bytes;
+            if !pass1_timed_out
+                && pass1_end_offset > start_offset
+                && !deadline.is_some_and(|d| Instant::now() >= d)
+            {
+                let full_map = if needed_full_steps.is_empty() {
+                    None
+                } else {
+                    Some(load_full_entries_map(transcript_path, &needed_full_steps))
+                };
+
+                if !deadline.is_some_and(|d| Instant::now() >= d)
+                    && file.seek(SeekFrom::Start(start_offset)).is_ok()
+                {
+                    let (_, main_conv_id) = resolve_brain_context(transcript_path);
+                    let pass2_limit = pass1_end_offset - start_offset;
+                    let mut pass2_read = 0u64;
+                    let mut pass2_consumed = 0u64;
+                    let mut pass2_pending = 0u64;
+                    carry.clear();
+                    oversized = false;
+
+                    'pass2: while pass2_read < pass2_limit {
+                        if deadline.is_some_and(|d| Instant::now() >= d) {
+                            break;
+                        }
+                        let to_read =
+                            (pass2_limit - pass2_read).min(FULL_CHUNK_BYTES as u64) as usize;
+                        let Ok(n) = file.read(&mut buf[..to_read]) else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        pass2_read += n as u64;
+                        let slice = &buf[..n];
+                        let mut start = 0usize;
+                        while start < slice.len() {
+                            if let Some(rel_nl) = slice[start..].iter().position(|&b| b == b'\n') {
+                                if deadline.is_some_and(|d| Instant::now() >= d) {
+                                    break 'pass2;
+                                }
+                                let end = start + rel_nl;
+                                let seg_len = (end - start + 1) as u64;
+                                pass2_consumed += pass2_pending + seg_len;
+                                pass2_pending = 0;
+
+                                if oversized {
+                                    oversized = false;
+                                    carry.clear();
+                                } else {
+                                    let line_bytes: &[u8] = if carry.is_empty() {
+                                        &slice[start..end]
+                                    } else {
+                                        carry.extend_from_slice(&slice[start..end]);
+                                        &carry
+                                    };
+                                    let line_str = String::from_utf8_lossy(line_bytes);
+                                    let trimmed = line_str.trim();
+                                    if !trimmed.is_empty()
+                                        && let Ok(Value::Object(obj)) =
+                                            serde_json::from_str::<Value>(trimmed)
+                                    {
+                                        process_transcript_entry(
+                                            obj,
+                                            &mut state,
+                                            main_conv_id.as_deref(),
+                                            full_map.as_ref(),
+                                            now_ms,
+                                        );
+                                    }
+                                    carry.clear();
+                                }
+                                offset = start_offset + pass2_consumed;
+                                cache_dirty = true;
+                                start = end + 1;
+                            } else {
+                                let tail = &slice[start..];
+                                pass2_pending += tail.len() as u64;
+                                if !oversized {
+                                    if carry.len() + tail.len() > MAX_FULL_LINE_BYTES {
+                                        oversized = true;
+                                        carry.clear();
+                                    } else {
+                                        carry.extend_from_slice(tail);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
             }
-            cache_dirty = true;
         }
     } else if f_size == 0 && cache_path.exists() {
         cache_dirty = true;
     }
 
-    let (child_model_speeds, child_tail_activities, child_persisted_changed) =
-        resolve_child_model_speeds(transcript_path, &mut state, now_ms);
+    let ResolvedChildSpeeds {
+        speeds: child_model_speeds,
+        activities: resolved_child_activities,
+        tail_activities: child_tail_activities,
+        persisted_changed: child_persisted_changed,
+    } = resolve_child_model_speeds(transcript_path, &mut state, now_ms, deadline);
 
     if cache_dirty || child_persisted_changed {
         write_transcript_cache(&cache_path, f_ino, offset, &state, transcript_path, f_size);
@@ -2220,15 +2543,19 @@ pub(super) fn scan_transcript_incremental(
         .map(|reset_time_ms| ImageQuotaExhausted { reset_time_ms });
 
     let all_child_ids: Vec<String> = state.child_agents.keys().cloned().collect();
-    let child_activities: Vec<ChildActivitySummary> = state
-        .child_agents
-        .values()
-        .map(|c| ChildActivitySummary {
-            model_hint: c.model_hint.clone(),
-            last_active_turn: c.last_active_turn.max(c.added_turn),
-            last_active_ms: c.last_active_ms,
-        })
-        .collect();
+    let child_activities: Vec<ChildActivitySummary> = if !resolved_child_activities.is_empty() {
+        resolved_child_activities
+    } else {
+        state
+            .child_agents
+            .values()
+            .map(|c| ChildActivitySummary {
+                model_hint: c.model_hint.clone(),
+                last_active_turn: c.last_active_turn.max(c.added_turn),
+                last_active_ms: c.last_active_ms,
+            })
+            .collect()
+    };
     let persisted_child_turns: Vec<(String, Option<u64>, i64)> = state
         .persisted_child_speeds
         .iter()
@@ -2245,6 +2572,7 @@ pub(super) fn scan_transcript_incremental(
     Some(ScannedTranscript {
         steps: state.steps,
         user_turns: state.user_turns,
+        last_user_input_ms: (state.last_user_input_ms > 0).then_some(state.last_user_input_ms),
         has_planner_response: state.has_planner_response,
         usage: state.usage,
         last_turn_usage: state.last_turn_usage,

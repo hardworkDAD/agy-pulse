@@ -965,3 +965,211 @@ fn t05_stats_subcommand_cli_ide_json_bilingual_and_exact_metrics() {
     assert!(out_csv.starts_with("model,costUsd,costSharePct,"));
     assert!(out_csv.contains("Hydro,0.51,60,"));
 }
+
+#[test]
+fn t05_statusline_exits_promptly_under_ledger_write_lock_contention() {
+    use std::time::{Duration, Instant};
+
+    let env = IsolatedEnv::new();
+    let ledger_path = env.cli_data_dir.join("agy-pulse-ledger.sqlite");
+    // Pre-initialize schema so another writer can hold an IMMEDIATE write lock.
+    let _init_store = LedgerStore::open_at(&ledger_path).expect("init ledger");
+    drop(_init_store);
+
+    let mut lock_conn = Connection::open(&ledger_path).expect("open lock conn");
+    let tx = lock_conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .expect("acquire immediate lock");
+
+    let start = Instant::now();
+    let payload = serde_json::json!({
+        "conversation_id": "locked-ledger-conv",
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" },
+        "cost": { "total_cost_usd": 1.25 }
+    })
+    .to_string();
+
+    let (code, out, _err) = env.run_stdin(&agy_pulse_bin(), &payload, false, &[("COLUMNS", "120")]);
+    let elapsed = start.elapsed();
+    drop(tx);
+
+    assert_eq!(code, 0, "statusline must still exit 0 under ledger lock contention");
+    let plain = strip_ansi(&out);
+    assert!(
+        plain.contains("Carbon") || !plain.trim().is_empty(),
+        "statusline must still render output when ledger is locked: {plain}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(1200),
+        "statusline must not stall for 3s+ busy_timeout retries when ledger is locked, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn t05_sync_conversation_respects_throttle_ms_and_allows_force_or_zero_bypass() {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let env = IsolatedEnv::new();
+    let ledger_path = env.cli_data_dir.join("agy-pulse-ledger.sqlite");
+    let mut store = LedgerStore::open_at(&ledger_path).expect("open ledger");
+
+    let t0 = local_ms(2026, 11, 20, 15, 0, 0);
+    let conv_db = env.cli_data_dir.join("conversations").join("conv-throttle-1.db");
+    write_conv_db(
+        &conv_db,
+        Some(&build_trajectory_blob(
+            "file:///work/throttle",
+            "main",
+            t0 - 10_000,
+            Some("conv-throttle-1"),
+        )),
+        &[(1, build_step_metadata_blob(t0 - 5_000))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Gemini 4 Carbon (High)",
+                    input_tokens: 10_000,
+                    cache_read_tokens: 0,
+                    output_tokens: 1_000,
+                    stream_sec: Some((5, 0)),
+                    ttft_sec: Some((1, 0)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    let set_conv_mtime = |step_idx: i64| {
+        let ts = UNIX_EPOCH + Duration::from_secs(1_800_000_000 + step_idx as u64);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&conv_db)
+            .unwrap()
+            .set_modified(ts)
+            .unwrap();
+    };
+    let append_step = |step_idx: i64, ts_ms: i64| {
+        let conn = Connection::open(&conv_db).unwrap();
+        conn.execute(
+            "INSERT INTO steps (idx, metadata) VALUES (?1, ?2)",
+            params![step_idx, build_step_metadata_blob(ts_ms)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![
+                step_idx,
+                build_gen_blob(
+                    &[step_idx as u64],
+                    &[GenStepSpec {
+                        display_name: "Gemini 4 Carbon (High)",
+                        input_tokens: 10_000,
+                        cache_read_tokens: 0,
+                        output_tokens: 1_000,
+                        stream_sec: Some((5, 0)),
+                        ttft_sec: Some((1, 0)),
+                        parent_cascade_id: None,
+                        root_cascade_id: None,
+                    }],
+                )
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        set_conv_mtime(step_idx);
+    };
+
+    let source_roots = vec![SourceRoot {
+        root: env.cli_data_dir.clone(),
+        source: LedgerSource::Cli,
+    }];
+
+    // 1. Initial sync is never throttled.
+    set_conv_mtime(1);
+    let r1 = store
+        .sync_conversation(
+            "conv-throttle-1",
+            &[],
+            &LedgerSyncOptions {
+                source_roots: Some(source_roots.clone()),
+                now_ms: Some(t0),
+                ..Default::default()
+            },
+        )
+        .expect("initial sync");
+    assert!(!r1.skipped);
+    assert_eq!(r1.synced_dbs, 1);
+    assert_eq!(r1.steps_upserted, 1);
+
+    // 2. DB changes within 15s throttle window -> skipped.
+    append_step(2, t0 + 1_000);
+    let r2 = store
+        .sync_conversation(
+            "conv-throttle-1",
+            &[],
+            &LedgerSyncOptions {
+                source_roots: Some(source_roots.clone()),
+                now_ms: Some(t0 + 5_000),
+                ..Default::default()
+            },
+        )
+        .expect("throttled sync");
+    assert!(r2.skipped, "sync within default 15s throttle must be skipped");
+    assert_eq!(r2.synced_dbs, 0);
+    assert_eq!(r2.steps_upserted, 0);
+
+    // 3. throttle_ms = Some(0) bypasses throttling immediately.
+    let r3 = store
+        .sync_conversation(
+            "conv-throttle-1",
+            &[],
+            &LedgerSyncOptions {
+                source_roots: Some(source_roots.clone()),
+                throttle_ms: Some(0),
+                now_ms: Some(t0 + 5_000),
+                ..Default::default()
+            },
+        )
+        .expect("zero-throttle sync");
+    assert!(!r3.skipped);
+    assert_eq!(r3.synced_dbs, 1);
+    assert_eq!(r3.steps_upserted, 2);
+
+    // 4. force = true bypasses throttling within window.
+    append_step(3, t0 + 6_000);
+    let r4 = store
+        .sync_conversation(
+            "conv-throttle-1",
+            &[],
+            &LedgerSyncOptions {
+                source_roots: Some(source_roots.clone()),
+                force: true,
+                now_ms: Some(t0 + 10_000),
+                ..Default::default()
+            },
+        )
+        .expect("forced sync");
+    assert!(!r4.skipped);
+    assert_eq!(r4.synced_dbs, 1);
+    assert_eq!(r4.steps_upserted, 3);
+
+    // 5. After throttle window (>= 15_000ms), changed DB syncs normally.
+    append_step(4, t0 + 20_000);
+    let r5 = store
+        .sync_conversation(
+            "conv-throttle-1",
+            &[],
+            &LedgerSyncOptions {
+                source_roots: Some(source_roots),
+                now_ms: Some(t0 + 26_000),
+                ..Default::default()
+            },
+        )
+        .expect("post-window sync");
+    assert!(!r5.skipped);
+    assert_eq!(r5.synced_dbs, 1);
+    assert_eq!(r5.steps_upserted, 4);
+}

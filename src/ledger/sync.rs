@@ -13,10 +13,10 @@ use crate::platform;
 
 use super::LedgerError;
 use super::query::{
-    LedgerSource, load_ledger_rows, local_date_key, local_today_bounds,
+    ConvLineageMeta, LedgerSource, local_date_key, local_today_bounds,
     resolve_root_conversation_id,
 };
-use super::schema::run_with_busy_retry;
+use super::schema::{DEFAULT_BUSY_RETRIES, run_with_busy_retry, run_with_busy_retry_n};
 
 pub(super) const SYNC_THROTTLE_MS: i64 = 15_000;
 const ROLLING_CURSOR_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -420,8 +420,9 @@ fn upsert_batches(
     conn: &mut Connection,
     batches: &[IngestedConversationBatch],
     full_scan_ts_ms: Option<i64>,
+    max_retries: u32,
 ) -> Result<usize, LedgerError> {
-    run_with_busy_retry(|| {
+    run_with_busy_retry_n(max_retries, || {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut steps_upserted = 0usize;
         {
@@ -565,7 +566,7 @@ pub(super) fn sync_all(
         })?;
         0
     } else {
-        upsert_batches(conn, &batches, Some(now_ms))?
+        upsert_batches(conn, &batches, Some(now_ms), DEFAULT_BUSY_RETRIES)?
     };
 
     Ok(LedgerSyncReport {
@@ -580,13 +581,11 @@ pub(super) fn sync_all(
     })
 }
 
-pub(super) fn sync_all_if_stale(
-    conn: &mut Connection,
-    ledger_path: &Path,
+pub(super) fn is_full_scan_stale(
+    conn: &Connection,
     max_age_ms: i64,
-    options: &LedgerSyncOptions,
-) -> Result<Option<LedgerSyncReport>, LedgerError> {
-    let now_ms = options.now_ms.unwrap_or_else(current_epoch_ms);
+    now_ms: i64,
+) -> Result<bool, LedgerError> {
     let last_scan_ms: Option<i64> = conn
         .query_row(
             "SELECT value FROM ledger_meta WHERE key = 'last_full_scan_ms'",
@@ -596,10 +595,20 @@ pub(super) fn sync_all_if_stale(
         .optional()?
         .and_then(|s| s.parse::<i64>().ok());
 
-    if let Some(prev) = last_scan_ms
-        && now_ms >= prev
-        && (now_ms - prev) < max_age_ms
-    {
+    Ok(!matches!(
+        last_scan_ms,
+        Some(prev) if now_ms >= prev && (now_ms - prev) < max_age_ms
+    ))
+}
+
+pub(super) fn sync_all_if_stale(
+    conn: &mut Connection,
+    ledger_path: &Path,
+    max_age_ms: i64,
+    options: &LedgerSyncOptions,
+) -> Result<Option<LedgerSyncReport>, LedgerError> {
+    let now_ms = options.now_ms.unwrap_or_else(current_epoch_ms);
+    if !is_full_scan_stale(conn, max_age_ms, now_ms)? {
         return Ok(None);
     }
 
@@ -613,6 +622,7 @@ pub(super) fn sync_conversation(
     conversation_id: &str,
     child_conversation_ids: &[String],
     options: &LedgerSyncOptions,
+    max_retries: u32,
 ) -> Result<SingleSyncReport, LedgerError> {
     if conversation_id.trim().is_empty() {
         return Ok(SingleSyncReport {
@@ -647,46 +657,31 @@ pub(super) fn sync_conversation(
             continue;
         };
 
-        let existing: Option<(String, i64, LedgerSource)> = conn
-            .query_row(
-                "SELECT sig, last_synced_ms, source FROM ingested_dbs WHERE conversation_id = ?1",
-                params![cid],
-                |r| {
-                    let s: String = r.get(0)?;
-                    let ts: i64 = r.get(1)?;
-                    let src: String = r.get(2)?;
-                    Ok((s, ts, LedgerSource::from_raw(&src)))
-                },
-            )
-            .optional()?;
-
-        if !options.force
-            && let Some((prev_sig, prev_ts, prev_src)) = existing
-            && prev_sig == sig
-            && prev_src == source
-            && now_ms >= prev_ts
-            && (now_ms - prev_ts) < throttle_ms
-        {
-            continue;
-        }
-        // Also skip if signature is unchanged even past throttle window (re-parsing identical bytes is redundant).
-        if !options.force
-            && let Some((prev_sig, _, prev_src)) = conn
+        if !options.force {
+            let existing: Option<(String, LedgerSource, i64)> = conn
                 .query_row(
-                    "SELECT sig, last_synced_ms, source FROM ingested_dbs WHERE conversation_id = ?1",
+                    "SELECT sig, source, last_synced_ms FROM ingested_dbs WHERE conversation_id = ?1",
                     params![cid],
                     |r| {
                         let s: String = r.get(0)?;
-                        let ts: i64 = r.get(1)?;
-                        let src: String = r.get(2)?;
-                        Ok((s, ts, LedgerSource::from_raw(&src)))
+                        let src: String = r.get(1)?;
+                        let last_synced_ms: i64 = r.get(2)?;
+                        Ok((s, LedgerSource::from_raw(&src), last_synced_ms))
                     },
                 )
-                .optional()?
-            && prev_sig == sig
-            && prev_src == source
-        {
-            continue;
+                .optional()?;
+
+            if let Some((prev_sig, prev_src, prev_last_synced_ms)) = existing {
+                if prev_sig == sig && prev_src == source {
+                    continue;
+                }
+                if throttle_ms > 0
+                    && now_ms >= prev_last_synced_ms
+                    && (now_ms - prev_last_synced_ms) < throttle_ms
+                {
+                    continue;
+                }
+            }
         }
 
         let fb_parent = if is_child { Some(conversation_id) } else { None };
@@ -716,7 +711,7 @@ pub(super) fn sync_conversation(
     }
 
     let synced_dbs = batches.len();
-    let steps_upserted = upsert_batches(conn, &batches, None)?;
+    let steps_upserted = upsert_batches(conn, &batches, None, max_retries)?;
     Ok(SingleSyncReport {
         ok: true,
         skipped: false,
@@ -757,21 +752,96 @@ fn compute_db_cost_by_root(
     today_end_ms: i64,
     week_from_ms: i64,
     now_ms: i64,
-) -> Result<HashMap<String, RootDbCostStats>, LedgerError> {
-    let (conv_meta, steps) = load_ledger_rows(conn)?;
+) -> Result<HashMap<String, RootDbCostStats>, rusqlite::Error> {
+    let mut conv_meta: HashMap<String, ConvLineageMeta> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT conversation_id, parent_conversation_id, root_conversation_id, source
+             FROM ingested_dbs",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let cid: String = row.get(0)?;
+            if cid.is_empty() {
+                continue;
+            }
+            let src_raw: String = row.get(3)?;
+            conv_meta.insert(
+                cid,
+                ConvLineageMeta {
+                    workspace: None,
+                    branch: None,
+                    parent_conversation_id: row
+                        .get::<_, Option<String>>(1)?
+                        .filter(|s| !s.is_empty()),
+                    root_conversation_id: row
+                        .get::<_, Option<String>>(2)?
+                        .filter(|s| !s.is_empty()),
+                    source: LedgerSource::from_raw(&src_raw),
+                },
+            );
+        }
+    }
+
+    let mut per_conv: Vec<(String, RootDbCostStats)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT conversation_id,
+                    MAX(NULLIF(parent_conversation_id, '')),
+                    MAX(NULLIF(root_conversation_id, '')),
+                    SUM(CASE WHEN cost_usd >= 0.0 AND cost_usd < 1e308 THEN cost_usd ELSE 0.0 END),
+                    SUM(CASE WHEN ts_ms >= ?1 AND ts_ms <= ?2 AND cost_usd >= 0.0 AND cost_usd < 1e308 THEN cost_usd ELSE 0.0 END),
+                    SUM(CASE WHEN ts_ms >= ?3 AND ts_ms <= ?4 AND cost_usd >= 0.0 AND cost_usd < 1e308 THEN cost_usd ELSE 0.0 END)
+             FROM telemetry_steps
+             WHERE input_tokens > 0 OR cache_read_tokens > 0 OR cache_write_tokens > 0 OR output_tokens > 0 OR cost_usd > 0.0
+             GROUP BY conversation_id",
+        )?;
+        let mut rows = stmt.query(params![today_start_ms, today_end_ms, week_from_ms, now_ms])?;
+        while let Some(row) = rows.next()? {
+            let cid: String = row.get(0)?;
+            let parent_cid = row.get::<_, Option<String>>(1)?.filter(|s| !s.is_empty());
+            let root_cid = row.get::<_, Option<String>>(2)?.filter(|s| !s.is_empty());
+            let total_usd = row.get::<_, Option<f64>>(3)?.filter(|v| is_valid_amount(*v)).unwrap_or(0.0);
+            let today_usd = row.get::<_, Option<f64>>(4)?.filter(|v| is_valid_amount(*v)).unwrap_or(0.0);
+            let week_usd = row.get::<_, Option<f64>>(5)?.filter(|v| is_valid_amount(*v)).unwrap_or(0.0);
+
+            conv_meta
+                .entry(cid.clone())
+                .and_modify(|existing| {
+                    if existing.parent_conversation_id.is_none() && parent_cid.is_some() {
+                        existing.parent_conversation_id = parent_cid.clone();
+                    }
+                    if existing.root_conversation_id.is_none() && root_cid.is_some() {
+                        existing.root_conversation_id = root_cid.clone();
+                    }
+                })
+                .or_insert_with(|| ConvLineageMeta {
+                    workspace: None,
+                    branch: None,
+                    parent_conversation_id: parent_cid,
+                    root_conversation_id: root_cid,
+                    source: LedgerSource::Cli,
+                });
+
+            per_conv.push((
+                cid,
+                RootDbCostStats {
+                    today_usd,
+                    week_usd,
+                    total_usd,
+                },
+            ));
+        }
+    }
+
     let mut root_cache: HashMap<String, String> = HashMap::new();
     let mut by_root: HashMap<String, RootDbCostStats> = HashMap::new();
-
-    for step in &steps {
-        let root_id = resolve_root_conversation_id(&step.conversation_id, &conv_meta, &mut root_cache);
+    for (cid, stats) in per_conv {
+        let root_id = resolve_root_conversation_id(&cid, &conv_meta, &mut root_cache);
         let entry = by_root.entry(root_id).or_default();
-        entry.total_usd += step.cost_usd;
-        if step.ts_ms >= today_start_ms && step.ts_ms <= today_end_ms {
-            entry.today_usd += step.cost_usd;
-        }
-        if step.ts_ms >= week_from_ms && step.ts_ms <= now_ms {
-            entry.week_usd += step.cost_usd;
-        }
+        entry.total_usd += stats.total_usd;
+        entry.today_usd += stats.today_usd;
+        entry.week_usd += stats.week_usd;
     }
     Ok(by_root)
 }
@@ -779,6 +849,7 @@ fn compute_db_cost_by_root(
 pub(super) fn record_rolling_costs(
     conn: &mut Connection,
     input: &RollingCostInput<'_>,
+    max_retries: u32,
 ) -> Result<Option<RollingCostTotals>, LedgerError> {
     let now_ms = input.now_ms;
     let today_key = local_date_key(now_ms);
@@ -788,20 +859,18 @@ pub(super) fn record_rolling_costs(
         None => now_ms - SEVEN_DAY_WINDOW_MS,
     };
 
-    run_with_busy_retry(|| -> Result<Option<RollingCostTotals>, rusqlite::Error> {
+    run_with_busy_retry_n(max_retries, || -> Result<Option<RollingCostTotals>, rusqlite::Error> {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        let db_by_root = match compute_db_cost_by_root(
+        // Aggregate ledger totals inside the Immediate transaction so DB reads and cursor anchor
+        // updates observe a single atomic snapshot under concurrent sync writers.
+        let db_by_root = compute_db_cost_by_root(
             &tx,
             today_start_ms,
             today_end_ms,
             db_week_from_ms,
             now_ms,
-        ) {
-            Ok(m) => m,
-            Err(LedgerError::Sqlite(e)) => return Err(e),
-            Err(_) => HashMap::new(),
-        };
+        )?;
 
         let read_meta = |key: &str| -> Result<Option<String>, rusqlite::Error> {
             tx.query_row(

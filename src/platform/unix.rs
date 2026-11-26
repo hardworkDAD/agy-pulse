@@ -133,6 +133,28 @@ pub(super) fn write_file_0600_no_symlink(path: &Path, message: &str) {
     }
 }
 
+pub(super) fn append_file_0600_no_symlink(path: &Path, message: &str) {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = ensure_dir_0700(parent);
+    }
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return;
+    }
+    let open_res = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path);
+    if let Ok(mut file) = open_res {
+        let _ = file.write_all(message.as_bytes());
+    }
+}
+
 pub(super) fn file_unique_id(meta: &Metadata) -> u64 {
     meta.ino()
 }
@@ -170,6 +192,14 @@ pub(super) fn create_exclusive_file_0600(path: &Path, bytes: &[u8]) -> std::io::
 }
 
 pub(super) fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_0600_inner(path, bytes, true)
+}
+
+pub(super) fn write_cache_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_0600_inner(path, bytes, false)
+}
+
+fn write_atomic_0600_inner(path: &Path, bytes: &[u8], sync_disk: bool) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
@@ -193,7 +223,9 @@ pub(super) fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()
             .mode(0o600)
             .open(&tmp_path)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        if sync_disk {
+            file.sync_all()?;
+        }
         fs::rename(&tmp_path, path)?;
         Ok(())
     })();

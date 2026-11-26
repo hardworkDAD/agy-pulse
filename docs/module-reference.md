@@ -25,10 +25,10 @@
 
 - **`mod.rs`**: Narrow public facade `HostReader::read_live_pulse(&stdin, &fallback_cwd) -> IngestResult` and `HostReader::read_conversation_db(db_path) -> Option<ConversationDbRecord>` (never leaks `rusqlite::Connection` or raw Protobuf blobs).
 - **`stdin.rs`**: Parses heterogeneous host JSON (`model`, `workspace.current_dir`/`cwd`, `plan_tier`, `cycle_mode`, `context_window`, `cost`, `quota` keys `gemini-5h`/`gemini-weekly`/`anthropic-5h`/`claude-5h`/`3p-5h`/`argon*`).
-- **`transcript.rs`**: Byte-offset incremental scanning of `transcript.jsonl` (up to 64 MB, `TRANSCRIPT_CACHE_VERSION = 10`) with `transcript_full.jsonl` `truncated_fields` backfill, `CHECKPOINT` compaction detection & `inclusivePeak`/`exclusivePeak` tracking, child/swarm model speed tracking, and `429` image quota exhaustion detection.
+- **`transcript.rs`**: Byte-offset incremental scanning of `transcript.jsonl` (up to 64 MB, `TRANSCRIPT_CACHE_VERSION = 11`) with `transcript_full.jsonl` `truncated_fields` backfill, `CHECKPOINT` compaction detection & `inclusivePeak`/`exclusivePeak` tracking, child/swarm model speed tracking, and `429` image quota exhaustion detection.
 - **`sqlite_ro.rs` & `proto_wire.rs` & `db_telemetry.rs`**:
-  - Opens static host `.db` files via `?immutable=1` and active `-wal` databases by copying `.db` + `-wal` + `-shm` into an isolated `TempDir`.
-  - Decodes `gen_metadata` (`f1.f9.f10.f4` compaction ceiling, `f4.f1` `systemPromptTokens`, `f4.f2` raw input, `f4.f3` output, `f4.f5` cache read, `f1.f11` TTFT, `f1.f12` stream duration, `f20` parent/root lineage) and `executor_metadata` (`f10.f2.f5`), aggregating recent 30-DB weighted speeds and **Cascade** cost trees.
+  - Opens static host `.db` files via `?immutable=1` and active `-wal` databases by copying `.db` + `-wal` into an isolated `TempDir` (rebuilding transient WAL index in isolation without touching host files).
+  - Decodes `gen_metadata` (`f1.f9.f10.f4` compaction ceiling, `f4.f1` `systemPromptTokens`, `f4.f2` raw input, `f4.f3` output, `f4.f5` cache read, `f1.f11` TTFT, `f1.f12` stream duration, `f20` parent/root lineage) and `executor_metadata` (`f10.f2.f5`), aggregating recent 30-DB + active lineage weighted speeds and **Cascade** cost trees.
 - **`workspace.rs`**: Pure-file `.git/HEAD` & `.git` worktree pointer resolution (timeout-bounded `git` fallback only for reftable), plus offline counts of memory files, rule `.md` files, git hooks, and MCP server entries.
 
 ---
@@ -43,7 +43,7 @@
 
 ## `src/render/` — Pure In-Memory Statusline Renderer (Zero I/O)
 
-- **`mod.rs` & `layout.rs`**: Public entrypoint `render_statusline(&PulseSnapshot, &PulseConfig, &TerminalCaps, LanguageSetting) -> String`. Handles 9-step Line 1 narrow-terminal degradation, Line 2 tokens/cache/context bar, Line 3 workspace metadata, and ANSI-safe truncation.
+- **`mod.rs` & `layout.rs`**: Public entrypoint `render_statusline(&PulseSnapshot, &PulseConfig, &TerminalCaps, LanguageSetting) -> String`. Handles 9-step Line 1 narrow-terminal degradation, Line 2 tokens/cache/context bar, Line 3 workspace metadata, dedicated bottom-line dashboard URL, and ANSI-safe truncation.
 - **`quota_table.rs`**: Renders 2-column provider quota table (`Google 5h/week`, `Claude 5h/week`, optional `Argon`/extras, filtering OpenAI) or `compact` single-line summary.
 - **`context_bar.rs`**: Renders `Session Cache` (`render_model_cache_line`) and the 5-level smooth **Compaction** monitor (`render_context_monitor_line`) with 11-step narrow-width degradation.
 - **`width.rs` & `i18n.rs`**: `unicode-width` CJK/emoji display width calculation, ANSI-preserving truncation, control-sequence sanitization, theme palettes, and `en`/`zh` copy.

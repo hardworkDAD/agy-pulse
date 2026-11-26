@@ -359,6 +359,16 @@ pub fn write_error_log_safely(message: &str) {
     windows::write_file_0600_no_symlink(&log_path, message);
 }
 
+/// Append `message` to `path` with `0600` permissions (Unix) without following symlinks.
+/// Creates missing parent directories with `0700` permissions (Unix) and skips writing
+/// if `path` is already a symlink.
+pub fn append_file_0600_no_symlink(path: &Path, message: &str) {
+    #[cfg(unix)]
+    unix::append_file_0600_no_symlink(path, message);
+    #[cfg(windows)]
+    windows::append_file_0600_no_symlink(path, message);
+}
+
 /// Return a platform-specific unique file identifier (inode on Unix, 0 fallback on Windows).
 pub fn file_unique_id(meta: &std::fs::Metadata) -> u64 {
     #[cfg(unix)]
@@ -390,7 +400,7 @@ pub fn touch_file_mtime(path: &Path) -> io::Result<()> {
     file.set_modified(std::time::SystemTime::now())
 }
 
-/// Atomically write a cache file with restricted permissions via sibling temporary file + rename.
+/// Atomically write a durable file with restricted permissions via sibling temporary file + `fsync` + rename.
 pub fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -399,6 +409,18 @@ pub fn write_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         windows::write_atomic_0600(path, bytes)
+    }
+}
+
+/// Atomically write an ephemeral cache file with restricted permissions without calling `fsync`.
+pub fn write_cache_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::write_cache_atomic_0600(path, bytes)
+    }
+    #[cfg(windows)]
+    {
+        windows::write_cache_atomic_0600(path, bytes)
     }
 }
 

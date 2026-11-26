@@ -228,7 +228,7 @@ fn read_status_record() -> Option<UpdateStatusRecord> {
 fn write_status_record(record: &UpdateStatusRecord) {
     let path = platform::resolve_antigravity_path(UPDATE_STATUS_FILENAME);
     if let Ok(bytes) = serde_json::to_vec_pretty(record) {
-        let _ = platform::write_atomic_0600(&path, &bytes);
+        let _ = platform::write_cache_atomic_0600(&path, &bytes);
     }
 }
 

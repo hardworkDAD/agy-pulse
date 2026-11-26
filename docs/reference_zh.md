@@ -254,7 +254,7 @@ bash uninstall.sh        # macOS / Linux
 | `display.showCurrentDir` | `boolean` | `true` | 第 1 行 | 是否显示当前工作区目录名 |
 | `display.showCycleMode` | `boolean` | `true` | 第 1 行 | 是否显示 `agy` 交互模式徽章（`auto`、`accept-edits`、`plan`、`best-of-n`） |
 | `display.showSpeed` | `boolean` | `true` | 第 1 行 | 是否显示主模型流式加权均速与 TTFT，及最多 3 个活跃子模型速率 |
-| `display.showDashboardUrl` | `boolean` | `true` | 第 1 行 | 是否在第 1 行显示本地网页看板网址（如 `http://127.0.0.1:3789`），并在未运行时后台静默自动拉起与活跃续期 |
+| `display.showDashboardUrl` | `boolean` | `true` | 最末行 | 是否在状态栏最底部单开一行显示本地网页看板网址（如 `http://127.0.0.1:3789`），并在未运行时后台静默自动拉起与活跃续期 |
 | `display.dashboardPort` | `number` | `3789` | 网页看板 | 状态栏自动拉起网页看板时的首选本机端口（优先级低于 `AGY_PULSE_DASHBOARD_PORT`） |
 | `display.dashboardIdleTimeoutSec` | `number` | `1800` | 网页看板 | 状态栏自动拉起网页看板时的空闲自动退出秒数（默认 `1800` 秒即 30 分钟；设为 `0` 常驻不自动退出；优先级低于 `AGY_PULSE_DASHBOARD_IDLE_SEC`） |
 | `display.modelSpeedExpireMinutes` | `number` | `5` | 第 1 行 | 超过 N 分钟未调用自动隐藏速度与首字 |

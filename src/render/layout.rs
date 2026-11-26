@@ -449,7 +449,6 @@ pub fn render_statusline(
         include_child_ttft: bool,
         include_main_ttft: bool,
         include_child_speed: bool,
-        include_dashboard_url: bool,
         include_update: bool,
         include_branch: bool,
         include_dir: bool,
@@ -509,9 +508,6 @@ pub fn render_statusline(
                 }
             }
         }
-        if opts.include_dashboard_url && !dashboard_url_seg.is_empty() {
-            parts.push(dashboard_url_seg.clone());
-        }
         if opts.include_update && !update_seg.is_empty() {
             parts.push(update_seg.clone());
         }
@@ -523,7 +519,6 @@ pub fn render_statusline(
         include_child_ttft: true,
         include_main_ttft: true,
         include_child_speed: true,
-        include_dashboard_url: true,
         include_update: true,
         include_branch: true,
         include_dir: true,
@@ -535,7 +530,7 @@ pub fn render_statusline(
         && ansi_display_width(&line1) > cols
     {
         let mut step = 0u8;
-        while step <= 9 {
+        while step <= 8 {
             let applied = match step {
                 0 if display_child_speeds.len() > 2 => {
                     line1_opts.child_limit = 2;
@@ -562,18 +557,14 @@ pub fn render_statusline(
                     true
                 }
                 6 => {
-                    line1_opts.include_dashboard_url = false;
-                    true
-                }
-                7 => {
                     line1_opts.include_branch = false;
                     true
                 }
-                8 => {
+                7 => {
                     line1_opts.include_dir = false;
                     true
                 }
-                9 => {
+                8 => {
                     line1_opts.include_user = false;
                     true
                 }
@@ -871,6 +862,12 @@ pub fn render_statusline(
         if !monitor_line.is_empty() {
             lines.push(monitor_line);
         }
+    }
+
+    if !dashboard_url_seg.is_empty()
+        && explicit_cols.is_none_or(|cols| ansi_display_width(&dashboard_url_seg) <= cols)
+    {
+        lines.push(dashboard_url_seg);
     }
 
     lines.join("\n")

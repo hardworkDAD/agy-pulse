@@ -42,6 +42,7 @@ pub enum LedgerError {
 pub struct LedgerStore {
     conn: Connection,
     ledger_path: PathBuf,
+    max_retries: u32,
 }
 
 impl LedgerStore {
@@ -56,18 +57,40 @@ impl LedgerStore {
         Self::open_at(&path)
     }
 
+    /// Open the default ledger with short statusline-safe lock timeouts so hot-path rendering
+    /// never blocks past the host CLI's statusline deadline.
+    pub fn open_default_for_statusline() -> Result<Self, LedgerError> {
+        let path = Self::default_ledger_path();
+        let conn = schema::open_ledger_connection_with_options(
+            &path,
+            schema::STATUSLINE_BUSY_TIMEOUT_MS,
+            schema::STATUSLINE_BUSY_RETRIES,
+        )?;
+        Ok(Self {
+            conn,
+            ledger_path: path,
+            max_retries: schema::STATUSLINE_BUSY_RETRIES,
+        })
+    }
+
     /// Open (or create with `0600` permissions) the unified SQLite WAL ledger at `ledger_path`.
     pub fn open_at(ledger_path: &Path) -> Result<Self, LedgerError> {
         let conn = schema::open_ledger_connection(ledger_path)?;
         Ok(Self {
             conn,
             ledger_path: ledger_path.to_path_buf(),
+            max_retries: schema::DEFAULT_BUSY_RETRIES,
         })
     }
 
     /// Path to the opened `agy-pulse-ledger.sqlite` file.
     pub fn ledger_path(&self) -> &Path {
         &self.ledger_path
+    }
+
+    /// Return `true` when `last_full_scan_ms` is absent or older than `max_age_ms`.
+    pub fn is_full_scan_stale(&self, max_age_ms: i64, now_ms: i64) -> Result<bool, LedgerError> {
+        sync::is_full_scan_stale(&self.conn, max_age_ms, now_ms)
     }
 
     /// Incrementally scan all CLI and IDE `conversations/*.db` roots and archive new/changed rows.
@@ -97,6 +120,7 @@ impl LedgerStore {
             conversation_id,
             child_conversation_ids,
             options,
+            self.max_retries,
         )
     }
 
@@ -105,7 +129,7 @@ impl LedgerStore {
         &mut self,
         input: &RollingCostInput<'_>,
     ) -> Result<Option<RollingCostTotals>, LedgerError> {
-        sync::record_rolling_costs(&mut self.conn, input)
+        sync::record_rolling_costs(&mut self.conn, input, self.max_retries)
     }
 
     /// Query multi-dimensional overview (summary KPIs, timeseries, models, sources, cascade trees).

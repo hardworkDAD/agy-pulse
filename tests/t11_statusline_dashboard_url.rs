@@ -25,7 +25,9 @@ use agy_pulse::dashboard::{
     release_dashboard_spawn_lock, resolve_dashboard_port, resolve_dashboard_url_for_statusline,
     resolve_statusline_idle_timeout_sec, touch_running_dashboard, write_dashboard_state,
 };
-use agy_pulse::domain::{HostIdentity, ModelIdentity, PulseSnapshot, WorkspaceInfo};
+use agy_pulse::domain::{
+    ChildModelSpeed, HostIdentity, ModelIdentity, PulseSnapshot, WorkspaceInfo,
+};
 use agy_pulse::platform::{self, TerminalCaps};
 use agy_pulse::render::{render_statusline, strip_ansi};
 
@@ -328,7 +330,7 @@ fn t11_loopback_url_validation_and_line1_rendering() {
         ..Default::default()
     };
 
-    // 1. Default showDashboardUrl=true places URL after speed and before update badge
+    // 1. Default showDashboardUrl=true renders URL on its own dedicated bottom line (not on Line 1)
     let wide = strip_ansi(&render_statusline(
         &base_snapshot,
         &default_cfg,
@@ -338,43 +340,99 @@ fn t11_loopback_url_validation_and_line1_rendering() {
         },
         LanguageSetting::En,
     ));
+    let wide_lines: Vec<&str> = wide.lines().collect();
     assert_eq!(
-        wide,
-        "ws │ Claude Sonnet 4.6 │ Pro │ auto │ out: 42.0 tok/s (ttft 400ms) │ http://127.0.0.1:3789 │ ⟳ v2.1.0"
+        wide_lines,
+        vec![
+            "ws │ Claude Sonnet 4.6 │ Pro │ auto │ out: 42.0 tok/s (ttft 400ms) │ ⟳ v2.1.0",
+            "http://127.0.0.1:3789",
+        ]
     );
 
-    // 2. 80 cols drops TTFT & update badge first while preserving full URL
-    let cols_80 = strip_ansi(&render_statusline(
+    // 1b. With context monitor enabled and active child speed, URL sits on the very bottom line
+    //     below the context monitor and leaves Line 1 room for child TPS.
+    let mut rich_snap = base_snapshot.clone();
+    rich_snap.observed_at_ms = 1_800_000_000_000;
+    rich_snap.workspace.current_dir = "collision_detect_ws-architecture-redesign".to_string();
+    rich_snap.child_model_speeds = vec![ChildModelSpeed {
+        model: "Hydro".to_string(),
+        speed_tok_s: 165.4,
+        ttft_sec: Some(1.8),
+        turns_ago: 0,
+        last_active_ms: rich_snap.observed_at_ms - 5_000,
+    }];
+    let monitor_cfg = PulseConfig {
+        display: DisplayConfig {
+            show_model: Some(false),
+            show_context_monitor: Some(true),
+            show_model_cache: Some(false),
+            ..DisplayConfig::builtin_defaults()
+        },
+        language: LanguageSetting::En,
+        ..Default::default()
+    };
+    let rich_out = strip_ansi(&render_statusline(
+        &rich_snap,
+        &monitor_cfg,
+        &TerminalCaps {
+            unicode: true,
+            columns: Some(135),
+        },
+        LanguageSetting::En,
+    ));
+    let rich_lines: Vec<&str> = rich_out.lines().collect();
+    assert!(
+        rich_lines.len() >= 3,
+        "expected line 1 + context monitor + bottom URL line, got: {rich_out}"
+    );
+    assert!(
+        rich_lines[0].contains("Hydro: 165.4 tok/s"),
+        "Line 1 must keep subagent TPS now that URL is on its own bottom line: {}",
+        rich_lines[0]
+    );
+    assert!(
+        !rich_lines[0].contains("http://127.0.0.1:3789"),
+        "URL must not appear on Line 1: {}",
+        rich_lines[0]
+    );
+    assert_eq!(
+        *rich_lines.last().unwrap(),
+        "http://127.0.0.1:3789",
+        "dashboard URL must be on the very last line:\n{rich_out}"
+    );
+
+    // 2. 80 cols & 45 cols keep the full URL intact on its own dedicated bottom line
+    for cols in [80u16, 45u16] {
+        let rendered = strip_ansi(&render_statusline(
+            &base_snapshot,
+            &default_cfg,
+            &TerminalCaps {
+                unicode: true,
+                columns: Some(cols),
+            },
+            LanguageSetting::En,
+        ));
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(
+            lines.last().copied(),
+            Some("http://127.0.0.1:3789"),
+            "expected full URL preserved on bottom line at {cols} cols, got: {rendered}"
+        );
+    }
+
+    // 3. Very narrow terminal (< URL width, e.g. 18 cols) hides URL atomically without mid-URL truncation
+    let cols_18 = strip_ansi(&render_statusline(
         &base_snapshot,
         &default_cfg,
         &TerminalCaps {
             unicode: true,
-            columns: Some(80),
+            columns: Some(18),
         },
         LanguageSetting::En,
     ));
     assert!(
-        cols_80.contains("http://127.0.0.1:3789"),
-        "expected full URL preserved at 80 cols, got: {cols_80}"
-    );
-    assert!(
-        !cols_80.contains("ttft"),
-        "expected TTFT dropped before URL at 80 cols, got: {cols_80}"
-    );
-
-    // 3. 45 cols hides URL as an atomic unit without truncating mid-URL
-    let cols_45 = strip_ansi(&render_statusline(
-        &base_snapshot,
-        &default_cfg,
-        &TerminalCaps {
-            unicode: true,
-            columns: Some(45),
-        },
-        LanguageSetting::En,
-    ));
-    assert!(
-        !cols_45.contains("http://") && !cols_45.contains("127"),
-        "expected entire URL omitted at 45 cols, got: {cols_45}"
+        !cols_18.contains("http://") && !cols_18.contains("127"),
+        "expected entire URL omitted at 18 cols, got: {cols_18}"
     );
 
     // 4. showDashboardUrl=false hides URL even when snapshot carries one

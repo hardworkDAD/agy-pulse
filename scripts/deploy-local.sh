@@ -30,6 +30,23 @@ for arg in "$@"; do
   esac
 done
 
+if ! command -v cargo >/dev/null 2>&1; then
+  PATH="${PATH:-}"
+  CARGO_ENV="${CARGO_HOME:-$HOME/.cargo}/env"
+  CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
+  if [ -f "$CARGO_ENV" ]; then
+    # shellcheck disable=SC1090
+    . "$CARGO_ENV"
+  fi
+  if ! command -v cargo >/dev/null 2>&1 && [ -x "$CARGO_BIN_DIR/cargo" ]; then
+    export PATH="$CARGO_BIN_DIR:$PATH"
+  fi
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "agy-pulse: cargo not found in PATH or ${CARGO_HOME:-$HOME/.cargo}/bin. Install Rust (https://rustup.rs) or run 'source \"\$HOME/.cargo/env\"'." >&2
+  exit 1
+fi
+
 echo "==> Building release binaries (cargo ${CARGO_ARGS[*]})..."
 cargo "${CARGO_ARGS[@]}" --manifest-path "$REPO_ROOT/Cargo.toml"
 

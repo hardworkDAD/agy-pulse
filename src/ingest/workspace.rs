@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -17,10 +17,23 @@ pub(super) fn resolve_current_dir_name(cwd: &Path) -> String {
         .unwrap_or_else(|| cwd.to_string_lossy().into_owned())
 }
 
+fn remaining_git_timeout(deadline: Option<Instant>) -> Option<Duration> {
+    match deadline {
+        Some(d) => d
+            .checked_duration_since(Instant::now())
+            .filter(|rem| !rem.is_zero())
+            .map(|rem| rem.min(Duration::from_millis(300))),
+        None => Some(Duration::from_millis(300)),
+    }
+}
+
 /// Resolve the current Git branch by reading `.git/HEAD` directly first (supporting both
 /// normal repositories and worktree `.git` pointer files), falling back to `git rev-parse`
 /// with a tight timeout only for complex repository formats (e.g., reftable).
-pub(super) fn resolve_git_branch(cwd: &Path) -> Option<String> {
+pub(super) fn resolve_git_branch(cwd: &Path, deadline: Option<Instant>) -> Option<String> {
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return None;
+    }
     let git_dir = locate_git_dir(cwd)?;
 
     if !git_dir.join("reftable").exists()
@@ -29,11 +42,12 @@ pub(super) fn resolve_git_branch(cwd: &Path) -> Option<String> {
         return Some(branch);
     }
 
+    let timeout = remaining_git_timeout(deadline)?;
     platform::run_command_with_timeout(
         "git",
         &["rev-parse", "--abbrev-ref", "HEAD"],
         cwd,
-        Duration::from_millis(300),
+        timeout,
     )
 }
 
@@ -104,11 +118,35 @@ fn read_head_branch(git_dir: &Path) -> Option<String> {
 }
 
 /// Pure offline scan of workspace memory files, rule documents, git hooks, and configured MCP servers.
-pub(super) fn scan_workspace_metadata(cwd: &Path) -> WorkspaceMetadata {
+pub(super) fn scan_workspace_metadata(cwd: &Path, deadline: Option<Instant>) -> WorkspaceMetadata {
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return WorkspaceMetadata::default();
+    }
     let memory_file = detect_memory_file(cwd);
-    let rules_count = count_rule_documents(cwd);
-    let hooks_count = count_git_hooks(cwd);
-    let mcp_count = count_mcp_servers();
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return WorkspaceMetadata {
+            memory_file,
+            ..Default::default()
+        };
+    }
+    let rules_count = count_rule_documents(cwd, deadline);
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return WorkspaceMetadata {
+            memory_file,
+            rules_count,
+            ..Default::default()
+        };
+    }
+    let hooks_count = count_git_hooks(cwd, deadline);
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return WorkspaceMetadata {
+            memory_file,
+            rules_count,
+            hooks_count,
+            ..Default::default()
+        };
+    }
+    let mcp_count = count_mcp_servers(deadline);
 
     WorkspaceMetadata {
         memory_file,
@@ -182,7 +220,10 @@ fn count_md_files_in_dir(dir: &Path) -> u64 {
     count
 }
 
-fn count_rule_documents(cwd: &Path) -> u64 {
+fn count_rule_documents(cwd: &Path, deadline: Option<Instant>) -> u64 {
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return 0;
+    }
     let mut dirs: Vec<PathBuf> = vec![
         cwd.join(".claude").join("rules"),
         cwd.join(".cursor").join("rules"),
@@ -197,6 +238,9 @@ fn count_rule_documents(cwd: &Path) -> u64 {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut total = 0u64;
     for dir in dirs {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
         if !dir.is_dir() {
             continue;
         }
@@ -208,17 +252,36 @@ fn count_rule_documents(cwd: &Path) -> u64 {
     total
 }
 
-fn count_git_hooks(cwd: &Path) -> u64 {
+fn resolve_common_git_dir(git_dir: &Path) -> Option<PathBuf> {
+    let raw = fs::read_to_string(git_dir.join("commondir")).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(trimmed);
+    Some(if p.is_absolute() { p } else { git_dir.join(p) })
+}
+
+fn count_git_hooks(cwd: &Path, deadline: Option<Instant>) -> u64 {
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return 0;
+    }
     let Some(git_dir) = locate_git_dir(cwd) else {
         return 0;
     };
     let mut hooks_dir = git_dir.join("hooks");
     if !hooks_dir.is_dir()
+        && let Some(common) = resolve_common_git_dir(&git_dir)
+    {
+        hooks_dir = common.join("hooks");
+    }
+    if !hooks_dir.is_dir()
+        && let Some(timeout) = remaining_git_timeout(deadline)
         && let Some(raw_path) = platform::run_command_with_timeout(
             "git",
             &["rev-parse", "--git-path", "hooks"],
             cwd,
-            Duration::from_millis(300),
+            timeout,
         )
     {
         let p = PathBuf::from(raw_path);
@@ -255,7 +318,10 @@ fn count_mcp_entries_in_file(path: &Path) -> u64 {
     mcps.as_object().map(|m| m.len() as u64).unwrap_or(0)
 }
 
-fn count_mcp_servers() -> u64 {
+fn count_mcp_servers(deadline: Option<Instant>) -> u64 {
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return 0;
+    }
     let mut candidates = vec![
         platform::resolve_antigravity_path("settings.json"),
         platform::resolve_antigravity_path("mcp_config.json"),
@@ -267,6 +333,9 @@ fn count_mcp_servers() -> u64 {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut total = 0u64;
     for path in candidates {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
         if !path.is_file() {
             continue;
         }

@@ -252,7 +252,7 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 | `display.showCurrentDir` | `boolean` | `true` | Line 1 | Current working directory basename |
 | `display.showCycleMode` | `boolean` | `true` | Line 1 | Interactive cycle mode badge (`auto`, `accept-edits`, `plan`, `best-of-n`) |
 | `display.showSpeed` | `boolean` | `true` | Line 1 | Main weighted output `tok/s` + TTFT and up to 3 active child model speeds |
-| `display.showDashboardUrl` | `boolean` | `true` | Line 1 | Show local Web Dashboard URL (`http://127.0.0.1:3789`) on Line 1, silently auto-starting and keeping the background dashboard alive while `agy` is active |
+| `display.showDashboardUrl` | `boolean` | `true` | Bottom line | Show local Web Dashboard URL (`http://127.0.0.1:3789`) on its own dedicated bottom line, silently auto-starting and keeping the background dashboard alive while `agy` is active |
 | `display.dashboardPort` | `number` | `3789` | Dashboard | Preferred loopback port when status line auto-starts the background dashboard (overridden by `AGY_PULSE_DASHBOARD_PORT`) |
 | `display.dashboardIdleTimeoutSec` | `number` | `1800` | Dashboard | Idle auto-exit timeout in seconds for the status-line auto-started dashboard (`0` keeps it running without idle exit; overridden by `AGY_PULSE_DASHBOARD_IDLE_SEC`) |
 | `display.modelSpeedExpireMinutes` | `number` | `5` | Line 1 | Hide main/child model speed & TTFT after N idle minutes |

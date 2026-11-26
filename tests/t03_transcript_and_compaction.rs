@@ -1198,3 +1198,541 @@ fn t03_pure_domain_and_render_turn_cache_child_speeds_compaction_and_metadata() 
     );
     assert!(plain.contains("压缩×1(峰420K)"), "missing zh compaction peak:\n{plain}");
 }
+
+#[test]
+fn t03_subagent_tool_calls_double_quoted_args_and_custom_expiry_override() {
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showSpeed": true,
+                "showContextMonitor": false,
+                "showModelCache": false,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let now = now_epoch_ms();
+    let brain_dir = env.data_dir.join("brain");
+    let main_id = "12120000-0000-0000-0000-000000000001";
+    let sub_hydro = "12120000-0000-0000-0000-000000000002";
+    let swarm_argon = "12120000-0000-0000-0000-000000000003";
+
+    let log_path = |id: &str| {
+        brain_dir
+            .join(id)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl")
+    };
+    for id in [main_id, sub_hydro, swarm_argon] {
+        fs::create_dir_all(log_path(id).parent().unwrap()).unwrap();
+    }
+
+    // Child subagent whose ONLY completed turn has tool_calls (followed by GENERIC tool start)
+    // Output: 400 tokens over 2s -> 200.0 tok/s (40s ago, earlier than turn 32 USER_INPUT so
+    // double-quoted send_message below is what refreshes its active turn to 32)
+    fs::write(
+        log_path(sub_hydro),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "created_at": epoch_ms_to_iso8601(now - 42_000),
+                "model": "gemini-4-hydrogen-high",
+                "output_tokens": 400,
+                "tool_calls": [{ "name": "read_file", "args": { "Path": "\"/tmp/demo\"" } }]
+            }),
+            serde_json::json!({
+                "step_index": 2,
+                "type": "GENERIC",
+                "created_at": epoch_ms_to_iso8601(now - 40_000)
+            })
+        ),
+    )
+    .unwrap();
+
+    // Swarm worker (10 minutes old -> hidden under 5m default, visible when modelSpeedExpireMinutes=30)
+    fs::write(
+        log_path(swarm_argon),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "created_at": epoch_ms_to_iso8601(now - 602_000),
+                "model": "gemini-4-argon-high",
+                "output_tokens": 300,
+                "tool_calls": [{ "name": "run_command", "args": { "CommandLine": "\"ls\"" } }]
+            }),
+            serde_json::json!({
+                "step_index": 2,
+                "type": "GENERIC",
+                "created_at": epoch_ms_to_iso8601(now - 600_000)
+            })
+        ),
+    )
+    .unwrap();
+
+    // Main transcript with real Antigravity double-JSON-quoted args ("\"inherit\"", "\"<uuid>\"")
+    // + 32 USER_INPUT turns + double-quoted send_message refreshing sub_hydro at turn 32
+    // + SYSTEM_MESSAGE sender=<swarm-name> refreshing swarm_argon's turn
+    let mut main_lines = vec![
+        serde_json::json!({
+            "step_index": 1,
+            "type": "USER_INPUT",
+            "created_at": epoch_ms_to_iso8601(now - 700_000)
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 2,
+            "type": "PLANNER_RESPONSE",
+            "created_at": epoch_ms_to_iso8601(now - 695_000),
+            "tool_calls": [{
+                "name": "invoke_subagent",
+                "args": {
+                    "Model": "\"inherit\"",
+                    "Role": "\"Codebase Researcher\"",
+                    "TypeName": "\"research\""
+                }
+            }]
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 3,
+            "type": "GENERIC",
+            "created_at": epoch_ms_to_iso8601(now - 690_000),
+            "content": serde_json::json!({ "conversationId": sub_hydro }).to_string()
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 4,
+            "type": "GENERIC",
+            "created_at": epoch_ms_to_iso8601(now - 650_000),
+            "content": serde_json::json!({
+                "status": "added",
+                "conversation_id": swarm_argon,
+                "name": "worker-argon",
+                "model_display_name": "Gemini 4 Argon (High)"
+            })
+            .to_string()
+        })
+        .to_string(),
+    ];
+
+    let mut step = 5u64;
+    for t in 2..=32 {
+        main_lines.push(
+            serde_json::json!({
+                "step_index": step,
+                "type": "USER_INPUT",
+                "created_at": epoch_ms_to_iso8601(now - 21_600 + t * 50)
+            })
+            .to_string(),
+        );
+        step += 1;
+    }
+    // Refresh sub_hydro with double-quoted Recipient and swarm_argon via roster name sender
+    main_lines.push(
+        serde_json::json!({
+            "step_index": step,
+            "type": "PLANNER_RESPONSE",
+            "created_at": epoch_ms_to_iso8601(now - 15_000),
+            "tool_calls": [{
+                "name": "send_message",
+                "args": { "Recipient": format!("\"{sub_hydro}\"") }
+            }]
+        })
+        .to_string(),
+    );
+    step += 1;
+    main_lines.push(
+        serde_json::json!({
+            "step_index": step,
+            "type": "SYSTEM_MESSAGE",
+            "created_at": epoch_ms_to_iso8601(now - 600_000),
+            "content": "[Message] sender=worker-argon done"
+        })
+        .to_string(),
+    );
+    fs::write(log_path(main_id), format!("{}\n", main_lines.join("\n"))).unwrap();
+
+    let payload = serde_json::json!({
+        "conversation_id": main_id,
+        "transcript_path": log_path(main_id).to_string_lossy(),
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" }
+    })
+    .to_string();
+
+    // Under default 5-minute expiry: Hydro (tool-calling turn + refreshed via double-quoted send_message)
+    // is shown, Argon (10 min old) is hidden, and bogus "inheri" is never emitted.
+    let (code1, out1, err1) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload,
+        &[("COLUMNS", "180"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code1, 0, "stderr: {err1}");
+    let line1_default = strip_ansi(&out1).lines().next().unwrap_or("").to_string();
+    assert!(
+        line1_default.contains("Hydro: 200.0 tok/s"),
+        "tool-calling subagent Hydro must render 200.0 tok/s:\n{line1_default}"
+    );
+    assert!(
+        !line1_default.contains("inheri"),
+        "inherit model hint must not leak bogus label:\n{line1_default}"
+    );
+    assert!(
+        !line1_default.contains("Argon:"),
+        "10-minute-old Argon must stay hidden under default 5-minute expiry:\n{line1_default}"
+    );
+
+    // With custom modelSpeedExpireMinutes=30: 10-minute-old Argon now displays (not prematurely pruned in transcript.rs)
+    fs::write(
+        env.workspace_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "display": { "modelSpeedExpireMinutes": 30 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code2, out2, err2) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload,
+        &[("COLUMNS", "180"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code2, 0, "stderr: {err2}");
+    let line1_custom = strip_ansi(&out2).lines().next().unwrap_or("").to_string();
+    assert!(
+        line1_custom.contains("Hydro: 200.0 tok/s"),
+        "Hydro must remain visible under custom expiry:\n{line1_custom}"
+    );
+    assert!(
+        line1_custom.contains("Argon: 150.0 tok/s"),
+        "10-minute-old Argon must appear when modelSpeedExpireMinutes=30:\n{line1_custom}"
+    );
+}
+
+#[test]
+fn t03_manage_subagents_double_quoted_kill_list_marks_subagents_killed() {
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showContextMonitor": false,
+                "showModelCache": false,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let now = now_epoch_ms();
+    let main_id = "33330000-0000-0000-0000-000000000001";
+    let child_1 = "33330000-0000-0000-0000-000000000002";
+    let child_2 = "33330000-0000-0000-0000-000000000003";
+    let child_3 = "33330000-0000-0000-0000-000000000004";
+
+    let main_logs = env
+        .data_dir
+        .join("brain")
+        .join(main_id)
+        .join(".system_generated")
+        .join("logs");
+    fs::create_dir_all(&main_logs).unwrap();
+    let transcript_path = main_logs.join("transcript.jsonl");
+
+    let double_quoted_ids = format!("\"[\\\"{child_1}\\\", \\\"{child_2}\\\"]\"");
+    let lines = [
+        serde_json::json!({
+            "step_index": 1,
+            "type": "USER_INPUT",
+            "created_at": epoch_ms_to_iso8601(now - 30_000)
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 2,
+            "type": "PLANNER_RESPONSE",
+            "created_at": epoch_ms_to_iso8601(now - 25_000),
+            "tool_calls": [
+                { "name": "invoke_subagent", "args": { "Model": "\"flash\"", "Role": "\"sub-1\"" } },
+                { "name": "invoke_subagent", "args": { "Model": "\"argon\"", "Role": "\"sub-2\"" } },
+                { "name": "invoke_subagent", "args": { "Model": "\"neon\"", "Role": "\"sub-3\"" } }
+            ]
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 3,
+            "type": "GENERIC",
+            "created_at": epoch_ms_to_iso8601(now - 24_000),
+            "content": serde_json::json!({ "conversationId": child_1 }).to_string()
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 4,
+            "type": "GENERIC",
+            "created_at": epoch_ms_to_iso8601(now - 23_000),
+            "content": serde_json::json!({ "conversationId": child_2 }).to_string()
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 5,
+            "type": "GENERIC",
+            "created_at": epoch_ms_to_iso8601(now - 22_000),
+            "content": serde_json::json!({ "conversationId": child_3 }).to_string()
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 6,
+            "type": "PLANNER_RESPONSE",
+            "created_at": epoch_ms_to_iso8601(now - 10_000),
+            "tool_calls": [{
+                "name": "manage_subagents",
+                "args": {
+                    "Action": "\"kill\"",
+                    "ConversationIds": double_quoted_ids
+                }
+            }]
+        })
+        .to_string(),
+    ];
+    fs::write(&transcript_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let payload = serde_json::json!({
+        "conversation_id": main_id,
+        "transcript_path": transcript_path.to_string_lossy(),
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" }
+    })
+    .to_string();
+
+    let (code, _, err) = env.run_stdin(&agy_pulse_bin(), &payload, &[("COLUMNS", "120")]);
+    assert_eq!(code, 0, "stderr: {err}");
+
+    let cache_dir = env.data_dir.join("transcript-cache");
+    let cache_files: Vec<_> = fs::read_dir(&cache_dir)
+        .expect("transcript-cache dir must exist")
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    assert_eq!(cache_files.len(), 1);
+    let cached_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(cache_files[0].path()).unwrap()).unwrap();
+    let agents = &cached_json["state"]["childAgents"];
+    assert_eq!(agents[child_1]["killed"].as_bool(), Some(true));
+    assert_eq!(agents[child_1]["active"].as_bool(), Some(false));
+    assert_eq!(agents[child_2]["killed"].as_bool(), Some(true));
+    assert_eq!(agents[child_2]["active"].as_bool(), Some(false));
+    assert_eq!(agents[child_3]["killed"].as_bool(), Some(false));
+    assert_eq!(agents[child_3]["active"].as_bool(), Some(true));
+}
+
+#[test]
+fn t03_streaming_delta_over_8mb_two_pass_and_backfills_truncated_fields() {
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showModel": true,
+                "showContextMonitor": true,
+                "showModelCache": true,
+                "showTokenBar": true,
+                "showContextBar": true,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let now = now_epoch_ms();
+    let main_id = "44440000-0000-0000-0000-000000000001";
+    let main_logs = env
+        .data_dir
+        .join("brain")
+        .join(main_id)
+        .join(".system_generated")
+        .join("logs");
+    fs::create_dir_all(&main_logs).unwrap();
+    let transcript_path = main_logs.join("transcript.jsonl");
+    let full_path = main_logs.join("transcript_full.jsonl");
+
+    // Build > 8MB transcript with a mid-stream PLANNER_RESPONSE, a truncated ERROR entry, and a final PLANNER_RESPONSE.
+    {
+        let mut f = std::io::BufWriter::new(fs::File::create(&transcript_path).unwrap());
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "step_index": 1,
+                "type": "USER_INPUT",
+                "created_at": epoch_ms_to_iso8601(now - 30_000)
+            })
+        )
+        .unwrap();
+
+        let pad_payload = "x".repeat(160);
+        // ~58,000 * ~215 bytes > 12MB (> 8MB STREAMING_DELTA_THRESHOLD_BYTES)
+        for i in 2..=58_000u64 {
+            if i == 25_000 {
+                writeln!(
+                    f,
+                    "{}",
+                    serde_json::json!({
+                        "step_index": i,
+                        "type": "PLANNER_RESPONSE",
+                        "created_at": epoch_ms_to_iso8601(now - 20_000),
+                        "model": "gemini-4-carbon-high",
+                        "context_window": {
+                            "context_window_size": 500000,
+                            "current_usage": {
+                                "input_tokens": 10000,
+                                "output_tokens": 120,
+                                "cache_read_input_tokens": 4000,
+                                "cache_creation_input_tokens": 0
+                            }
+                        }
+                    })
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    f,
+                    "{{\"step_index\":{i},\"type\":\"GENERIC\",\"pad\":\"{pad_payload}\"}}"
+                )
+                .unwrap();
+            }
+        }
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "step_index": 58_001,
+                "status": "ERROR",
+                "created_at": epoch_ms_to_iso8601(now - 10_000),
+                "content": "...truncated...",
+                "truncated_fields": ["content"]
+            })
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "step_index": 58_002,
+                "type": "PLANNER_RESPONSE",
+                "created_at": epoch_ms_to_iso8601(now - 5_000),
+                "model": "gemini-4-carbon-high",
+                "context_window": {
+                    "context_window_size": 500000,
+                    "current_usage": {
+                        "input_tokens": 10000,
+                        "output_tokens": 80,
+                        "cache_read_input_tokens": 6000,
+                        "cache_creation_input_tokens": 0
+                    }
+                }
+            })
+        )
+        .unwrap();
+        f.flush().unwrap();
+    }
+
+    let file_size_1 = fs::metadata(&transcript_path).unwrap().len();
+    assert!(
+        file_size_1 > 8 * 1024 * 1024,
+        "test fixture must exceed 8MB threshold, got {file_size_1}"
+    );
+
+    let future_reset = epoch_ms_to_iso8601(now + 2 * 3_600_000);
+    fs::write(
+        &full_path,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "step_index": 58_001,
+                "status": "ERROR",
+                "created_at": epoch_ms_to_iso8601(now - 10_000),
+                "content": "HTTP 429 RESOURCE_EXHAUSTED",
+                "error": {
+                    "code": 429,
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [{ "quotaResetTimeStamp": future_reset }]
+                }
+            })
+        ),
+    )
+    .unwrap();
+
+    let stdin_payload = serde_json::json!({
+        "conversation_id": main_id,
+        "transcript_path": transcript_path.to_string_lossy(),
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" }
+    })
+    .to_string();
+
+    let (code1, out1, err1) = env.run_stdin(&agypl_bin(), &stdin_payload, &[("COLUMNS", "140")]);
+    assert_eq!(code1, 0, "stderr: {err1}");
+    let plain1 = strip_ansi(&out1);
+    assert!(plain1.contains("Out 200"), "streaming two-pass must sum Out 200:\n{plain1}");
+    assert!(
+        plain1.contains("Carbon 50%"),
+        "streaming two-pass must calculate Carbon 50%:\n{plain1}"
+    );
+    assert!(
+        plain1.contains("Image Quota Exhausted"),
+        "streaming two-pass must backfill truncated_fields from transcript_full.jsonl:\n{plain1}"
+    );
+
+    let cache_dir = env.data_dir.join("transcript-cache");
+    let cache_files: Vec<_> = fs::read_dir(&cache_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    assert_eq!(cache_files.len(), 1);
+    let cached_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(cache_files[0].path()).unwrap()).unwrap();
+    assert_eq!(cached_json["offset"].as_u64(), Some(file_size_1));
+
+    // Append another line -> incremental continuation advances from file_size_1
+    {
+        let mut f = OpenOptions::new().append(true).open(&transcript_path).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "step_index": 58_003,
+                "type": "PLANNER_RESPONSE",
+                "created_at": epoch_ms_to_iso8601(now - 1_000),
+                "model": "gemini-4-carbon-high",
+                "context_window": {
+                    "context_window_size": 500000,
+                    "current_usage": {
+                        "input_tokens": 10000,
+                        "output_tokens": 50,
+                        "cache_read_input_tokens": 5000,
+                        "cache_creation_input_tokens": 0
+                    }
+                }
+            })
+        )
+        .unwrap();
+    }
+    let (code2, out2, err2) = env.run_stdin(&agypl_bin(), &stdin_payload, &[("COLUMNS", "140")]);
+    assert_eq!(code2, 0, "stderr: {err2}");
+    let plain2 = strip_ansi(&out2);
+    assert!(
+        plain2.contains("Out 250"),
+        "incremental continuation after >8MB streaming must advance to Out 250:\n{plain2}"
+    );
+}

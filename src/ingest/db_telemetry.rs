@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,11 @@ const MAX_DB_CACHE_ENTRIES: usize = 24;
 const MAX_RECENT_DBS: usize = 5;
 const MAX_PERF_RECENT_DBS: usize = 30;
 const MAX_PERF_DB_ENTRIES: usize = 256;
-const PERF_DB_SCHEMA_VERSION: u32 = 4;
+const MAX_UNCACHED_PERF_DBS_PER_CALL: usize = 48;
+const MAX_UNCACHED_WAL_COPY_DBS_PER_CALL: usize = 4;
+const COMPACTION_LIMIT_RECHECK_MS: i64 = 300_000;
+const MAX_USER_TURN_SCAN_BYTES: u64 = 32 * 1024 * 1024;
+const PERF_DB_SCHEMA_VERSION: u32 = 5;
 
 /// Pure-data conversation SQLite record exported by `HostReader` for downstream `ledger` use.
 /// Never leaks `rusqlite::Connection` or raw Protobuf bytes.
@@ -51,6 +55,7 @@ struct DbLimitCacheEntry {
     limit: u64,
     updated_at: i64,
     last_access_at: Option<i64>,
+    model_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -67,6 +72,8 @@ pub(super) struct DbModelPerfAcc {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub steps: u64,
+    pub last_updated_ms: i64,
+    pub max_gen_idx: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -80,6 +87,7 @@ struct DbPerfCacheEntry {
     user_turns: u64,
     max_step_index: Option<u64>,
     total_token_steps: u64,
+    max_gen_idx: i64,
     models: BTreeMap<String, DbModelPerfAcc>,
     total_cost_usd: f64,
     updated_at: i64,
@@ -97,6 +105,31 @@ struct CompactionCacheFile {
     last_known_limit: Option<u64>,
     #[serde(rename = "_last_known_mtime")]
     last_known_mtime: Option<i64>,
+}
+
+pub(super) struct CompactionCacheHandle {
+    path: PathBuf,
+    cache: CompactionCacheFile,
+    dirty: bool,
+}
+
+impl CompactionCacheHandle {
+    pub(super) fn flush_if_dirty(&mut self) {
+        if self.dirty {
+            write_compaction_cache(&self.path, &self.cache);
+            self.dirty = false;
+        }
+    }
+}
+
+pub(super) fn load_compaction_cache_handle() -> CompactionCacheHandle {
+    let path = resolve_compaction_cache_path();
+    let cache = read_compaction_cache(&path);
+    CompactionCacheHandle {
+        path,
+        cache,
+        dirty: false,
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -348,7 +381,7 @@ fn write_compaction_cache(cache_path: &Path, cache: &CompactionCacheFile) {
     let Ok(bytes) = serde_json::to_vec(cache) else {
         return;
     };
-    let _ = platform::write_atomic_0600(cache_path, &bytes);
+    let _ = platform::write_cache_atomic_0600(cache_path, &bytes);
 }
 
 fn query_sqlite_compaction_limit(db_path: &Path) -> Option<u64> {
@@ -393,45 +426,69 @@ fn query_sqlite_compaction_limit(db_path: &Path) -> Option<u64> {
 pub(super) fn resolve_server_compaction_limit(
     conversation_id: Option<&str>,
     transcript_path: Option<&Path>,
+    active_model_key: Option<&str>,
     now_ms: i64,
+    deadline: Option<Instant>,
+    cache_handle: &mut CompactionCacheHandle,
 ) -> Option<u64> {
     let (transcript_base_dir, derived_conv_id) = extract_transcript_context(transcript_path);
     let effective_conv_id = conversation_id.or(derived_conv_id.as_deref());
     let candidate_roots = collect_candidate_roots(transcript_base_dir.as_deref());
-    let cache_path = resolve_compaction_cache_path();
-    let mut cache = read_compaction_cache(&cache_path);
     let active_db_path = resolve_active_db_path(effective_conv_id, &candidate_roots);
 
     if let Some(ref active_path) = active_db_path {
         let key = active_path.to_string_lossy().into_owned();
         let sig = get_db_signature(active_path);
-        if let Some(ref sig_str) = sig
-            && let Some(cached) = cache.db_limits.get(&key)
-            && cached.sig == *sig_str
+        if let Some(cached) = cache_handle.cache.db_limits.get_mut(&key)
             && is_valid_compaction_limit(cached.limit)
+            && (sig.as_ref().is_some_and(|s| cached.sig == *s)
+                || (now_ms.saturating_sub(cached.updated_at) < COMPACTION_LIMIT_RECHECK_MS
+                    && (active_model_key.is_none()
+                        || cached.model_key.as_deref() == active_model_key)))
         {
-            return Some(cached.limit);
+            let lim = cached.limit;
+            let prev_access = cached.last_access_at.unwrap_or(cached.updated_at);
+            if cached.last_access_at.is_none() || now_ms.saturating_sub(prev_access) > 60_000 {
+                cached.last_access_at = Some(now_ms);
+                cache_handle.dirty = true;
+            }
+            return Some(lim);
+        }
+
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return cache_handle
+                .cache
+                .last_known_limit
+                .filter(|&lim| is_valid_compaction_limit(lim));
         }
 
         if let Some(lim) = query_sqlite_compaction_limit(active_path)
             && is_valid_compaction_limit(lim)
         {
             let mtime_ms = get_db_max_mtime_ms(active_path);
-            cache.db_limits.insert(
+            cache_handle.cache.db_limits.insert(
                 key,
                 DbLimitCacheEntry {
                     sig: sig.unwrap_or_default(),
                     limit: lim,
                     updated_at: now_ms,
                     last_access_at: Some(now_ms),
+                    model_key: active_model_key.map(ToOwned::to_owned),
                 },
             );
-            prune_limits_cache(&mut cache.db_limits, MAX_DB_CACHE_ENTRIES);
-            cache.last_known_limit = Some(lim);
-            cache.last_known_mtime = Some(mtime_ms);
-            write_compaction_cache(&cache_path, &cache);
+            prune_limits_cache(&mut cache_handle.cache.db_limits, MAX_DB_CACHE_ENTRIES);
+            cache_handle.cache.last_known_limit = Some(lim);
+            cache_handle.cache.last_known_mtime = Some(mtime_ms);
+            cache_handle.dirty = true;
             return Some(lim);
         }
+    }
+
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return cache_handle
+            .cache
+            .last_known_limit
+            .filter(|&lim| is_valid_compaction_limit(lim));
     }
 
     let recent_dbs = list_recent_conversation_dbs(
@@ -440,9 +497,9 @@ pub(super) fn resolve_server_compaction_limit(
         MAX_RECENT_DBS,
     );
     let newest_recent_mtime = recent_dbs.first().map(|d| d.mtime_ms).unwrap_or(0);
-    let last_known_mtime = cache.last_known_mtime.unwrap_or(0);
+    let last_known_mtime = cache_handle.cache.last_known_mtime.unwrap_or(0);
 
-    if let Some(last_lim) = cache.last_known_limit
+    if let Some(last_lim) = cache_handle.cache.last_known_limit
         && is_valid_compaction_limit(last_lim)
         && (recent_dbs.is_empty() || newest_recent_mtime <= last_known_mtime)
     {
@@ -450,41 +507,50 @@ pub(super) fn resolve_server_compaction_limit(
     }
 
     for recent in &recent_dbs {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
         let key = recent.path.to_string_lossy().into_owned();
         let sig = get_db_signature(&recent.path);
         if let Some(ref sig_str) = sig
-            && let Some(cached) = cache.db_limits.get(&key)
+            && let Some(cached) = cache_handle.cache.db_limits.get_mut(&key)
             && cached.sig == *sig_str
             && is_valid_compaction_limit(cached.limit)
         {
             let lim = cached.limit;
-            cache.last_known_limit = Some(lim);
-            cache.last_known_mtime = Some(recent.mtime_ms);
-            write_compaction_cache(&cache_path, &cache);
+            let prev_access = cached.last_access_at.unwrap_or(cached.updated_at);
+            if cached.last_access_at.is_none() || now_ms.saturating_sub(prev_access) > 60_000 {
+                cached.last_access_at = Some(now_ms);
+            }
+            cache_handle.cache.last_known_limit = Some(lim);
+            cache_handle.cache.last_known_mtime = Some(recent.mtime_ms);
+            cache_handle.dirty = true;
             return Some(lim);
         }
 
         if let Some(lim) = query_sqlite_compaction_limit(&recent.path)
             && is_valid_compaction_limit(lim)
         {
-            cache.db_limits.insert(
+            cache_handle.cache.db_limits.insert(
                 key,
                 DbLimitCacheEntry {
                     sig: sig.unwrap_or_default(),
                     limit: lim,
                     updated_at: now_ms,
                     last_access_at: Some(now_ms),
+                    model_key: None,
                 },
             );
-            prune_limits_cache(&mut cache.db_limits, MAX_DB_CACHE_ENTRIES);
-            cache.last_known_limit = Some(lim);
-            cache.last_known_mtime = Some(recent.mtime_ms);
-            write_compaction_cache(&cache_path, &cache);
+            prune_limits_cache(&mut cache_handle.cache.db_limits, MAX_DB_CACHE_ENTRIES);
+            cache_handle.cache.last_known_limit = Some(lim);
+            cache_handle.cache.last_known_mtime = Some(recent.mtime_ms);
+            cache_handle.dirty = true;
             return Some(lim);
         }
     }
 
-    cache
+    cache_handle
+        .cache
         .last_known_limit
         .filter(|&lim| is_valid_compaction_limit(lim))
 }
@@ -496,9 +562,16 @@ struct RawDbTelemetry {
     total_cost_usd: f64,
     max_step_index: Option<u64>,
     total_token_steps: u64,
+    max_gen_idx: i64,
 }
 
-fn accumulate_row_into_telemetry(state: &mut RawDbTelemetry, idx: i64, blob: &[u8]) {
+fn accumulate_row_into_telemetry(
+    state: &mut RawDbTelemetry,
+    idx: i64,
+    blob: &[u8],
+    step_timestamps: &BTreeMap<i64, i64>,
+    bot_timestamps: &BTreeMap<String, i64>,
+) {
     let decoded = extract_gen_metadata_row_details(idx, blob);
     if state.parent_cascade_id.is_none() {
         state.parent_cascade_id = decoded.parent_cascade_id;
@@ -522,7 +595,38 @@ fn accumulate_row_into_telemetry(state: &mut RawDbTelemetry, idx: i64, blob: &[u
             continue;
         }
 
+        let step_ts = decoded
+            .step_indices
+            .iter()
+            .rev()
+            .find_map(|&si| {
+                i64::try_from(si)
+                    .ok()
+                    .and_then(|k| step_timestamps.get(&k))
+                    .copied()
+            })
+            .or_else(|| {
+                step.last_step_index
+                    .and_then(|ls| i64::try_from(ls).ok())
+                    .and_then(|k| step_timestamps.get(&k))
+                    .copied()
+            })
+            .or_else(|| {
+                step.bot_uuid
+                    .as_deref()
+                    .and_then(|b| bot_timestamps.get(b))
+                    .copied()
+            });
+
         let acc = state.models.entry(step.model_key).or_default();
+        if let Some(ts) = step_ts
+            && ts > 0
+        {
+            acc.last_updated_ms = acc.last_updated_ms.max(ts);
+        }
+        acc.max_gen_idx = acc.max_gen_idx.max(idx);
+        state.max_gen_idx = state.max_gen_idx.max(idx);
+
         if step.valid_stream
             && let Some(sec) = step.stream_sec
         {
@@ -561,6 +665,37 @@ fn accumulate_row_into_telemetry(state: &mut RawDbTelemetry, idx: i64, blob: &[u
 
 fn query_raw_db_telemetry(db_path: &Path) -> Option<RawDbTelemetry> {
     with_readonly_db(db_path, |conn| {
+        let mut step_timestamps: BTreeMap<i64, i64> = BTreeMap::new();
+        let mut bot_timestamps: BTreeMap<String, i64> = BTreeMap::new();
+        match conn.prepare("SELECT idx, metadata FROM steps") {
+            Ok(mut stmt) => match stmt.query([]) {
+                Ok(mut rows) => {
+                    while let Some(row) = rows.next()? {
+                        let idx: i64 = row.get(0)?;
+                        let blob: Vec<u8> = row.get(1)?;
+                        if blob.is_empty() {
+                            continue;
+                        }
+                        let (ts_opt, bot_opt) = extract_step_timestamp_and_bot(&blob);
+                        if let Some(ts_ms) = ts_opt {
+                            step_timestamps.insert(idx, ts_ms);
+                            if let Some(bot_uuid) = bot_opt {
+                                bot_timestamps
+                                    .entry(bot_uuid)
+                                    .and_modify(|prev| *prev = (*prev).max(ts_ms))
+                                    .or_insert(ts_ms);
+                            }
+                        }
+                    }
+                }
+                Err(err) if is_sqlite_open_or_access_error(&err) => return Err(err),
+                Err(_) => {}
+            },
+            Err(err) if is_sqlite_open_or_access_error(&err) => return Err(err),
+            Err(err) if is_no_such_table_error(&err) => {}
+            Err(_) => {}
+        }
+
         let mut state = RawDbTelemetry {
             models: BTreeMap::new(),
             parent_cascade_id: None,
@@ -568,6 +703,7 @@ fn query_raw_db_telemetry(db_path: &Path) -> Option<RawDbTelemetry> {
             total_cost_usd: 0.0,
             max_step_index: None,
             total_token_steps: 0,
+            max_gen_idx: 0,
         };
         match conn.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx ASC") {
             Ok(mut stmt) => {
@@ -576,7 +712,13 @@ fn query_raw_db_telemetry(db_path: &Path) -> Option<RawDbTelemetry> {
                     let idx: i64 = row.get(0)?;
                     let blob: Vec<u8> = row.get(1)?;
                     if !blob.is_empty() {
-                        accumulate_row_into_telemetry(&mut state, idx, &blob);
+                        accumulate_row_into_telemetry(
+                            &mut state,
+                            idx,
+                            &blob,
+                            &step_timestamps,
+                            &bot_timestamps,
+                        );
                     }
                 }
                 Ok(Some(state))
@@ -587,6 +729,26 @@ fn query_raw_db_telemetry(db_path: &Path) -> Option<RawDbTelemetry> {
         }
     })
     .flatten()
+}
+
+fn effective_model_mtime_ms(
+    record: &DbPerfCacheEntry,
+    stats: &DbModelPerfAcc,
+    db_mtime_ms: i64,
+) -> i64 {
+    if stats.last_updated_ms > 0 {
+        return stats.last_updated_ms;
+    }
+    let valid_model_count = record
+        .models
+        .iter()
+        .filter(|(k, s)| !k.is_empty() && (s.stream_samples > 0 || s.ttft_samples > 0))
+        .count();
+    if valid_model_count <= 1 || stats.max_gen_idx >= record.max_gen_idx {
+        db_mtime_ms.max(0)
+    } else {
+        0
+    }
 }
 
 fn has_valid_model_perf_samples(models: &BTreeMap<String, DbModelPerfAcc>) -> bool {
@@ -628,6 +790,10 @@ fn find_transcript_for_db(db_path: &Path, candidate_roots: &[PathBuf]) -> Option
 }
 
 fn count_user_inputs_in_transcript_file(transcript_path: &Path) -> Option<u64> {
+    let meta = fs::metadata(transcript_path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_USER_TURN_SCAN_BYTES {
+        return None;
+    }
     let mut file = File::open(transcript_path).ok()?;
     let mut buf = [0u8; 64 * 1024];
     let mut carry: Vec<u8> = Vec::new();
@@ -753,17 +919,20 @@ pub(super) fn merge_db_models_into(
     }
 }
 
-/// Aggregate recent `<= 30` non-empty `.db` streaming speeds & TTFTs, and resolve
-/// the active Cascade's lineage cost tree (main + all descendant subagent DBs).
+/// Aggregate recent `<= 30` non-empty `.db` streaming speeds & TTFTs (plus all active
+/// Cascade lineage descendant DBs), and resolve the active Cascade's lineage cost tree.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_model_perf_stats(
     conversation_id: Option<&str>,
     transcript_path: Option<&Path>,
     child_conversation_ids: &[String],
     current_session_turns: Option<u64>,
+    last_user_input_ms: Option<i64>,
     current_session_model_turns_ago: &BTreeMap<String, u64>,
     current_session_model_last_active_ms: &BTreeMap<String, i64>,
     now_ms: i64,
+    deadline: Option<Instant>,
+    cache_handle: &mut CompactionCacheHandle,
 ) -> ResolvedModelPerf {
     let (transcript_base_dir, derived_conv_id) = extract_transcript_context(transcript_path);
     let effective_conv_id = conversation_id.or(derived_conv_id.as_deref());
@@ -775,8 +944,6 @@ pub(super) fn resolve_model_perf_stats(
     let has_cascade_scope = effective_conv_id.is_some() || !child_ids_set.is_empty();
 
     let candidate_roots = collect_candidate_roots(transcript_base_dir.as_deref());
-    let cache_path = resolve_compaction_cache_path();
-    let mut cache = read_compaction_cache(&cache_path);
     let active_db_path = resolve_active_db_path(effective_conv_id, &candidate_roots);
     let all_dbs = list_recent_conversation_dbs(&candidate_roots, None, usize::MAX);
 
@@ -784,7 +951,14 @@ pub(super) fn resolve_model_perf_stats(
         return ResolvedModelPerf::default();
     }
 
-    let max_cached_access_at = cache
+    let perf_deadline = deadline.map(|d| {
+        d.checked_sub(std::time::Duration::from_millis(250))
+            .filter(|&sub| sub > Instant::now())
+            .unwrap_or(d)
+    });
+
+    let max_cached_access_at = cache_handle
+        .cache
         .db_perf
         .values()
         .map(|e| e.last_access_at.max(e.updated_at))
@@ -794,16 +968,26 @@ pub(super) fn resolve_model_perf_stats(
     struct DbPerfLoader<'a> {
         cache: &'a CompactionCacheFile,
         candidate_roots: &'a [PathBuf],
+        active_conv_id: Option<&'a str>,
+        current_session_turns: Option<u64>,
         now_ms: i64,
         max_cached_access_at: i64,
         next_access_at: i64,
         patch_db_perf: BTreeMap<String, DbPerfCacheEntry>,
         loaded_by_path: BTreeMap<PathBuf, DbPerfCacheEntry>,
         attempted_paths: HashSet<PathBuf>,
+        uncached_loads: usize,
+        uncached_wal_copies: usize,
+        deadline: Option<Instant>,
     }
 
     impl<'a> DbPerfLoader<'a> {
-        fn load(&mut self, db_path: &Path, touch_lru: bool) -> Option<DbPerfCacheEntry> {
+        fn load(
+            &mut self,
+            db_path: &Path,
+            touch_lru: bool,
+            allow_over_budget: bool,
+        ) -> Option<DbPerfCacheEntry> {
             if let Some(existing) = self.loaded_by_path.get(db_path).cloned() {
                 let key = db_path.to_string_lossy().into_owned();
                 if touch_lru
@@ -847,13 +1031,40 @@ pub(super) fn resolve_model_perf_stats(
                 return Some(cached.clone());
             }
 
+            let has_wal = super::sqlite_ro::has_non_empty_wal(db_path);
+            let deadline_expired = self.deadline.is_some_and(|d| Instant::now() >= d);
+            if deadline_expired
+                || (!allow_over_budget
+                    && (self.uncached_loads >= MAX_UNCACHED_PERF_DBS_PER_CALL
+                        || (has_wal && self.uncached_wal_copies >= MAX_UNCACHED_WAL_COPY_DBS_PER_CALL)))
+            {
+                if let Some(cached) = self.cache.db_perf.get(&key)
+                    && cached.schema_ver == PERF_DB_SCHEMA_VERSION
+                {
+                    self.loaded_by_path
+                        .insert(db_path.to_path_buf(), cached.clone());
+                    return Some(cached.clone());
+                }
+                return None;
+            }
+
+            self.uncached_loads += 1;
+            if has_wal {
+                self.uncached_wal_copies += 1;
+            }
             let telemetry = query_raw_db_telemetry(db_path)?;
-            let user_turns = estimate_db_user_turns(db_path, &telemetry, self.candidate_roots);
             let conv_id = db_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
+            let user_turns = if self.active_conv_id == Some(conv_id.as_str())
+                && let Some(turns) = self.current_session_turns
+            {
+                turns
+            } else {
+                estimate_db_user_turns(db_path, &telemetry, self.candidate_roots)
+            };
             let record = DbPerfCacheEntry {
                 schema_ver: PERF_DB_SCHEMA_VERSION,
                 sig: sig.unwrap_or_default(),
@@ -863,6 +1074,7 @@ pub(super) fn resolve_model_perf_stats(
                 user_turns,
                 max_step_index: telemetry.max_step_index,
                 total_token_steps: telemetry.total_token_steps,
+                max_gen_idx: telemetry.max_gen_idx,
                 models: telemetry.models,
                 total_cost_usd: telemetry.total_cost_usd,
                 updated_at: self.now_ms,
@@ -877,21 +1089,26 @@ pub(super) fn resolve_model_perf_stats(
     }
 
     let mut loader = DbPerfLoader {
-        cache: &cache,
+        cache: &cache_handle.cache,
         candidate_roots: &candidate_roots,
+        active_conv_id: effective_conv_id,
+        current_session_turns,
         now_ms,
         max_cached_access_at,
         next_access_at: now_ms.max(max_cached_access_at + 1),
         patch_db_perf: BTreeMap::new(),
         loaded_by_path: BTreeMap::new(),
         attempted_paths: HashSet::new(),
+        uncached_loads: 0,
+        uncached_wal_copies: 0,
+        deadline: perf_deadline,
     };
 
     let mut perf_window_dbs: Vec<DbPathEntry> = Vec::new();
     let mut perf_seen_paths: HashSet<PathBuf> = HashSet::new();
 
     if let Some(ref active_path) = active_db_path
-        && let Some(rec) = loader.load(active_path, true)
+        && let Some(rec) = loader.load(active_path, true, true)
         && has_valid_model_perf_samples(&rec.models)
     {
         perf_window_dbs.push(DbPathEntry {
@@ -908,7 +1125,7 @@ pub(super) fn resolve_model_perf_stats(
         if perf_seen_paths.contains(&item.path) {
             continue;
         }
-        if let Some(rec) = loader.load(&item.path, false)
+        if let Some(rec) = loader.load(&item.path, false, false)
             && has_valid_model_perf_samples(&rec.models)
         {
             perf_window_dbs.push(item.clone());
@@ -926,24 +1143,32 @@ pub(super) fn resolve_model_perf_stats(
 
     if has_cascade_scope {
         if let Some(ref active_path) = active_db_path {
-            loader.load(active_path, true);
+            loader.load(active_path, true, true);
         }
         for child_id in &child_ids_set {
             if let Some(child_db) = resolve_active_db_path(Some(child_id), &candidate_roots) {
-                loader.load(&child_db, true);
+                loader.load(&child_db, true, true);
             }
         }
         for item in all_dbs.iter().take(MAX_PERF_DB_ENTRIES) {
-            loader.load(&item.path, false);
+            loader.load(&item.path, false, false);
         }
 
         let mut prev_size = usize::MAX;
         while lineage_conv_ids.len() != prev_size {
+            if perf_deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
             prev_size = lineage_conv_ids.len();
             let mut added = true;
             while added {
                 added = false;
-                for entry in cache.db_perf.values().chain(loader.loaded_by_path.values()) {
+                for entry in cache_handle
+                    .cache
+                    .db_perf
+                    .values()
+                    .chain(loader.loaded_by_path.values())
+                {
                     let cid = entry.conversation_id.as_str();
                     if cid.is_empty() || lineage_conv_ids.contains(cid) {
                         continue;
@@ -963,7 +1188,8 @@ pub(super) fn resolve_model_perf_stats(
                 }
             }
 
-            let cached_matching_paths: Vec<PathBuf> = cache
+            let cached_matching_paths: Vec<PathBuf> = cache_handle
+                .cache
                 .db_perf
                 .iter()
                 .filter_map(|(path_str, entry)| {
@@ -981,7 +1207,7 @@ pub(super) fn resolve_model_perf_stats(
                 })
                 .collect();
             for p in cached_matching_paths {
-                loader.load(&p, true);
+                loader.load(&p, true, true);
             }
 
             let lineage_list: Vec<String> = lineage_conv_ids.iter().cloned().collect();
@@ -989,7 +1215,7 @@ pub(super) fn resolve_model_perf_stats(
                 if let Some(resolved_path) = resolve_active_db_path(Some(&cid), &candidate_roots)
                     && !loader.loaded_by_path.contains_key(&resolved_path)
                 {
-                    loader.load(&resolved_path, true);
+                    loader.load(&resolved_path, true, true);
                 }
             }
         }
@@ -998,13 +1224,36 @@ pub(super) fn resolve_model_perf_stats(
     let loaded_by_path = loader.loaded_by_path;
     let patch_db_perf = loader.patch_db_perf;
 
+    if has_cascade_scope && !lineage_conv_ids.is_empty() {
+        for (db_path, record) in &loaded_by_path {
+            if perf_seen_paths.contains(db_path) || !has_valid_model_perf_samples(&record.models) {
+                continue;
+            }
+            let cid = if !record.conversation_id.is_empty() {
+                record.conversation_id.as_str()
+            } else {
+                db_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+            };
+            if !cid.is_empty() && lineage_conv_ids.contains(cid) {
+                perf_window_dbs.push(DbPathEntry {
+                    path: db_path.clone(),
+                    mtime_ms: get_db_max_mtime_ms(db_path),
+                });
+                perf_seen_paths.insert(db_path.clone());
+            }
+        }
+    }
+
     if loaded_by_path.is_empty() && perf_window_dbs.is_empty() {
         return ResolvedModelPerf::default();
     }
 
     let mut protected_perf_keys: HashSet<String> = HashSet::new();
     if has_cascade_scope && !lineage_conv_ids.is_empty() {
-        for (db_path_str, entry) in &cache.db_perf {
+        for (db_path_str, entry) in &cache_handle.cache.db_perf {
             let cid = if !entry.conversation_id.is_empty() {
                 entry.conversation_id.clone()
             } else {
@@ -1035,9 +1284,13 @@ pub(super) fn resolve_model_perf_stats(
     }
 
     if !patch_db_perf.is_empty() {
-        cache.db_perf.extend(patch_db_perf);
-        prune_perf_cache(&mut cache.db_perf, MAX_PERF_DB_ENTRIES, &protected_perf_keys);
-        write_compaction_cache(&cache_path, &cache);
+        cache_handle.cache.db_perf.extend(patch_db_perf);
+        prune_perf_cache(
+            &mut cache_handle.cache.db_perf,
+            MAX_PERF_DB_ENTRIES,
+            &protected_perf_keys,
+        );
+        cache_handle.dirty = true;
     }
 
     #[derive(Default)]
@@ -1060,15 +1313,14 @@ pub(super) fn resolve_model_perf_stats(
             if model_key.is_empty() || (stats.stream_samples == 0 && stats.ttft_samples == 0) {
                 continue;
             }
+            let model_ts = effective_model_mtime_ms(record, stats, db_mtime_ms);
             let acc = totals.entry(model_key.clone()).or_default();
             acc.stream_samples = acc.stream_samples.saturating_add(stats.stream_samples);
             acc.sum_out = acc.sum_out.saturating_add(stats.sum_out);
             acc.sum_stream_sec += stats.sum_stream_sec;
             acc.ttft_samples = acc.ttft_samples.saturating_add(stats.ttft_samples);
             acc.sum_ttft_sec += stats.sum_ttft_sec;
-            if db_mtime_ms > acc.last_updated_ms {
-                acc.last_updated_ms = db_mtime_ms;
-            }
+            acc.last_updated_ms = acc.last_updated_ms.max(model_ts);
         }
     }
 
@@ -1155,9 +1407,11 @@ pub(super) fn resolve_model_perf_stats(
         user_turns: u64,
         db_models: HashSet<String>,
     }
+    let mut current_root_model_mtimes: BTreeMap<String, i64> = BTreeMap::new();
     let mut root_nodes_map: BTreeMap<String, RootNode> = BTreeMap::new();
     for (cid, item) in &by_conv_id {
         let (root_key, root_id, is_orphan) = resolve_root_key(cid, item.record);
+        let is_current_lineage = effective_conv_id.is_some_and(|main_cid| root_key == main_cid);
         let node = root_nodes_map.entry(root_key).or_insert_with(|| RootNode {
             root_id: root_id.clone(),
             is_orphan,
@@ -1174,6 +1428,15 @@ pub(super) fn resolve_model_perf_stats(
         for (m_key, stats) in &item.record.models {
             if !m_key.is_empty() && (stats.stream_samples > 0 || stats.ttft_samples > 0) {
                 node.db_models.insert(m_key.clone());
+                if is_current_lineage {
+                    let model_ts = effective_model_mtime_ms(item.record, stats, item.mtime_ms);
+                    if model_ts > 0 {
+                        current_root_model_mtimes
+                            .entry(m_key.clone())
+                            .and_modify(|ts| *ts = (*ts).max(model_ts))
+                            .or_insert(model_ts);
+                    }
+                }
             }
         }
     }
@@ -1203,7 +1466,22 @@ pub(super) fn resolve_model_perf_stats(
         }
         if let Some((ref db_models, _, _)) = current_root_models_and_turns {
             for m_key in db_models {
-                min_turns_ago.entry(m_key.clone()).or_insert(0);
+                let active_in_latest_turn = last_user_input_ms.is_some_and(|u_ms| {
+                    u_ms > 0
+                        && current_root_model_mtimes
+                            .get(m_key)
+                            .is_some_and(|&db_ms| db_ms >= u_ms)
+                });
+                if active_in_latest_turn {
+                    min_turns_ago.insert(m_key.clone(), 0);
+                } else {
+                    let fallback_turns = if last_user_input_ms.is_none_or(|u| u <= 0) {
+                        0
+                    } else {
+                        current_session_turns.unwrap_or(1).max(1)
+                    };
+                    min_turns_ago.entry(m_key.clone()).or_insert(fallback_turns);
+                }
             }
         }
         if let Some(turns) = current_session_turns {

@@ -114,7 +114,7 @@ fn write_speed_state(path: &Path, state: &SpeedCacheState) {
     let Ok(bytes) = serde_json::to_vec(state) else {
         return;
     };
-    if platform::write_atomic_0600(path, &bytes).is_ok()
+    if platform::write_cache_atomic_0600(path, &bytes).is_ok()
         && let Some(dir) = path.parent()
     {
         prune_json_cache_dir(dir, MAX_SPEED_CACHE_FILES);

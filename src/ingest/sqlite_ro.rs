@@ -104,13 +104,11 @@ fn create_temp_db_copy(db_path: &Path) -> std::io::Result<TempDbCopy> {
     let tmp_db_path = dir.path().join(file_name);
     fs::copy(db_path, &tmp_db_path)?;
 
-    for suffix in ["-wal", "-shm"] {
-        let src_sidecar = sidecar_path(db_path, suffix);
-        if fs::metadata(&src_sidecar).is_ok_and(|m| m.is_file()) {
-            let mut dst_os = OsString::from(tmp_db_path.as_os_str());
-            dst_os.push(suffix);
-            let _ = fs::copy(&src_sidecar, PathBuf::from(dst_os));
-        }
+    let wal_src = sidecar_path(db_path, "-wal");
+    if fs::metadata(&wal_src).is_ok_and(|m| m.is_file()) {
+        let mut dst_os = OsString::from(tmp_db_path.as_os_str());
+        dst_os.push("-wal");
+        let _ = fs::copy(&wal_src, PathBuf::from(dst_os));
     }
 
     Ok(TempDbCopy {
@@ -124,8 +122,9 @@ fn create_temp_db_copy(db_path: &Path) -> std::io::Result<TempDbCopy> {
 /// - When no non-empty `-wal` exists, opens `file:...?immutable=1` with
 ///   `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NO_MUTEX`.
 /// - When a non-empty `-wal` exists or immutable access hits a lock/access error,
-///   copies `.db` + `-wal` + `-shm` into an isolated `TempDir` and queries the copy,
-///   guaranteeing zero bytes written and zero `-shm`/`-journal` creation in `conversations/`.
+///   copies `.db` + `-wal` (never `-shm`) into an isolated `TempDir` and replays
+///   the WAL cleanly on the private copy, guaranteeing zero bytes written and
+///   zero `-shm`/`-journal` creation in `conversations/`.
 pub(super) fn with_readonly_db<T, F>(db_path: &Path, query_fn: F) -> Option<T>
 where
     F: Fn(&Connection) -> Result<T, rusqlite::Error>,
@@ -149,17 +148,17 @@ where
     }
 
     let copy = create_temp_db_copy(db_path).ok()?;
-    let ro_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    if let Ok(conn) = Connection::open_with_flags(&copy.db_path, ro_flags) {
-        match query_fn(&conn) {
-            Ok(val) => return Some(val),
-            Err(err) if !is_sqlite_open_or_access_error(&err) => return None,
-            Err(_) => {}
-        }
+    // On the isolated TempDir copy (without copied -shm), RW open cleanly rebuilds
+    // the transient WAL index and replays all uncommitted -wal frames without touching
+    // the host conversations/ directory.
+    let rw_flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    if let Ok(conn) = Connection::open_with_flags(&copy.db_path, rw_flags)
+        && let Ok(val) = query_fn(&conn)
+    {
+        return Some(val);
     }
 
-    // Only on the isolated TempDir copy: WAL without -shm may need RW recovery to replay -wal frames.
-    let rw_flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = Connection::open_with_flags(&copy.db_path, rw_flags).ok()?;
+    let ro_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(&copy.db_path, ro_flags).ok()?;
     query_fn(&conn).ok()
 }

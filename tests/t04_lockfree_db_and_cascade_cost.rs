@@ -836,3 +836,613 @@ fn t04_domain_routed_native_plus_children_cost_and_pure_db_record_export() {
     assert_eq!(rec.gen_rows[0].steps[0].cache_read_tokens, 2_000);
 }
 
+#[test]
+fn t04_lineage_child_db_perf_survives_top30_eviction_and_stale_turn_lockin() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showModel": false,
+                "showSpeed": true,
+                "showContextMonitor": false,
+                "showModelCache": true,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let conv_dir = env.data_dir.join("conversations");
+    fs::create_dir_all(&conv_dir).unwrap();
+
+    let main_id = "aaaa1111-0000-0000-0000-000000000001";
+    let old_child_id = "aaaa1111-0000-0000-0000-000000000002";
+    let fresh_child_id = "aaaa1111-0000-0000-0000-000000000003";
+
+    // Main DB with Carbon streaming stats
+    {
+        let conn = Connection::open(conv_dir.join(format!("{main_id}.db"))).unwrap();
+        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
+            .unwrap();
+        let blob = build_gen_metadata_blob(&[GenEntrySpec {
+            raw_input_tokens: 5_000,
+            output_tokens: 300,
+            cache_read_tokens: 10_000,
+            ttft_sec: Some((2, 0)),
+            stream_sec: Some((3, 0)),
+            display_name: Some("Gemini 4 Carbon (High)"),
+            ..Default::default()
+        }]);
+        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
+            .unwrap();
+    }
+
+    // Active lineage child DB with Hydro streaming stats (200.0 tok/s, TTFT 500ms),
+    // backdated slightly by 10 seconds so 35 newer unrelated DBs sort ahead of it in all_dbs!
+    let fresh_child_db = conv_dir.join(format!("{fresh_child_id}.db"));
+    {
+        let conn = Connection::open(&fresh_child_db).unwrap();
+        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
+            .unwrap();
+        let blob = build_gen_metadata_blob(&[GenEntrySpec {
+            raw_input_tokens: 10_000,
+            output_tokens: 400,
+            cache_read_tokens: 90_000,
+            ttft_sec: Some((0, 500_000_000)),
+            stream_sec: Some((2, 0)),
+            display_name: Some("Gemini 4 Hydrogen (High)"),
+            kvs: &[
+                ("parent_cascade_id", main_id),
+                ("root_cascade_id", main_id),
+            ],
+            ..Default::default()
+        }]);
+        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
+            .unwrap();
+    }
+    let child_mtime = SystemTime::now() - Duration::from_secs(10);
+    {
+        let f = fs::OpenOptions::new().write(true).open(&fresh_child_db).unwrap();
+        f.set_modified(child_mtime).unwrap();
+    }
+
+    // Create 35 newer unrelated DBs (all using Neon) so fresh_child_db is evicted from top-30 global all_dbs
+    for i in 0..35 {
+        let p = conv_dir.join(format!("unrelated-newer-{i:02}.db"));
+        let conn = Connection::open(&p).unwrap();
+        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
+            .unwrap();
+        let blob = build_gen_metadata_blob(&[GenEntrySpec {
+            raw_input_tokens: 1_000,
+            output_tokens: 100,
+            stream_sec: Some((1, 0)),
+            display_name: Some("Gemini 4 Neon (High)"),
+            ..Default::default()
+        }]);
+        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
+            .unwrap();
+    }
+
+    // Build a main transcript with 35 USER_INPUT turns where an OLD Hydro subagent ran at turn 1
+    // (producing stale current_session_model_turns_ago["Hydro"] = 34 > 30), while fresh_child_id
+    // ran during the latest turn (mtime >= last_user_input_ms) and was discovered via DB lineage.
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let iso_at = |epoch_secs: i64| -> String {
+        let days = epoch_secs.div_euclid(86_400);
+        let sod = epoch_secs.rem_euclid(86_400);
+        let h = sod / 3600;
+        let m = (sod % 3600) / 60;
+        let s = sod % 60;
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+        let yr = if mo <= 2 { y + 1 } else { y };
+        format!("{yr:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+    };
+
+    let main_logs = env
+        .data_dir
+        .join("brain")
+        .join(main_id)
+        .join(".system_generated")
+        .join("logs");
+    fs::create_dir_all(&main_logs).unwrap();
+    let main_transcript = main_logs.join("transcript.jsonl");
+
+    let mut lines = vec![
+        serde_json::json!({
+            "step_index": 1,
+            "type": "USER_INPUT",
+            "created_at": iso_at(now_secs - 120)
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 2,
+            "type": "GENERIC",
+            "created_at": iso_at(now_secs - 115),
+            "content": serde_json::json!({
+                "status": "added",
+                "conversation_id": old_child_id,
+                "name": "old-hydro",
+                "model_display_name": "Gemini 4 Hydrogen (High)"
+            })
+            .to_string()
+        })
+        .to_string(),
+    ];
+    for t in 2..=35 {
+        lines.push(
+            serde_json::json!({
+                "step_index": t + 1,
+                "type": "USER_INPUT",
+                "created_at": iso_at(now_secs - 90 + t)
+            })
+            .to_string(),
+        );
+    }
+    fs::write(&main_transcript, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let payload = serde_json::json!({
+        "conversation_id": main_id,
+        "transcript_path": main_transcript.to_string_lossy(),
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" }
+    })
+    .to_string();
+
+    let (code, out, err) = env.run_stdin(&payload, &[("COLUMNS", "180")]);
+    assert_eq!(code, 0, "stderr: {err}");
+    let plain = strip_ansi(&out);
+    assert!(
+        plain.contains("Hydro 90%"),
+        "Session cache line must include lineage Hydro DB:\n{plain}"
+    );
+    assert!(
+        plain.contains("Hydro: 200.0 tok/s (ttft 500ms)"),
+        "Lineage Hydro child DB must survive top-30 eviction and >30-turn stale lock-in:\n{plain}"
+    );
+}
+
+#[test]
+fn t04_many_uncached_wal_dbs_are_bounded_per_statusline_call() {
+    use std::time::{Duration, Instant};
+
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showModel": true,
+                "showSpeed": true,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let conv_dir = env.data_dir.join("conversations");
+    fs::create_dir_all(&conv_dir).unwrap();
+
+    let mut open_conns = Vec::new();
+    for i in 0..20 {
+        let db_path = conv_dir.join(format!("wal-heavy-{i:02}.db"));
+        let conn = Connection::open(&db_path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
+            .unwrap();
+        let blob = build_gen_metadata_blob(&[GenEntrySpec {
+            raw_input_tokens: 1_000,
+            output_tokens: 100,
+            stream_sec: Some((1, 0)),
+            display_name: Some("Gemini 4 Neon (High)"),
+            ..Default::default()
+        }]);
+        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
+            .unwrap();
+        // Keep connections open so SQLite preserves non-empty -wal files during statusline run.
+        assert!(conv_dir.join(format!("wal-heavy-{i:02}.db-wal")).exists());
+        open_conns.push(conn);
+    }
+
+    let payload = serde_json::json!({
+        "conversation_id": "wal-heavy-00",
+        "model": { "id": "gemini-4-neon-high", "display_name": "Gemini 4 Neon (High)" }
+    })
+    .to_string();
+
+    let start = Instant::now();
+    let (code, out, err) = env.run_stdin(&payload, &[("COLUMNS", "140")]);
+    let elapsed = start.elapsed();
+    drop(open_conns);
+
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(!strip_ansi(&out).trim().is_empty());
+    assert!(
+        elapsed < Duration::from_millis(2000),
+        "bounded WAL-copy statusline call took too long: {elapsed:?}"
+    );
+
+    let cache_path = env.data_dir.join("agy-pulse-compaction-cache.json");
+    let cache_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let perf_count = cache_json["_db_perf"].as_object().map(|m| m.len()).unwrap_or(0);
+    assert!(
+        perf_count <= 10,
+        "expected WAL-copy DB scan per statusline call to be bounded (<= 10), got {perf_count}"
+    );
+}
+
+fn pb_timestamp(field_num: u32, epoch_sec: u64, nanos: u64) -> Vec<u8> {
+    pb_duration(field_num, epoch_sec, nanos)
+}
+
+fn build_step_metadata_blob(epoch_sec: u64, bot_uuid: Option<&str>) -> Vec<u8> {
+    let mut out = pb_timestamp(1, epoch_sec, 0);
+    if let Some(bot) = bot_uuid {
+        let f9 = pb_str(7, bot);
+        out.extend(pb_bytes(9, &f9));
+    }
+    out
+}
+
+#[test]
+fn t04_same_session_model_switch_expires_old_model_even_when_db_mtime_refreshes() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showModel": true,
+                "showSpeed": true,
+                "showContextMonitor": false,
+                "showModelCache": false,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let conv_dir = env.data_dir.join("conversations");
+    fs::create_dir_all(&conv_dir).unwrap();
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Case 1: Same-session DB WITH `steps` table:
+    // Model A (Hydro) ran at step 1 (10 minutes ago), then switched to Model B (Carbon) for steps 2..=34 (10s ago).
+    // Even though the .db file mtime is brand new (now), Hydro's per-model timestamp comes from `steps` (now - 600s)
+    // and is NOT overwritten by Carbon's DB mtime.
+    let conv_with_steps = "same-session-switch-steps-01";
+    {
+        let conn = Connection::open(conv_dir.join(format!("{conv_with_steps}.db"))).unwrap();
+        conn.execute(
+            "CREATE TABLE steps (idx INTEGER PRIMARY KEY, metadata BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO steps (idx, metadata) VALUES (?1, ?2)",
+            params![1i64, build_step_metadata_blob(now_secs - 600, Some("bot-hydro"))],
+        )
+        .unwrap();
+        let hydro_blob = build_gen_metadata_blob(&[GenEntrySpec {
+            raw_input_tokens: 1_000,
+            output_tokens: 400,
+            stream_sec: Some((2, 0)),
+            ttft_sec: Some((0, 500_000_000)),
+            display_name: Some("Gemini 4 Hydrogen (High)"),
+            step_indices: &[1],
+            ..Default::default()
+        }]);
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, hydro_blob],
+        )
+        .unwrap();
+
+        for step in 2..=34i64 {
+            conn.execute(
+                "INSERT INTO steps (idx, metadata) VALUES (?1, ?2)",
+                params![step, build_step_metadata_blob(now_secs - 10, Some("bot-carbon"))],
+            )
+            .unwrap();
+            let carbon_blob = build_gen_metadata_blob(&[GenEntrySpec {
+                raw_input_tokens: 1_000,
+                output_tokens: 300,
+                stream_sec: Some((2, 0)),
+                display_name: Some("Gemini 4 Carbon (High)"),
+                step_indices: &[step as u64],
+                ..Default::default()
+            }]);
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+                params![step, carbon_blob],
+            )
+            .unwrap();
+        }
+    }
+
+    let payload_steps = serde_json::json!({
+        "conversation_id": conv_with_steps,
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" }
+    })
+    .to_string();
+    let (code1, out1, err1) = env.run_stdin(&payload_steps, &[("COLUMNS", "160")]);
+    assert_eq!(code1, 0, "stderr: {err1}");
+    let plain1 = strip_ansi(&out1);
+    assert!(
+        plain1.contains("out: 150.0 tok/s"),
+        "active model Carbon must render its speed:\n{plain1}"
+    );
+    assert!(
+        !plain1.contains("Hydro:"),
+        "old model Hydro (>5m old in steps) must NOT be refreshed by .db mtime:\n{plain1}"
+    );
+
+    // Case 2: Minimal multi-model DB WITHOUT `steps` table + transcript with >30 turns:
+    // Model A (Argon) only appeared at gen_metadata idx=1, Model B (Carbon) ran at idx=2..=34.
+    // Even without `steps` table, Argon (max_gen_idx=1 < record.max_gen_idx=34) must NOT receive
+    // the fresh .db mtime or have its turns_ago reset to 0.
+    let env2 = IsolatedEnv::new();
+    fs::write(
+        env2.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showModel": true,
+                "showSpeed": true,
+                "showContextMonitor": false,
+                "showModelCache": false,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let conv_dir2 = env2.data_dir.join("conversations");
+    fs::create_dir_all(&conv_dir2).unwrap();
+
+    let conv_no_steps = "same-session-switch-nosteps-02";
+    {
+        let conn = Connection::open(conv_dir2.join(format!("{conv_no_steps}.db"))).unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
+        let argon_blob = build_gen_metadata_blob(&[GenEntrySpec {
+            raw_input_tokens: 1_000,
+            output_tokens: 440,
+            stream_sec: Some((2, 0)),
+            display_name: Some("Gemini 4 Argon (High)"),
+            ..Default::default()
+        }]);
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, argon_blob],
+        )
+        .unwrap();
+
+        for idx in 2..=34i64 {
+            let carbon_blob = build_gen_metadata_blob(&[GenEntrySpec {
+                raw_input_tokens: 1_000,
+                output_tokens: 360,
+                stream_sec: Some((2, 0)),
+                display_name: Some("Gemini 4 Carbon (High)"),
+                ..Default::default()
+            }]);
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+                params![idx, carbon_blob],
+            )
+            .unwrap();
+        }
+    }
+
+    let iso_at = |epoch_secs: u64| -> String {
+        let days = (epoch_secs as i64).div_euclid(86_400);
+        let sod = (epoch_secs as i64).rem_euclid(86_400);
+        let h = sod / 3600;
+        let m = (sod % 3600) / 60;
+        let s = sod % 60;
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+        let yr = if mo <= 2 { y + 1 } else { y };
+        format!("{yr:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+    };
+
+    let main_logs = env2
+        .data_dir
+        .join("brain")
+        .join(conv_no_steps)
+        .join(".system_generated")
+        .join("logs");
+    fs::create_dir_all(&main_logs).unwrap();
+    let transcript_path = main_logs.join("transcript.jsonl");
+    let mut t_lines = vec![
+        serde_json::json!({
+            "step_index": 1,
+            "type": "USER_INPUT",
+            "created_at": iso_at(now_secs - 700)
+        })
+        .to_string(),
+        serde_json::json!({
+            "step_index": 2,
+            "type": "PLANNER_RESPONSE",
+            "created_at": iso_at(now_secs - 690),
+            "model": "gemini-4-argon-high"
+        })
+        .to_string(),
+    ];
+    let mut step = 3u64;
+    for t in 2..=34u64 {
+        t_lines.push(
+            serde_json::json!({
+                "step_index": step,
+                "type": "USER_INPUT",
+                "created_at": iso_at(now_secs - 100 + t)
+            })
+            .to_string(),
+        );
+        step += 1;
+    }
+    t_lines.push(
+        serde_json::json!({
+            "step_index": step,
+            "type": "PLANNER_RESPONSE",
+            "created_at": iso_at(now_secs - 5),
+            "model": "gemini-4-carbon-high"
+        })
+        .to_string(),
+    );
+    fs::write(&transcript_path, format!("{}\n", t_lines.join("\n"))).unwrap();
+
+    let payload_no_steps = serde_json::json!({
+        "conversation_id": conv_no_steps,
+        "transcript_path": transcript_path.to_string_lossy(),
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" }
+    })
+    .to_string();
+    let (code2, out2, err2) = env2.run_stdin(&payload_no_steps, &[("COLUMNS", "160")]);
+    assert_eq!(code2, 0, "stderr: {err2}");
+    let plain2 = strip_ansi(&out2);
+    assert!(
+        plain2.contains("out: 180.0 tok/s"),
+        "active model Carbon must render 180.0 tok/s:\n{plain2}"
+    );
+    assert!(
+        !plain2.contains("Argon:"),
+        "old model Argon in multi-model DB without steps table must stay hidden:\n{plain2}"
+    );
+}
+
+#[test]
+fn t04_same_session_model_switch_refreshes_compaction_limit_immediately() {
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showContextMonitor": true,
+                "showContextBar": true,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let conv_dir = env.data_dir.join("conversations");
+    fs::create_dir_all(&conv_dir).unwrap();
+    let conv_id = "conv-switch-limit-01";
+    let db_path = conv_dir.join(format!("{conv_id}.db"));
+
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, build_compaction_gen_metadata_blob(500_000)],
+        )
+        .unwrap();
+    }
+
+    let make_payload = |id: &str, disp: &str| {
+        serde_json::json!({
+            "conversation_id": conv_id,
+            "model": { "id": id, "display_name": disp },
+            "context_window": {
+                "context_window_size": 1_000_000,
+                "current_usage": { "input_tokens": 100_000, "output_tokens": 0 }
+            }
+        })
+        .to_string()
+    };
+
+    // 1) Initial model Carbon -> 100k / 500k (20%)
+    let (code1, out1, err1) = env.run_stdin(
+        &make_payload("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+        &[("COLUMNS", "120")],
+    );
+    assert_eq!(code1, 0, "stderr: {err1}");
+    let plain1 = strip_ansi(&out1);
+    assert!(
+        plain1.contains("100k/500k") && plain1.contains("20%"),
+        "initial compaction limit must be 500k:\n{plain1}"
+    );
+
+    // 2) Update DB with a new gen_metadata row carrying 200k compaction limit
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![2i64, build_compaction_gen_metadata_blob(200_000)],
+        )
+        .unwrap();
+    }
+
+    // Same model within 5-minute window reuses cached 500k limit
+    let (code2, out2, err2) = env.run_stdin(
+        &make_payload("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+        &[("COLUMNS", "120")],
+    );
+    assert_eq!(code2, 0, "stderr: {err2}");
+    let plain2 = strip_ansi(&out2);
+    assert!(
+        plain2.contains("100k/500k") && plain2.contains("20%"),
+        "same model within recheck window should reuse cached 500k:\n{plain2}"
+    );
+
+    // 3) Switch model to Claude Sonnet 4.6 -> must bypass 5-minute cache and refresh to 200k (50%) immediately!
+    let (code3, out3, err3) = env.run_stdin(
+        &make_payload("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
+        &[("COLUMNS", "120")],
+    );
+    assert_eq!(code3, 0, "stderr: {err3}");
+    let plain3 = strip_ansi(&out3);
+    assert!(
+        plain3.contains("100k/200k") && plain3.contains("50%"),
+        "switching model in same session must immediately refresh compaction limit to 200k:\n{plain3}"
+    );
+}
+

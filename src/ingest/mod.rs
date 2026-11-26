@@ -9,7 +9,7 @@ mod workspace;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -18,6 +18,7 @@ use crate::domain::{
     calculate_turn_cache_metrics, compact_model_name, resolve_model_display_name,
 };
 use crate::platform;
+use crate::profile::{IngestStageTimings, Stage, set_stage};
 
 pub use db_telemetry::ConversationDbRecord;
 pub use proto_wire::{GenerationMetadataRow, GenerationTelemetryStep, TrajectoryMetadata};
@@ -31,6 +32,7 @@ pub struct IngestResult {
     pub rolling_cost_key: Option<String>,
     pub child_conversation_ids: Vec<String>,
     pub diagnostics: Vec<String>,
+    pub stage_timings: IngestStageTimings,
 }
 
 fn current_epoch_ms() -> i64 {
@@ -53,7 +55,30 @@ impl HostReader {
     /// Parse host stdin payload and enrich with transcript state, output speed,
     /// lock-free SQLite telemetry/compaction/cascade costs, and workspace metadata.
     pub fn read_live_pulse(stdin_text: &str, fallback_cwd: &Path) -> IngestResult {
+        Self::read_live_pulse_with_deadline(stdin_text, fallback_cwd, None)
+    }
+
+    /// Pure in-memory stdin snapshot for hard-timeout degradation (zero disk I/O).
+    pub fn parse_stdin_fallback(stdin_text: &str, fallback_cwd: &Path) -> (PulseSnapshot, PathBuf) {
         let observed_at_ms = current_epoch_ms();
+        let mut parsed = stdin::parse_host_stdin(stdin_text, fallback_cwd, observed_at_ms);
+        parsed.snapshot.workspace.current_dir =
+            workspace::resolve_current_dir_name(&parsed.workspace_dir);
+        (parsed.snapshot, parsed.workspace_dir)
+    }
+
+    /// Parse host stdin payload and enrich within an optional soft deadline so statusline
+    /// rendering degrades gracefully instead of exceeding the host command timeout.
+    pub fn read_live_pulse_with_deadline(
+        stdin_text: &str,
+        fallback_cwd: &Path,
+        deadline: Option<Instant>,
+    ) -> IngestResult {
+        let mut timings = IngestStageTimings::default();
+        let observed_at_ms = current_epoch_ms();
+
+        set_stage(Stage::IngestParse);
+        let t_parse = Instant::now();
         let mut parsed = stdin::parse_host_stdin(stdin_text, fallback_cwd, observed_at_ms);
 
         let mut transcript_path = parsed.transcript_path.clone();
@@ -87,10 +112,19 @@ impl HostReader {
                 m.id.clone()
             }
         });
+        timings.parse_ms = t_parse.elapsed().as_millis() as u64;
 
+        set_stage(Stage::IngestTranscript);
+        let t_transcript = Instant::now();
         let scanned = transcript_path.as_deref().and_then(|tp| {
-            transcript::scan_transcript_incremental(tp, stdin_model_ident.as_deref(), observed_at_ms)
+            transcript::scan_transcript_incremental(
+                tp,
+                stdin_model_ident.as_deref(),
+                observed_at_ms,
+                deadline,
+            )
         });
+        timings.transcript_ms = t_transcript.elapsed().as_millis() as u64;
 
         let mut scanned_usage_val: Option<Value> = None;
         let mut last_planner_response = None;
@@ -175,6 +209,8 @@ impl HostReader {
             raw_model_name,
         );
 
+        set_stage(Stage::IngestSpeed);
+        let t_speed = Instant::now();
         let speed_transcript_key = transcript_path
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
@@ -200,48 +236,95 @@ impl HostReader {
             last_planner_response.as_ref(),
             observed_at_ms,
         );
+        timings.speed_ms = t_speed.elapsed().as_millis() as u64;
 
+        let active_model_key_owned = parsed
+            .snapshot
+            .model
+            .as_ref()
+            .map(|m| {
+                let id = m.id.trim();
+                if !id.is_empty() {
+                    id
+                } else {
+                    m.display_name.trim()
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                parsed
+                    .snapshot
+                    .last_turn_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+            .map(str::to_ascii_lowercase);
+        let mut compaction_cache = db_telemetry::load_compaction_cache_handle();
+
+        set_stage(Stage::IngestCompaction);
+        let t_compaction = Instant::now();
         parsed.snapshot.server_compaction_limit = db_telemetry::resolve_server_compaction_limit(
             effective_conv_id.as_deref(),
             transcript_path.as_deref(),
+            active_model_key_owned.as_deref(),
             observed_at_ms,
+            deadline,
+            &mut compaction_cache,
         );
+        timings.compaction_ms = t_compaction.elapsed().as_millis() as u64;
 
+        set_stage(Stage::IngestDbPerf);
+        let t_db_perf = Instant::now();
         let (session_turns, session_turns_ago, session_last_active_ms) =
             build_session_activity_context(scanned.as_ref());
         let all_child_ids = scanned
             .as_ref()
             .map(|s| s.all_child_ids.as_slice())
             .unwrap_or(&[]);
+        let last_user_input_ms = scanned.as_ref().and_then(|s| s.last_user_input_ms);
         let resolved_perf = db_telemetry::resolve_model_perf_stats(
             effective_conv_id.as_deref(),
             transcript_path.as_deref(),
             all_child_ids,
             session_turns,
+            last_user_input_ms,
             &session_turns_ago,
             &session_last_active_ms,
             observed_at_ms,
+            deadline,
+            &mut compaction_cache,
         );
+        compaction_cache.flush_if_dirty();
 
         enrich_speeds_from_model_perf(
             &mut parsed.snapshot,
             &resolved_perf.models,
             &session_last_active_ms,
         );
+        timings.db_perf_ms = t_db_perf.elapsed().as_millis() as u64;
 
+        set_stage(Stage::IngestCascade);
+        let t_cascade = Instant::now();
         apply_cascade_cost_breakdown(
             &mut parsed.snapshot,
             transcript_path.as_deref(),
             scanned.as_ref(),
             resolved_perf.cascade_cost_tree.as_ref(),
             observed_at_ms,
+            deadline,
         );
+        timings.cascade_ms = t_cascade.elapsed().as_millis() as u64;
 
+        set_stage(Stage::IngestWorkspace);
+        let t_ws = Instant::now();
         parsed.snapshot.workspace.current_dir =
             workspace::resolve_current_dir_name(&parsed.workspace_dir);
         parsed.snapshot.workspace.git_branch =
-            workspace::resolve_git_branch(&parsed.workspace_dir);
-        parsed.snapshot.workspace_meta = workspace::scan_workspace_metadata(&parsed.workspace_dir);
+            workspace::resolve_git_branch(&parsed.workspace_dir, deadline);
+        parsed.snapshot.workspace_meta =
+            workspace::scan_workspace_metadata(&parsed.workspace_dir, deadline);
+        timings.workspace_ms = t_ws.elapsed().as_millis() as u64;
 
         let child_conversation_ids: Vec<String> = scanned
             .as_ref()
@@ -260,6 +343,7 @@ impl HostReader {
             rolling_cost_key,
             child_conversation_ids,
             diagnostics: parsed.diagnostics,
+            stage_timings: timings,
         }
     }
 }
@@ -444,6 +528,7 @@ fn enrich_speeds_from_model_perf(
             if p.last_updated_ms > 0 {
                 item.last_active_ms = item.last_active_ms.max(p.last_updated_ms);
             }
+            item.turns_ago = item.turns_ago.min(p.turns_ago);
         }
         if let Some(&sess_ts) = session_last_active_ms.get(&item.model) {
             item.last_active_ms = item.last_active_ms.max(sess_ts);
@@ -482,6 +567,9 @@ fn enrich_speeds_from_model_perf(
             });
         }
     }
+    snapshot
+        .child_model_speeds
+        .sort_by_key(|c| std::cmp::Reverse(c.last_active_ms));
 }
 
 fn merge_model_acc_into(
@@ -567,6 +655,7 @@ fn apply_cascade_cost_breakdown(
     scanned: Option<&transcript::ScannedTranscript>,
     db_tree: Option<&db_telemetry::CascadeDbCostTree>,
     observed_at_ms: i64,
+    deadline: Option<Instant>,
 ) {
     let (brain_dir, main_conv_id) = transcript_path
         .map(transcript::resolve_brain_context)
@@ -593,6 +682,9 @@ fn apply_cascade_cost_breakdown(
 
         if let (Some(bd), Some(sc)) = (brain_dir.as_ref(), scanned) {
             for child_id in &sc.all_child_ids {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    break;
+                }
                 let child_tp = bd
                     .join(child_id)
                     .join(".system_generated")
@@ -601,9 +693,12 @@ fn apply_cascade_cost_breakdown(
                 if !fs::metadata(&child_tp).is_ok_and(|m| m.is_file()) {
                     continue;
                 }
-                let Some(child_sc) =
-                    transcript::scan_transcript_incremental(&child_tp, None, observed_at_ms)
-                else {
+                let Some(child_sc) = transcript::scan_transcript_incremental(
+                    &child_tp,
+                    None,
+                    observed_at_ms,
+                    deadline,
+                ) else {
                     continue;
                 };
                 if let Some(db_child) = tree.matched_by_id.get(child_id) {
@@ -653,6 +748,9 @@ fn apply_cascade_cost_breakdown(
         let mut child_total = 0.0f64;
         if let Some(bd) = brain_dir.as_ref() {
             for child_id in &sc.all_child_ids {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    break;
+                }
                 let child_tp = bd
                     .join(child_id)
                     .join(".system_generated")
@@ -661,11 +759,14 @@ fn apply_cascade_cost_breakdown(
                 if !fs::metadata(&child_tp).is_ok_and(|m| m.is_file()) {
                     continue;
                 }
-                if let Some(child_sc) =
-                    transcript::scan_transcript_incremental(&child_tp, None, observed_at_ms)
-                    && (child_sc.steps > 0
-                        || child_sc.transcript_cost_usd > 0.0
-                        || !child_sc.transcript_cost_by_model.is_empty())
+                if let Some(child_sc) = transcript::scan_transcript_incremental(
+                    &child_tp,
+                    None,
+                    observed_at_ms,
+                    deadline,
+                ) && (child_sc.steps > 0
+                    || child_sc.transcript_cost_usd > 0.0
+                    || !child_sc.transcript_cost_by_model.is_empty())
                 {
                     child_total += child_sc.transcript_cost_usd;
                     merge_model_acc_into(&mut by_model, &child_sc.transcript_cost_by_model);

@@ -491,6 +491,62 @@ fn hanging_stdin_respects_1500ms_hard_timeout_and_exits_zero() {
 }
 
 #[test]
+fn post_stdin_hard_cap_triggers_in_memory_fallback_and_exits_zero() {
+    let env = IsolatedEnv::new();
+    let proj_dir = env.workspace_dir.join("fallback-proj");
+    fs::create_dir_all(&proj_dir).unwrap();
+
+    // Seed several dummy conversation DBs so enriched ingest takes >1ms.
+    let conv_dir = env.data_dir.join("conversations");
+    fs::create_dir_all(&conv_dir).unwrap();
+    for i in 0..8 {
+        fs::write(conv_dir.join(format!("dummy-{i:02}.db")), b"not-a-db").unwrap();
+    }
+
+    let payload = serde_json::json!({
+        "conversation_id": "conv-hard-cap",
+        "model": {
+            "id": "gemini-4-hydrogen-high",
+            "display_name": "Gemini 4 Hydrogen (High)"
+        },
+        "plan_tier": "Pro",
+        "cycle_mode": "auto",
+        "workspace": {
+            "current_dir": proj_dir.to_string_lossy()
+        },
+        "context_window": {
+            "context_window_size": 500000,
+            "used_percentage": 25.0,
+            "total_input_tokens": 125000
+        }
+    })
+    .to_string();
+
+    let start = Instant::now();
+    let (code, stdout, stderr) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload,
+        &[
+            ("COLUMNS", "120"),
+            ("AGY_PULSE_POST_STDIN_HARD_CAP_MS", "1"),
+        ],
+    );
+    let elapsed = start.elapsed();
+
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "expected prompt hard-cap exit (<500ms), took {elapsed:?}"
+    );
+    let plain = strip_ansi(&stdout);
+    assert!(
+        plain.contains("fallback-proj") && plain.contains("Pro"),
+        "expected valid stdin fallback statusline output, got:\n{plain}"
+    );
+}
+
+#[test]
 fn pure_domain_and_render_boundary_invariants() {
     // 1) Routed cost filtering (Bedrock & Vertex)
     assert_eq!(
@@ -602,5 +658,238 @@ fn pure_domain_and_render_boundary_invariants() {
     assert_eq!(
         plain,
         "pure-repo │ ⎇ main │ Opus 4.6(Th) │ Ultra │ plan │ Cost $0.880"
+    );
+}
+
+#[test]
+fn profile_log_creates_nested_parent_dirs_and_refuses_symlink_without_tampering_target() {
+    let env = IsolatedEnv::new();
+    let nested_log = env
+        .data_dir
+        .join("profile_logs")
+        .join("nested")
+        .join("agy-pulse-prof.log");
+    assert!(!nested_log.parent().unwrap().exists());
+
+    let payload = serde_json::json!({
+        "model": { "display_name": "Claude Opus 4.6 (Thinking)" },
+        "plan_tier": "Pro"
+    })
+    .to_string();
+
+    let (code, _out, err) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload,
+        &[
+            ("AGY_PULSE_PROFILE_LOG", nested_log.to_string_lossy().as_ref()),
+            ("AGY_PULSE_PROFILE_MIN_MS", "0"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(nested_log.exists(), "profile log should be created with missing nested parents");
+    let content = fs::read_to_string(&nested_log).unwrap();
+    assert!(
+        content.contains("DONE total="),
+        "expected DONE profile record, got: {content}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let parent_mode = fs::metadata(nested_log.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(parent_mode & 0o077, 0, "parent dir must be 0o700, got {parent_mode:o}");
+        let file_mode = fs::symlink_metadata(&nested_log)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode & 0o177, 0, "profile log must be 0o600, got {file_mode:o}");
+
+        let sentinel = env.data_dir.join("prof_sentinel.txt");
+        fs::write(&sentinel, "untouched").unwrap();
+        let symlink_log = env.data_dir.join("prof_symlink.log");
+        symlink(&sentinel, &symlink_log).unwrap();
+
+        let (code2, _out2, err2) = env.run_stdin(
+            &agy_pulse_bin(),
+            &payload,
+            &[
+                ("AGY_PULSE_PROFILE_LOG", symlink_log.to_string_lossy().as_ref()),
+                ("AGY_PULSE_PROFILE_MIN_MS", "0"),
+            ],
+        );
+        assert_eq!(code2, 0, "stderr: {err2}");
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "untouched");
+        assert!(
+            fs::symlink_metadata(&symlink_log)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "profile log symlink must not be deleted or replaced"
+        );
+    }
+}
+
+#[test]
+fn bg_ledger_sync_lock_recovers_dead_pid_immediately_and_preserves_live_pid_over_30s() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "display": { "showDailyCost": true }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let lock_path = env.data_dir.join("agy-pulse-ledger-sync.lock");
+    let live_pid = std::process::id();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    // 1. Live worker PID lock older than 30s (60s ago) MUST NOT be stolen or deleted.
+    fs::write(
+        &lock_path,
+        serde_json::json!({
+            "pid": live_pid,
+            "role": "worker",
+            "token": "live-owner-tok",
+            "ts": now_ms - 60_000
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&lock_path)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
+
+    let payload = serde_json::json!({
+        "conversation_id": "conv-bg-lock",
+        "cost": { "total_cost_usd": 0.5 }
+    })
+    .to_string();
+
+    let (code1, _out1, err1) = env.run_stdin(&agy_pulse_bin(), &payload, &[]);
+    assert_eq!(code1, 0, "stderr: {err1}");
+    assert!(lock_path.exists(), "live >30s worker lock must be preserved");
+    let raw1 = fs::read_to_string(&lock_path).unwrap();
+    assert!(
+        raw1.contains("live-owner-tok"),
+        "live >30s worker lock must not be overwritten, got: {raw1}"
+    );
+
+    // 2. Dead worker PID lock with fresh mtime MUST be reclaimed immediately without waiting 30s.
+    let mut dead_child = env
+        .cmd(&agy_pulse_bin())
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn short-lived process");
+    let dead_pid = dead_child.id();
+    let _ = dead_child.wait().expect("wait short-lived process");
+
+    fs::write(
+        &lock_path,
+        serde_json::json!({
+            "pid": dead_pid,
+            "role": "worker",
+            "token": "dead-owner-tok",
+            "ts": now_ms
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let (code2, _out2, err2) = env.run_stdin(&agy_pulse_bin(), &payload, &[]);
+    assert_eq!(code2, 0, "stderr: {err2}");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while lock_path.exists() && Instant::now() < deadline {
+        if let Ok(raw) = fs::read_to_string(&lock_path) {
+            assert!(
+                !raw.contains("dead-owner-tok"),
+                "dead PID lock must be evicted immediately, got: {raw}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if lock_path.exists() {
+        let raw2 = fs::read_to_string(&lock_path).unwrap();
+        assert!(
+            !raw2.contains("dead-owner-tok"),
+            "dead PID lock remained present: {raw2}"
+        );
+    }
+}
+
+#[test]
+fn bg_ledger_sync_lock_different_token_never_deletes_foreign_lock() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let env = IsolatedEnv::new();
+    let lock_path = env.data_dir.join("agy-pulse-ledger-sync.lock");
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    fs::write(
+        &lock_path,
+        serde_json::json!({
+            "pid": std::process::id(),
+            "role": "worker",
+            "token": "foreign-owner-tok",
+            "ts": now_ms
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out_wrong = env
+        .cmd(&agy_pulse_bin())
+        .args(["--sync-ledger-bg", "--lock-token", "wrong-tok"])
+        .output()
+        .unwrap();
+    assert_eq!(out_wrong.status.code(), Some(0));
+    assert!(lock_path.exists(), "foreign lock must not be deleted by mismatched token");
+    let raw = fs::read_to_string(&lock_path).unwrap();
+    assert!(
+        raw.contains("foreign-owner-tok"),
+        "foreign lock contents must remain untouched, got: {raw}"
+    );
+
+    // Matching token updates & cleans up its own lock on exit.
+    fs::write(
+        &lock_path,
+        serde_json::json!({
+            "pid": std::process::id(),
+            "role": "spawning",
+            "token": "own-tok-123",
+            "ts": now_ms
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out_own = env
+        .cmd(&agy_pulse_bin())
+        .args(["--sync-ledger-bg", "--lock-token=own-tok-123"])
+        .output()
+        .unwrap();
+    assert_eq!(out_own.status.code(), Some(0));
+    assert!(
+        !lock_path.exists(),
+        "worker owning matching lock token must release its lock on exit"
     );
 }

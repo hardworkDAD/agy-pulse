@@ -7,20 +7,35 @@ pub mod ingest;
 pub mod ledger;
 pub mod ops;
 pub mod platform;
+pub(crate) mod profile;
 pub mod render;
 
 use std::env;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::panic;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 use crate::ingest::HostReader;
 use crate::render::resolve_language_from_locale;
 
 const STDIN_HARD_TIMEOUT: Duration = Duration::from_millis(1500);
+const STATUSLINE_POST_STDIN_BUDGET: Duration = Duration::from_millis(900);
+const STATUSLINE_POST_STDIN_HARD_CAP: Duration = Duration::from_millis(2500);
+const STATUSLINE_TOTAL_HARD_CAP: Duration = Duration::from_millis(3500);
+const LEDGER_BG_SYNC_LOCK_FILENAME: &str = "agy-pulse-ledger-sync.lock";
+const LEDGER_BG_SYNC_SPAWNING_GRACE_MS: u64 = 5_000;
+const LEDGER_BG_SYNC_LOCK_TTL_MS: u64 = 30_000;
+const LEDGER_BG_SYNC_LOCK_MAX_TTL_MS: u64 = 10 * 60 * 1000;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static BG_LOCK_TOKEN_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn build_cli_help_text() -> String {
     format!(
@@ -97,21 +112,262 @@ fn extract_seven_day_reset_at_ms(snapshot: &domain::PulseSnapshot) -> Option<i64
     None
 }
 
-fn run_statusline_pipeline() {
-    let (stdin_text, timed_out) = read_stdin_with_timeout(STDIN_HARD_TIMEOUT);
-    if timed_out && stdin_text.trim().is_empty() {
-        platform::write_error_log_safely("Statusline stdin read timed out after 1500ms");
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BgLedgerSyncLock {
+    #[serde(default)]
+    pid: u32,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    ts: i64,
+}
 
-    let fallback_cwd = env::current_dir().unwrap_or_default();
-    let mut ingest = HostReader::read_live_pulse(&stdin_text, &fallback_cwd);
+fn current_epoch_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn acquire_bg_ledger_sync_lock(token: &str) -> bool {
+    let lock_path = platform::resolve_antigravity_path(LEDGER_BG_SYNC_LOCK_FILENAME);
+    let now_ms = current_epoch_ms();
+    let payload = BgLedgerSyncLock {
+        pid: std::process::id(),
+        role: "spawning".to_string(),
+        token: token.to_string(),
+        ts: now_ms,
+    };
+    let Ok(bytes) = serde_json::to_vec(&payload) else {
+        return false;
+    };
+
+    for _attempt in 0..2 {
+        match platform::create_exclusive_file_0600(&lock_path, &bytes) {
+            Ok(true) => return true,
+            Ok(false) => {
+                let meta = match fs::metadata(&lock_path) {
+                    Ok(m) => m,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return false,
+                };
+                let Ok(modified) = meta.modified() else {
+                    return false;
+                };
+                let age_ms = SystemTime::now()
+                    .duration_since(modified)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+
+                let is_active = match fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<BgLedgerSyncLock>(&raw).ok())
+                {
+                    Some(parsed) if parsed.role == "worker" && parsed.pid > 0 => {
+                        platform::is_process_alive(parsed.pid)
+                            && age_ms < LEDGER_BG_SYNC_LOCK_MAX_TTL_MS
+                    }
+                    Some(parsed) if parsed.role == "spawning" => {
+                        age_ms < LEDGER_BG_SYNC_SPAWNING_GRACE_MS
+                            && (parsed.pid == 0 || platform::is_process_alive(parsed.pid))
+                    }
+                    _ => age_ms < LEDGER_BG_SYNC_LOCK_TTL_MS,
+                };
+                if is_active {
+                    return false;
+                }
+                if fs::remove_file(&lock_path).is_err() {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+fn release_bg_ledger_sync_lock_if_owner(expected_token: Option<&str>) {
+    let lock_path = platform::resolve_antigravity_path(LEDGER_BG_SYNC_LOCK_FILENAME);
+    let Ok(raw) = fs::read_to_string(&lock_path) else {
+        return;
+    };
+    let Ok(parsed) = serde_json::from_str::<BgLedgerSyncLock>(&raw) else {
+        return;
+    };
+    let owned = match expected_token {
+        Some(tok) => !tok.is_empty() && parsed.token == tok,
+        None => parsed.pid == std::process::id(),
+    };
+    if owned {
+        let _ = fs::remove_file(&lock_path);
+    }
+}
+
+fn maybe_spawn_background_ledger_sync() {
+    if env::var("AGY_PULSE_DISABLE_BG_LEDGER_SYNC").ok().as_deref() == Some("1") {
+        return;
+    }
+    let now_ms = current_epoch_ms();
+    let seq = BG_LOCK_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed);
+    let token = format!("{}-{now_ms}-{seq}", std::process::id());
+    if !acquire_bg_ledger_sync_lock(&token) {
+        return;
+    }
+    if let Ok(exe) = env::current_exe()
+        && let Ok(child_pid) =
+            platform::spawn_detached(&exe, &["--sync-ledger-bg", "--lock-token", &token])
+    {
+        let lock_path = platform::resolve_antigravity_path(LEDGER_BG_SYNC_LOCK_FILENAME);
+        if let Ok(raw) = fs::read_to_string(&lock_path)
+            && let Ok(parsed) = serde_json::from_str::<BgLedgerSyncLock>(&raw)
+            && parsed.token == token
+            && parsed.role == "spawning"
+        {
+            let updated = BgLedgerSyncLock {
+                pid: child_pid,
+                role: "worker".to_string(),
+                token: token.clone(),
+                ts: now_ms,
+            };
+            if let Ok(bytes) = serde_json::to_vec(&updated) {
+                let _ = platform::write_cache_atomic_0600(&lock_path, &bytes);
+            }
+        }
+        return;
+    }
+    release_bg_ledger_sync_lock_if_owner(Some(&token));
+}
+
+fn parse_lock_token_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--lock-token" {
+            return iter
+                .next()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+        if let Some(rest) = arg.strip_prefix("--lock-token=") {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn register_bg_worker_lock(token: Option<&str>) {
+    let lock_path = platform::resolve_antigravity_path(LEDGER_BG_SYNC_LOCK_FILENAME);
+    let payload = BgLedgerSyncLock {
+        pid: std::process::id(),
+        role: "worker".to_string(),
+        token: token.unwrap_or_default().to_string(),
+        ts: current_epoch_ms(),
+    };
+    let Ok(bytes) = serde_json::to_vec(&payload) else {
+        return;
+    };
+    match fs::read_to_string(&lock_path) {
+        Ok(raw) => {
+            if let Some(tok) = token
+                && let Ok(parsed) = serde_json::from_str::<BgLedgerSyncLock>(&raw)
+                && parsed.token == tok
+            {
+                let _ = platform::write_cache_atomic_0600(&lock_path, &bytes);
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let _ = platform::create_exclusive_file_0600(&lock_path, &bytes);
+        }
+        Err(_) => {}
+    }
+}
+
+struct BgLedgerSyncLockGuard {
+    token: Option<String>,
+}
+
+impl Drop for BgLedgerSyncLockGuard {
+    fn drop(&mut self) {
+        release_bg_ledger_sync_lock_if_owner(self.token.as_deref());
+    }
+}
+
+fn run_sync_ledger_bg_cli(args: &[String]) -> i32 {
+    let token = parse_lock_token_arg(args);
+    register_bg_worker_lock(token.as_deref());
+    let _guard = BgLedgerSyncLockGuard { token };
+    let _ = panic::catch_unwind(|| {
+        if let Ok(mut store) = ledger::LedgerStore::open_default() {
+            let _ = store.sync_all_if_stale(60_000, &ledger::LedgerSyncOptions::default());
+        }
+    });
+    0
+}
+
+struct StatuslineWorkerOutput {
+    output: Option<String>,
+    summary: String,
+}
+
+fn resolve_post_stdin_hard_cap(process_elapsed: Duration) -> Duration {
+    if let Ok(raw) = env::var("AGY_PULSE_POST_STDIN_HARD_CAP_MS")
+        && let Ok(ms) = raw.trim().parse::<u64>()
+    {
+        return Duration::from_millis(ms.max(1));
+    }
+    let remaining_total = STATUSLINE_TOTAL_HARD_CAP
+        .saturating_sub(process_elapsed)
+        .max(Duration::from_millis(400));
+    STATUSLINE_POST_STDIN_HARD_CAP.min(remaining_total)
+}
+
+fn render_hard_timeout_fallback(stdin_text: &str, fallback_cwd: &Path) -> String {
+    let (snapshot, _workspace_dir) = HostReader::parse_stdin_fallback(stdin_text, fallback_cwd);
+    let cfg = config::PulseConfig::default();
+    let locale = platform::read_locale_env();
+    let lang = resolve_language_from_locale(cfg.language, locale.as_deref());
+    let unicode = cfg
+        .display
+        .unicode
+        .unwrap_or_else(platform::detect_unicode_support);
+    let columns = snapshot.terminal_width.or_else(|| {
+        env::var("COLUMNS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .filter(|&w| w > 0)
+    });
+    let term = platform::TerminalCaps { unicode, columns };
+    render::render_statusline(&snapshot, &cfg, &term, lang)
+}
+
+fn run_statusline_enriched(
+    stdin_text: &str,
+    fallback_cwd: &std::path::Path,
+    stdin_ms: u64,
+    pipeline_deadline: Instant,
+) -> StatuslineWorkerOutput {
+    let mut ingest = HostReader::read_live_pulse_with_deadline(
+        stdin_text,
+        fallback_cwd,
+        Some(pipeline_deadline),
+    );
     if !ingest.diagnostics.is_empty() {
         platform::write_error_log_safely(&ingest.diagnostics.join("\n"));
     }
 
+    profile::set_stage(profile::Stage::Config);
+    let t_cfg = Instant::now();
     let cfg = config::load_config(&ingest.workspace_dir);
+    let cfg_ms = t_cfg.elapsed().as_millis() as u64;
     if !cfg.enabled {
-        return;
+        return StatuslineWorkerOutput {
+            output: None,
+            summary: format!("stdin={stdin_ms} disabled=1"),
+        };
     }
 
     let locale = platform::read_locale_env();
@@ -119,35 +375,63 @@ fn run_statusline_pipeline() {
     let auto_start_dashboard =
         env::var("AGY_PULSE_NO_DASHBOARD_AUTOSTART").ok().as_deref() != Some("1");
     let show_dashboard_url = cfg.display.show_dashboard_url.unwrap_or(true);
-    let dashboard_info = if show_dashboard_url {
+    profile::set_stage(profile::Stage::DashboardResolve);
+    let t_dash = Instant::now();
+    let dashboard_info = if show_dashboard_url && Instant::now() < pipeline_deadline {
         dashboard::resolve_dashboard_url_for_statusline(
             &cfg,
             resolved_lang,
-            auto_start_dashboard,
+            auto_start_dashboard && Instant::now() < pipeline_deadline,
         )
     } else {
         None
     };
+    let dash_ms = t_dash.elapsed().as_millis() as u64;
     if let Some(ref info) = dashboard_info {
         ingest.snapshot.dashboard_url = Some(info.url.clone());
     }
 
+    profile::set_stage(profile::Stage::UpdateCheck);
+    let t_upd = Instant::now();
     ingest.snapshot.update_available_version = ops::read_available_update_version();
     ops::maybe_spawn_background_update_check();
+    let upd_ms = t_upd.elapsed().as_millis() as u64;
+
+    let mut l_open_ms = 0u64;
+    let mut l_bg_ms = 0u64;
+    let mut l_sync_ms = 0u64;
+    let mut l_roll_ms = 0u64;
 
     let show_daily = cfg.display.show_daily_cost.unwrap_or(false);
     let show_weekly = cfg.display.show_weekly_cost.unwrap_or(false);
-    if ingest.snapshot.has_conversation_identity || show_daily || show_weekly {
+    if (ingest.snapshot.has_conversation_identity || show_daily || show_weekly)
+        && Instant::now() < pipeline_deadline
+    {
         let sync_opts = ledger::LedgerSyncOptions {
             now_ms: Some(ingest.snapshot.observed_at_ms),
             ..Default::default()
         };
-        match ledger::LedgerStore::open_default() {
+        profile::set_stage(profile::Stage::LedgerOpen);
+        let t_l_open = Instant::now();
+        let opened = ledger::LedgerStore::open_default_for_statusline();
+        l_open_ms = t_l_open.elapsed().as_millis() as u64;
+        match opened {
             Ok(mut store) => {
-                if let Err(err) = store.sync_all_if_stale(60_000, &sync_opts) {
-                    platform::write_error_log_safely(&format!("Ledger full scan error: {err}"));
+                profile::set_stage(profile::Stage::LedgerBgSyncSpawn);
+                let t_l_bg = Instant::now();
+                if (show_daily || show_weekly)
+                    && store
+                        .is_full_scan_stale(60_000, ingest.snapshot.observed_at_ms)
+                        .unwrap_or(false)
+                {
+                    maybe_spawn_background_ledger_sync();
                 }
-                if let Some(ref conv_id) = ingest.conversation_id
+                l_bg_ms = t_l_bg.elapsed().as_millis() as u64;
+
+                profile::set_stage(profile::Stage::LedgerSyncConv);
+                let t_l_sync = Instant::now();
+                if Instant::now() < pipeline_deadline
+                    && let Some(ref conv_id) = ingest.conversation_id
                     && let Err(err) = store.sync_conversation(
                         conv_id,
                         &ingest.child_conversation_ids,
@@ -158,6 +442,8 @@ fn run_statusline_pipeline() {
                         "Ledger conversation sync error: {err}"
                     ));
                 }
+                l_sync_ms = t_l_sync.elapsed().as_millis() as u64;
+
                 let allow_routed = cfg.display.show_routed_cost.unwrap_or(false);
                 let live_cost_usd =
                     domain::resolve_cascade_cost_usd(&ingest.snapshot, allow_routed);
@@ -173,18 +459,23 @@ fn run_statusline_pipeline() {
                     seven_day_reset_at_ms: extract_seven_day_reset_at_ms(&ingest.snapshot),
                     now_ms: ingest.snapshot.observed_at_ms,
                 };
-                match store.record_rolling_costs(&rolling_input) {
-                    Ok(Some(totals)) => {
-                        ingest.snapshot.cost.today_usd = Some(totals.today_usd);
-                        ingest.snapshot.cost.week_usd = Some(totals.week_usd);
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        platform::write_error_log_safely(&format!(
-                            "Ledger rolling cost error: {err}"
-                        ));
+                profile::set_stage(profile::Stage::LedgerRolling);
+                let t_l_roll = Instant::now();
+                if Instant::now() < pipeline_deadline {
+                    match store.record_rolling_costs(&rolling_input) {
+                        Ok(Some(totals)) => {
+                            ingest.snapshot.cost.today_usd = Some(totals.today_usd);
+                            ingest.snapshot.cost.week_usd = Some(totals.week_usd);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            platform::write_error_log_safely(&format!(
+                                "Ledger rolling cost error: {err}"
+                            ));
+                        }
                     }
                 }
+                l_roll_ms = t_l_roll.elapsed().as_millis() as u64;
             }
             Err(err) => {
                 platform::write_error_log_safely(&format!("Ledger open error: {err}"));
@@ -192,18 +483,20 @@ fn run_statusline_pipeline() {
         }
     }
 
+    profile::set_stage(profile::Stage::RenderAndStdout);
+    let t_render = Instant::now();
     let term = platform::detect_terminal_caps(
         ingest.snapshot.terminal_width,
         cfg.display.terminal_width,
         cfg.display.unicode,
     );
     let output = render::render_statusline(&ingest.snapshot, &cfg, &term, resolved_lang);
-    if !output.is_empty() {
-        print!("{output}");
-        let _ = io::stdout().flush();
-    }
+    let render_ms = t_render.elapsed().as_millis() as u64;
 
-    if let Some(ref info) = dashboard_info
+    profile::set_stage(profile::Stage::DashboardTouch);
+    let t_touch = Instant::now();
+    if Instant::now() < pipeline_deadline
+        && let Some(ref info) = dashboard_info
         && info.running
     {
         let _ = dashboard::touch_running_dashboard(
@@ -213,6 +506,88 @@ fn run_statusline_pipeline() {
             auto_start_dashboard,
             ingest.snapshot.observed_at_ms,
         );
+    }
+    let touch_ms = t_touch.elapsed().as_millis() as u64;
+
+    let st = &ingest.stage_timings;
+    let summary = format!(
+        "stdin={stdin_ms} parse={} transcript={} speed={} compaction={} db_perf={} cascade={} ws={} cfg={cfg_ms} dash={dash_ms} upd={upd_ms} l_open={l_open_ms} l_bg={l_bg_ms} l_sync={l_sync_ms} l_roll={l_roll_ms} render={render_ms} touch={touch_ms}",
+        st.parse_ms,
+        st.transcript_ms,
+        st.speed_ms,
+        st.compaction_ms,
+        st.db_perf_ms,
+        st.cascade_ms,
+        st.workspace_ms,
+    );
+
+    StatuslineWorkerOutput {
+        output: Some(output),
+        summary,
+    }
+}
+
+fn run_statusline_pipeline() {
+    let process_start = Instant::now();
+    let profiler = profile::Profiler::start_from_env();
+    let _main_stage_guard = profile::enter_stage_scope(profiler.stage_handle());
+
+    profile::set_stage(profile::Stage::Stdin);
+    let t_stdin = Instant::now();
+    let (stdin_text, timed_out) = read_stdin_with_timeout(STDIN_HARD_TIMEOUT);
+    let stdin_ms = t_stdin.elapsed().as_millis() as u64;
+    if timed_out && stdin_text.trim().is_empty() {
+        platform::write_error_log_safely("Statusline stdin read timed out after 1500ms");
+    }
+
+    let hard_cap = resolve_post_stdin_hard_cap(process_start.elapsed());
+    let soft_budget = STATUSLINE_POST_STDIN_BUDGET.min(hard_cap);
+    let pipeline_deadline = Instant::now() + soft_budget;
+    let fallback_cwd = env::current_dir().unwrap_or_default();
+
+    let worker_stdin = stdin_text.clone();
+    let worker_cwd = fallback_cwd.clone();
+    let worker_stage = profiler.stage_handle();
+    let (tx, rx) = mpsc::sync_channel::<StatuslineWorkerOutput>(1);
+    let spawn_res = thread::Builder::new()
+        .name("agy-pulse-worker".to_string())
+        .spawn(move || {
+            let _worker_stage_guard = profile::enter_stage_scope(worker_stage);
+            let res = run_statusline_enriched(&worker_stdin, &worker_cwd, stdin_ms, pipeline_deadline);
+            let _ = tx.send(res);
+        });
+
+    match spawn_res {
+        Ok(_) => match rx.recv_timeout(hard_cap) {
+            Ok(res) => {
+                if let Some(output) = res.output
+                    && !output.is_empty()
+                {
+                    print!("{output}");
+                    let _ = io::stdout().flush();
+                }
+                profiler.finish(&res.summary);
+            }
+            Err(_) => {
+                let fallback_out = render_hard_timeout_fallback(&stdin_text, &fallback_cwd);
+                if !fallback_out.is_empty() {
+                    print!("{fallback_out}");
+                    let _ = io::stdout().flush();
+                }
+                profiler.finish(&format!("stdin={stdin_ms} hard_timeout_fallback=1"));
+            }
+        },
+        Err(_) => {
+            let res =
+                run_statusline_enriched(&stdin_text, &fallback_cwd, stdin_ms, pipeline_deadline);
+            if let Some(output) = res.output
+                && !output.is_empty()
+            {
+                print!("{output}");
+                let _ = io::stdout().flush();
+            }
+            profiler.finish(&res.summary);
+        }
     }
 }
 
@@ -256,6 +631,10 @@ pub fn run_cli() -> i32 {
 
     if args.iter().any(|a| a == "--check-update-bg") {
         return ops::run_check_update_bg_cli();
+    }
+
+    if args.iter().any(|a| a == "--sync-ledger-bg") {
+        return run_sync_ledger_bg_cli(&args);
     }
 
     if matches!(first, Some("help" | "--help" | "-h"))
