@@ -267,8 +267,8 @@ bash uninstall.sh        # macOS / Linux
 | `display.showBreadcrumbs` | `boolean` | `false` | 第 3 行 | 是否显示工作区记忆文件或最近修改面包屑 |
 | `display.breadcrumbCount` | `number` | `3` | 第 3 行 | 面包屑最多显示条目数 |
 | `display.showGitBranch` | `boolean` | `false` | 第 1 行 | 是否显示当前 Git 分支（非 Git 目录自动隐藏） |
-| `display.showUsername` | `boolean` | `false` | 第 1 行 | 是否显示宿主传入用户名或自定义 `display.username` |
-| `display.username` | `string` | *未设置* | 第 1 行 | 自定义用户名覆写 |
+| `display.showUsername` | `boolean` | `false` | 第 1 行 | 是否显示宿主 `stdin.username` / `stdin.email` 或自定义 `display.username`（自动读取宿主登录账号） |
+| `display.username` | `string` | *未设置* | 第 1 行 | 自定义用户名覆写（开启 `showUsername` 时优先于宿主 `stdin.username` / `stdin.email` 与系统用户名） |
 | `display.showCost` | `boolean` | `false` | 第 1 行 | 是否在状态栏首行显示当前**任务树**汇总费用 |
 | `display.showDailyCost` | `boolean` | `false` | 第 1 行 | 是否显示今日累计费用（来自**账本**） |
 | `display.showWeeklyCost` | `boolean` | `false` | 第 1 行 | 是否显示近 7 日滚动费用（来自**账本**） |

@@ -707,6 +707,7 @@ fn build_sample_pulse_snapshot(observed_at_ms: i64) -> PulseSnapshot {
             plan_tier: Some("Pro".to_string()),
             cycle_mode: Some("auto".to_string()),
             username: Some("developer@agy.local".to_string()),
+            email: None,
         },
         workspace: WorkspaceInfo {
             current_dir: "agy-pulse".to_string(),

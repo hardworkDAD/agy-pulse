@@ -95,6 +95,7 @@ pub struct HostIdentity {
     pub plan_tier: Option<String>,
     pub cycle_mode: Option<String>,
     pub username: Option<String>,
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

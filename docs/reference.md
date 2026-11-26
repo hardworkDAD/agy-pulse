@@ -265,8 +265,8 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 | `display.showBreadcrumbs` | `boolean` | `false` | Line 3 | Workspace memory file / breadcrumbs |
 | `display.breadcrumbCount` | `number` | `3` | Line 3 | Max breadcrumb items (`0, 1, 2, 3, 5`) |
 | `display.showGitBranch` | `boolean` | `false` | Line 1 | Current Git branch (hidden outside Git repos) |
-| `display.showUsername` | `boolean` | `false` | Line 1 | Host stdin username or custom `display.username` |
-| `display.username` | `string` | *unset* | Line 1 | Custom username override when `showUsername` is `true` |
+| `display.showUsername` | `boolean` | `false` | Line 1 | Host stdin `username` / `email` or custom `display.username` |
+| `display.username` | `string` | *unset* | Line 1 | Custom username override when `showUsername` is `true` (overrides host `stdin.username` / `stdin.email` and OS username) |
 | `display.showCost` | `boolean` | `false` | Line 1 | Current **Cascade** USD total |
 | `display.showDailyCost` | `boolean` | `false` | Line 1 | Today's cumulative USD cost from **Ledger** |
 | `display.showWeeklyCost` | `boolean` | `false` | Line 1 | 7-day rolling USD cost from **Ledger** |

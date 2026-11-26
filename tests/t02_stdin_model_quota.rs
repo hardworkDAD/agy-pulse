@@ -15,6 +15,7 @@ use agy_pulse::domain::{
     has_valid_provider_quota, is_quota_window_expired, parse_iso8601_to_epoch_ms,
     pick_critical_window,
 };
+use agy_pulse::ingest::HostReader;
 use agy_pulse::platform::TerminalCaps;
 use agy_pulse::render::{ansi_display_width, render_statusline, strip_ansi};
 
@@ -601,4 +602,294 @@ fn e2e_bilingual_zh_en_and_ascii_degradation_with_quota() {
     assert!(plain_en.contains("Cost $1.50"), "en statusline must render Cost:\n{plain_en}");
     assert!(plain_en.contains("Ctx"), "en statusline must render Ctx:\n{plain_en}");
     assert!(plain_en.contains("Google 5h   [█████░]  75% ~1h45m │ Claude 5h   [░░░░░░]   --"), "Unicode quota row mismatch:\n{plain_en}");
+}
+
+#[test]
+fn e2e_unstarted_epoch_zero_reset_time_not_expired_and_rendered() {
+    let env = IsolatedEnv::new();
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let future_5h = epoch_secs_to_iso8601_utc(now_secs + 4 * 3600 + 25 * 60 + 20);
+    let future_week = epoch_secs_to_iso8601_utc(now_secs + 5 * 86_400 + 3 * 3600 + 600);
+
+    // 1) Realistic agy 1.5.18 payload: 3p-5h has remaining_fraction=1, reset_time=1970-01-01T00:00:00Z, reset_in_seconds=0
+    let payload_mixed = serde_json::json!({
+        "plan_tier": "Google AI Ultra",
+        "quota": {
+            "gemini-5h": { "remaining_fraction": 0.96, "reset_time": future_5h, "reset_in_seconds": 15920 },
+            "gemini-weekly": { "remaining_fraction": 0.88, "reset_time": future_week, "reset_in_seconds": 443400 },
+            "3p-5h": { "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z", "reset_in_seconds": 0 },
+            "3p-weekly": { "remaining_fraction": 0.92, "reset_time": future_week, "reset_in_seconds": 443400 }
+        }
+    })
+    .to_string();
+
+    let (code1, out1, err1) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_mixed,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code1, 0);
+    assert_eq!(err1, "");
+    let plain1 = strip_ansi(&out1);
+    assert!(
+        plain1.contains("Claude 5h   [██████] 100%"),
+        "3p-5h with 1970 epoch-zero reset_time must not be treated as expired:\n{plain1}"
+    );
+    assert!(
+        !plain1.contains("Claude 5h   [░░░░░░]   --"),
+        "3p-5h must not render -- placeholder:\n{plain1}"
+    );
+
+    // 2) All 4 windows at 1970-01-01T00:00:00Z + remaining_fraction=1 must still render the full quota table
+    let payload_all_unstarted = serde_json::json!({
+        "plan_tier": "Google AI Ultra",
+        "quota": {
+            "gemini-5h": { "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z", "reset_in_seconds": 0 },
+            "gemini-weekly": { "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z", "reset_in_seconds": 0 },
+            "3p-5h": { "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z", "reset_in_seconds": 0 },
+            "3p-weekly": { "remaining_fraction": 1, "reset_time": "1970-01-01T00:00:00Z", "reset_in_seconds": 0 }
+        }
+    })
+    .to_string();
+
+    let (code2, out2, err2) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_all_unstarted,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code2, 0);
+    assert_eq!(err2, "");
+    let plain2 = strip_ansi(&out2);
+    assert!(plain2.contains("Google 5h   [██████] 100%"), "missing Google 5h:\n{plain2}");
+    assert!(plain2.contains("Claude 5h   [██████] 100%"), "missing Claude 5h:\n{plain2}");
+    assert!(plain2.contains("Google week [██████] 100%"), "missing Google week:\n{plain2}");
+    assert!(plain2.contains("Claude week [██████] 100%"), "missing Claude week:\n{plain2}");
+    assert!(!plain2.contains("--"), "unstarted windows must not render --:\n{plain2}");
+
+    // 3) Zero-date 0001-01-01T00:00:00Z (negative epoch ms) is also treated as unstarted countdown
+    let payload_zero_date = serde_json::json!({
+        "plan_tier": "Pro",
+        "quota": {
+            "3p-5h": { "remaining_fraction": 1, "reset_time": "0001-01-01T00:00:00Z", "reset_in_seconds": 0 }
+        }
+    })
+    .to_string();
+    let (snap, _) = HostReader::parse_stdin_fallback(&payload_zero_date, &env.workspace_dir);
+    let win = snap
+        .quota
+        .as_ref()
+        .and_then(|q| q.claude.five_hour.as_ref())
+        .expect("3p-5h window must be parsed");
+    assert_eq!(win.reset_time_ms, None);
+    assert!(!is_quota_window_expired(win, snap.observed_at_ms));
+
+    let (code3, out3, err3) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_zero_date,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code3, 0);
+    assert_eq!(err3, "");
+    let plain3 = strip_ansi(&out3);
+    assert!(
+        plain3.contains("Claude 5h   [██████] 100%"),
+        "0001-01-01T00:00:00Z must render 100% without --:\n{plain3}"
+    );
+}
+
+#[test]
+fn e2e_reset_in_seconds_fallback_and_disabled_window_handling() {
+    let env = IsolatedEnv::new();
+
+    let payload = serde_json::json!({
+        "plan_tier": "Google AI Ultra",
+        "quota": {
+            "gemini-5h": { "remaining_fraction": 0.90, "reset_in_seconds": 3600 },
+            "gemini-weekly": { "remaining_fraction": 0.80, "reset_time": "1970-01-01T00:00:00Z", "reset_in_seconds": 3600 },
+            "3p-5h": { "remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": true },
+            "3p-weekly": { "remaining_fraction": 0.75, "reset_in_seconds": 7200 }
+        }
+    })
+    .to_string();
+
+    // 1) Unit-level parse verification via HostReader::parse_stdin_fallback
+    let (snap, _) = HostReader::parse_stdin_fallback(&payload, &env.workspace_dir);
+    let q = snap.quota.as_ref().expect("quota summary expected");
+    assert_eq!(
+        q.google.five_hour.as_ref().and_then(|w| w.reset_time_ms),
+        Some(snap.observed_at_ms + 3_600_000)
+    );
+    assert_eq!(
+        q.google.weekly.as_ref().and_then(|w| w.reset_time_ms),
+        Some(snap.observed_at_ms + 3_600_000)
+    );
+    assert_eq!(q.claude.five_hour, None, "disabled window must be ignored");
+    assert_eq!(
+        q.claude.weekly.as_ref().and_then(|w| w.reset_time_ms),
+        Some(snap.observed_at_ms + 7_200_000)
+    );
+
+    // 2) E2E render verification
+    let (code, out, err) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(err, "");
+    let plain = strip_ansi(&out);
+    assert!(
+        plain.contains("Google 5h   [█████░]  90% ~1h0m"),
+        "reset_in_seconds fallback without reset_time failed:\n{plain}"
+    );
+    assert!(
+        plain.contains("Google week [█████░]  80% ~1h0m"),
+        "reset_in_seconds fallback with 1970 reset_time failed:\n{plain}"
+    );
+    assert!(
+        plain.contains("Claude 5h   [░░░░░░]   --"),
+        "disabled 3p-5h must be omitted (rendered as -- placeholder):\n{plain}"
+    );
+    assert!(
+        plain.contains("Claude week [█████░]  75% ~2h0m"),
+        "active 3p-weekly must render:\n{plain}"
+    );
+
+    // 3) All disabled windows -> not counted as valid quota, table hidden
+    let all_disabled_payload = serde_json::json!({
+        "plan_tier": "Pro",
+        "quota": {
+            "gemini-5h": { "remaining_fraction": 0.9, "reset_in_seconds": 3600, "disabled": true },
+            "3p-5h": { "remaining_fraction": 1.0, "reset_time": "1970-01-01T00:00:00Z", "disabled": true }
+        }
+    })
+    .to_string();
+    let (snap_disabled, _) = HostReader::parse_stdin_fallback(&all_disabled_payload, &env.workspace_dir);
+    assert!(snap_disabled.quota.is_none());
+
+    let (code_dis, out_dis, err_dis) = env.run_stdin(
+        &agy_pulse_bin(),
+        &all_disabled_payload,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code_dis, 0);
+    assert_eq!(err_dis, "");
+    let plain_dis = strip_ansi(&out_dis);
+    assert!(!plain_dis.contains("Google 5h"), "all disabled must hide quota table:\n{plain_dis}");
+    assert!(!plain_dis.contains("Claude 5h"), "all disabled must hide quota table:\n{plain_dis}");
+}
+
+#[test]
+fn e2e_stdin_email_and_username_priority_rendering() {
+    let env = IsolatedEnv::new();
+
+    // 1) Only email present in stdin
+    let payload_email_only = serde_json::json!({
+        "conversation_id": "conv-email-only",
+        "email": "alice@example.com",
+        "plan_tier": "Google AI Ultra"
+    })
+    .to_string();
+
+    let (snap1, _) = HostReader::parse_stdin_fallback(&payload_email_only, &env.workspace_dir);
+    assert_eq!(snap1.host.email.as_deref(), Some("alice@example.com"));
+    assert_eq!(snap1.host.username.as_deref(), Some("alice@example.com"));
+
+    // Default config keeps showUsername=false
+    let (code_def, out_def, err_def) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_email_only,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code_def, 0);
+    assert_eq!(err_def, "");
+    let plain_def = strip_ansi(&out_def);
+    assert!(
+        !plain_def.contains("alice@example.com"),
+        "default config must keep showUsername=false:\n{plain_def}"
+    );
+
+    // Enabling showUsername renders email on Line 1
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "display": { "showUsername": true }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code_em, out_em, err_em) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_email_only,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code_em, 0);
+    assert_eq!(err_em, "");
+    let plain_em = strip_ansi(&out_em);
+    let first_line_em = plain_em.lines().next().unwrap_or("");
+    assert!(
+        first_line_em.contains("alice@example.com"),
+        "Line 1 must render email when showUsername=true:\n{plain_em}"
+    );
+
+    // 2) Both username and email present -> host.username prefers username, host.email keeps email
+    let payload_both = serde_json::json!({
+        "conversation_id": "conv-both",
+        "username": "bob",
+        "email": "alice@example.com",
+        "plan_tier": "Pro"
+    })
+    .to_string();
+    let (snap2, _) = HostReader::parse_stdin_fallback(&payload_both, &env.workspace_dir);
+    assert_eq!(snap2.host.username.as_deref(), Some("bob"));
+    assert_eq!(snap2.host.email.as_deref(), Some("alice@example.com"));
+
+    let (code_both, out_both, _) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_both,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code_both, 0);
+    let plain_both = strip_ansi(&out_both);
+    let first_line_both = plain_both.lines().next().unwrap_or("");
+    assert!(
+        first_line_both.contains("bob"),
+        "Line 1 must prefer stdin.username over stdin.email:\n{plain_both}"
+    );
+    assert!(
+        !first_line_both.contains("alice@example.com"),
+        "Line 1 must not show email when stdin.username is set:\n{plain_both}"
+    );
+
+    // 3) display.username overrides stdin.username and stdin.email
+    fs::write(
+        env.workspace_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "display": {
+                "showUsername": true,
+                "username": "override-name"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code_ovr, out_ovr, _) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_both,
+        &[("COLUMNS", "120"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+    );
+    assert_eq!(code_ovr, 0);
+    let plain_ovr = strip_ansi(&out_ovr);
+    let first_line_ovr = plain_ovr.lines().next().unwrap_or("");
+    assert!(
+        first_line_ovr.contains("override-name"),
+        "Line 1 must prefer display.username override:\n{plain_ovr}"
+    );
+    assert!(
+        !first_line_ovr.contains("bob") && !first_line_ovr.contains("alice@example.com"),
+        "Line 1 must not show stdin username/email when display.username is configured:\n{plain_ovr}"
+    );
 }

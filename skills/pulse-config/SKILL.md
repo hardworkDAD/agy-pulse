@@ -97,8 +97,8 @@ Use `ask_question` (or ask concisely) to confirm scope and desired options / 使
 | `display.showBreadcrumbs` | `boolean` | `false` | Line 3 workspace memory / recently touched files / 第三行工作区记忆或最近文件面包屑 |
 | `display.breadcrumbCount` | `number` | `3` | Max breadcrumb files shown (wizard cycles `0, 1, 2, 3, 5`) / 面包屑最多显示文件数 |
 | `display.showGitBranch` | `boolean` | `false` | Git branch on Line 1 (hidden in non-Git dirs) / 状态栏首行 Git 分支 |
-| `display.showUsername` | `boolean` | `false` | Host stdin username or `display.username` / 显示用户名 |
-| `display.username` | `string` | *unset* | Custom username override when `showUsername` is `true` / 自定义用户名 |
+| `display.showUsername` | `boolean` | `false` | Host stdin `username` / `email` or `display.username` / 显示宿主 `stdin.username` / `stdin.email` 或自定义用户名 |
+| `display.username` | `string` | *unset* | Custom username override when `showUsername` is `true` (overrides host `stdin.username` / `stdin.email` and OS username) / 自定义用户名覆写（优先于宿主 `stdin.username` / `stdin.email` 与系统用户名） |
 | `display.showCost` | `boolean` | `false` | Cascade USD cost / 当前任务树总费用 |
 | `display.showDailyCost` | `boolean` | `false` | Today's USD cost / 今日费用 |
 | `display.showWeeklyCost` | `boolean` | `false` | 7-day rolling USD cost / 近 7 日费用 |

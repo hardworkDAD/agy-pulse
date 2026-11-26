@@ -29,6 +29,7 @@ fn empty_parsed_stdin(
         snapshot: PulseSnapshot {
             host: HostIdentity {
                 username: platform::current_username(),
+                email: None,
                 ..Default::default()
             },
             observed_at_ms,
@@ -83,7 +84,9 @@ pub(super) fn parse_host_stdin(
     let plan_tier = extract_non_empty_str(root.get("plan_tier"))
         .or_else(|| extract_non_empty_str(root.get("tier")));
     let cycle_mode = extract_non_empty_str(root.get("cycle_mode"));
+    let email = extract_non_empty_str(root.get("email"));
     let username = extract_non_empty_str(root.get("username"))
+        .or_else(|| email.clone())
         .or_else(platform::current_username);
 
     let terminal_width = root
@@ -117,6 +120,7 @@ pub(super) fn parse_host_stdin(
                 plan_tier,
                 cycle_mode,
                 username,
+                email,
             },
             workspace: WorkspaceInfo::default(),
             context,
@@ -143,7 +147,7 @@ pub(super) fn parse_host_stdin(
 fn parse_reset_time_ms(val: Option<&Value>) -> Option<i64> {
     let v = val?;
     match v {
-        Value::String(s) => parse_iso8601_to_epoch_ms(s),
+        Value::String(s) => parse_iso8601_to_epoch_ms(s).filter(|&ms| ms > 0),
         Value::Number(n) => {
             let num = n.as_f64().filter(|x| x.is_finite() && *x > 0.0)?;
             // Epoch seconds (< 100 billion) vs epoch milliseconds (>= 100 billion).
@@ -157,8 +161,11 @@ fn parse_reset_time_ms(val: Option<&Value>) -> Option<i64> {
     }
 }
 
-fn parse_quota_window(entry: &Value) -> Option<QuotaWindow> {
+fn parse_quota_window(entry: &Value, observed_at_ms: i64) -> Option<QuotaWindow> {
     let map = entry.as_object()?;
+    if map.get("disabled").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
     let raw_fraction = map
         .get("remaining_fraction")
         .or_else(|| map.get("remainingFraction"))
@@ -167,7 +174,14 @@ fn parse_quota_window(entry: &Value) -> Option<QuotaWindow> {
     let remaining_fraction = raw_fraction.clamp(0.0, 1.0);
     let reset_time_ms = parse_reset_time_ms(
         map.get("reset_time").or_else(|| map.get("resetTime")),
-    );
+    )
+    .or_else(|| {
+        map.get("reset_in_seconds")
+            .or_else(|| map.get("resetInSeconds"))
+            .and_then(Value::as_f64)
+            .filter(|secs| secs.is_finite() && *secs > 0.0)
+            .map(|secs| observed_at_ms.saturating_add((secs * 1000.0).round() as i64))
+    });
     Some(QuotaWindow {
         remaining_fraction,
         reset_time_ms,
@@ -180,13 +194,13 @@ fn parse_stdin_quota(quota_val: &Value, observed_at_ms: i64) -> Option<ProviderQ
     let mut any_assigned = false;
 
     if let Some(entry) = map.get("gemini-5h")
-        && let Some(win) = parse_quota_window(entry)
+        && let Some(win) = parse_quota_window(entry, observed_at_ms)
     {
         summary.google.five_hour = Some(win);
         any_assigned = true;
     }
     if let Some(entry) = map.get("gemini-weekly")
-        && let Some(win) = parse_quota_window(entry)
+        && let Some(win) = parse_quota_window(entry, observed_at_ms)
     {
         summary.google.weekly = Some(win);
         any_assigned = true;
@@ -194,7 +208,7 @@ fn parse_stdin_quota(quota_val: &Value, observed_at_ms: i64) -> Option<ProviderQ
 
     for key in ["anthropic-5h", "claude-5h", "3p-5h"] {
         if let Some(entry) = map.get(key)
-            && let Some(win) = parse_quota_window(entry)
+            && let Some(win) = parse_quota_window(entry, observed_at_ms)
         {
             summary.claude.five_hour = Some(win);
             any_assigned = true;
@@ -202,7 +216,7 @@ fn parse_stdin_quota(quota_val: &Value, observed_at_ms: i64) -> Option<ProviderQ
     }
     for key in ["anthropic-weekly", "claude-weekly", "3p-weekly"] {
         if let Some(entry) = map.get(key)
-            && let Some(win) = parse_quota_window(entry)
+            && let Some(win) = parse_quota_window(entry, observed_at_ms)
         {
             summary.claude.weekly = Some(win);
             any_assigned = true;
@@ -215,7 +229,7 @@ fn parse_stdin_quota(quota_val: &Value, observed_at_ms: i64) -> Option<ProviderQ
             continue;
         }
         if lower.starts_with("argon")
-            && let Some(win) = parse_quota_window(entry)
+            && let Some(win) = parse_quota_window(entry, observed_at_ms)
         {
             if lower.contains("5h")
                 || lower.contains("five_hour")
