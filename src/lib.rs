@@ -9,6 +9,7 @@ pub mod ops;
 pub mod platform;
 pub(crate) mod profile;
 pub mod render;
+pub mod sync;
 
 use std::env;
 use std::fs;

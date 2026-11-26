@@ -1,15 +1,16 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::domain::{
-    ProviderQuotaSummary, QuotaSnapshot, TokenUsage, UNASSIGNED_ACCOUNT_ID, calculate_token_cost,
-    normalize_account_id,
+    LedgerSyncMeta, LocalMonthlyExport, ProviderQuotaSummary, QuotaSnapshot, SyncConvRecord,
+    SyncStepRecord, TokenUsage, UNASSIGNED_ACCOUNT_ID, calculate_token_cost, normalize_account_id,
 };
 use crate::ingest::HostReader;
 use crate::platform;
@@ -1786,6 +1787,551 @@ pub(super) fn assign_unassigned_account(
             steps_updated,
             dry_run: false,
         })
+    })
+    .map_err(LedgerError::from)
+}
+
+fn utc_month_key_from_ms(ts_ms: i64) -> String {
+    let dt = DateTime::<Utc>::from_timestamp_millis(ts_ms).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    dt.format("%Y-%m").to_string()
+}
+
+pub(super) fn list_local_sync_accounts(conn: &Connection) -> Result<Vec<String>, LedgerError> {
+    let local_device_id = read_local_device_id(conn)?;
+    let mut accounts: BTreeSet<String> = BTreeSet::new();
+
+    for sql in [
+        "SELECT DISTINCT account_id FROM ingested_dbs WHERE device_id = ?1",
+        "SELECT DISTINCT account_id FROM telemetry_steps WHERE device_id = ?1",
+        "SELECT DISTINCT account_id FROM quota_snapshots WHERE device_id = ?1",
+    ] {
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query(params![&local_device_id])?;
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            let normalized =
+                normalize_account_id(&raw).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+            accounts.insert(normalized);
+        }
+    }
+
+    Ok(accounts.into_iter().collect())
+}
+
+pub(super) fn export_local_account_monthly_chunks(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<BTreeMap<String, LocalMonthlyExport>, LedgerError> {
+    let local_device_id = read_local_device_id(conn)?;
+    let target_account =
+        normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+
+    let mut months: BTreeMap<String, LocalMonthlyExport> = BTreeMap::new();
+    let mut earliest_step_ts_by_conv: HashMap<String, i64> = HashMap::new();
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT step_uid, conversation_id, gen_idx, entry_idx, step_index, ts_ms,
+                    model, raw_model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                    cost_usd, stream_sec, ttft_sec, valid_stream, valid_ttft,
+                    parent_conversation_id, root_conversation_id, source
+             FROM telemetry_steps
+             WHERE device_id = ?1 AND account_id = ?2
+             ORDER BY step_uid ASC",
+        )?;
+        let mut rows = stmt.query(params![&local_device_id, &target_account])?;
+        while let Some(row) = rows.next()? {
+            let conversation_id: String = row.get(1)?;
+            let ts_ms: i64 = row.get(5)?;
+            earliest_step_ts_by_conv
+                .entry(conversation_id.clone())
+                .and_modify(|cur| {
+                    if ts_ms < *cur {
+                        *cur = ts_ms;
+                    }
+                })
+                .or_insert(ts_ms);
+
+            let raw_source: String = row.get(19)?;
+            let step = SyncStepRecord {
+                step_uid: row.get(0)?,
+                conversation_id,
+                gen_idx: row.get(2)?,
+                entry_idx: row.get(3)?,
+                step_index: row.get(4)?,
+                ts_ms,
+                model: row.get(6)?,
+                raw_model: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                input_tokens: row.get(8)?,
+                cache_read_tokens: row.get(9)?,
+                cache_write_tokens: row.get(10)?,
+                output_tokens: row.get(11)?,
+                cost_usd: row.get(12)?,
+                stream_sec: row.get(13)?,
+                ttft_sec: row.get(14)?,
+                valid_stream: row.get(15)?,
+                valid_ttft: row.get(16)?,
+                parent_conversation_id: row.get(17)?,
+                root_conversation_id: row.get(18)?,
+                source: LedgerSource::from_raw(&raw_source).as_str().to_string(),
+            };
+            let month_key = utc_month_key_from_ms(ts_ms);
+            months.entry(month_key).or_default().steps.push(step);
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT conversation_id, created_at_ms, cascade_id,
+                    parent_conversation_id, root_conversation_id, source, last_synced_ms
+             FROM ingested_dbs
+             WHERE device_id = ?1 AND account_id = ?2
+             ORDER BY conversation_id ASC",
+        )?;
+        let mut rows = stmt.query(params![&local_device_id, &target_account])?;
+        while let Some(row) = rows.next()? {
+            let conversation_id: String = row.get(0)?;
+            let created_at_ms: Option<i64> = row.get(1)?;
+            let cascade_id = row
+                .get::<_, Option<String>>(2)?
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| conversation_id.clone());
+            let parent_conversation_id: Option<String> = row.get(3)?;
+            let root_conversation_id: Option<String> = row.get(4)?;
+            let raw_source: String = row.get(5)?;
+            let last_synced_ms: i64 = row.get(6)?;
+
+            let anchor_ts = created_at_ms
+                .or_else(|| earliest_step_ts_by_conv.get(&conversation_id).copied())
+                .unwrap_or(last_synced_ms);
+            let month_key = utc_month_key_from_ms(anchor_ts);
+
+            let conv = SyncConvRecord {
+                conversation_id,
+                created_at_ms,
+                cascade_id,
+                parent_conversation_id,
+                root_conversation_id,
+                source: LedgerSource::from_raw(&raw_source).as_str().to_string(),
+            };
+            months.entry(month_key).or_default().convs.push(conv);
+        }
+    }
+
+    Ok(months)
+}
+
+pub(super) fn read_local_account_quota_snapshot(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<Option<QuotaSnapshot>, LedgerError> {
+    let local_device_id = read_local_device_id(conn)?;
+    let target_account =
+        normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+
+    let row: Option<(String, Option<String>, i64, String)> = conn
+        .query_row(
+            "SELECT device_name, plan_tier, observed_at_ms, quota_json
+             FROM quota_snapshots
+             WHERE account_id = ?1 AND device_id = ?2",
+            params![&target_account, &local_device_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+
+    let Some((device_name, plan_tier, observed_at_ms, quota_json)) = row else {
+        return Ok(None);
+    };
+    let Ok(quota) = serde_json::from_str::<ProviderQuotaSummary>(&quota_json) else {
+        return Ok(None);
+    };
+    Ok(Some(QuotaSnapshot {
+        account_id: target_account,
+        device_id: local_device_id,
+        device_name,
+        plan_tier,
+        observed_at_ms,
+        quota,
+    }))
+}
+
+pub(super) fn read_local_device_plan_tier(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<Option<String>, LedgerError> {
+    let local_device_id = read_local_device_id(conn)?;
+    let target_account =
+        normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+
+    let from_sync_devices = conn
+        .query_row(
+            "SELECT plan_tier FROM sync_devices WHERE account_id = ?1 AND device_id = ?2",
+            params![&target_account, &local_device_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if from_sync_devices.is_some() {
+        return Ok(from_sync_devices);
+    }
+
+    let from_quota = conn
+        .query_row(
+            "SELECT plan_tier FROM quota_snapshots WHERE account_id = ?1 AND device_id = ?2",
+            params![&target_account, &local_device_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Ok(from_quota)
+}
+
+pub(super) fn get_sync_chunk_hash(
+    conn: &Connection,
+    account_id: &str,
+    device_id: &str,
+    month_key: &str,
+    direction: &str,
+) -> Result<Option<String>, LedgerError> {
+    let normalized_account =
+        normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+    let row = conn
+        .query_row(
+            "SELECT content_sha256
+             FROM sync_chunk_state
+             WHERE account_id = ?1 AND device_id = ?2 AND month_key = ?3 AND direction = ?4",
+            params![&normalized_account, device_id.trim(), month_key, direction],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn set_sync_chunk_hash(
+    conn: &Connection,
+    account_id: &str,
+    device_id: &str,
+    month_key: &str,
+    direction: &str,
+    content_sha256: &str,
+    now_ms: i64,
+    max_retries: u32,
+) -> Result<(), LedgerError> {
+    let normalized_account =
+        normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+    let trimmed_device = device_id.trim();
+    run_with_busy_retry_n(max_retries, || {
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_chunk_state (
+               account_id, device_id, month_key, direction, content_sha256, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                &normalized_account,
+                trimmed_device,
+                month_key,
+                direction,
+                content_sha256,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    })
+    .map_err(LedgerError::from)
+}
+
+pub(super) fn clear_local_push_chunk_states(
+    conn: &Connection,
+    max_retries: u32,
+) -> Result<usize, LedgerError> {
+    run_with_busy_retry_n(max_retries, || {
+        let local_device_id = read_local_device_id(conn)?;
+        conn.execute(
+            "DELETE FROM sync_chunk_state WHERE device_id = ?1 AND direction = 'push'",
+            params![&local_device_id],
+        )
+    })
+    .map_err(LedgerError::from)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn import_remote_chunk(
+    conn: &Connection,
+    account_id: &str,
+    device_id: &str,
+    month_key: &str,
+    sha256: &str,
+    convs: &[SyncConvRecord],
+    steps: &[SyncStepRecord],
+    now_ms: i64,
+    max_retries: u32,
+) -> Result<usize, LedgerError> {
+    let normalized_account =
+        normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+    let trimmed_device = device_id.trim();
+    if trimmed_device.is_empty() {
+        return Err(LedgerError::InvalidSyncOperation(
+            "remote device_id must not be empty".to_string(),
+        ));
+    }
+
+    let local_device_id = read_local_device_id(conn)?;
+    if trimmed_device == local_device_id {
+        return Err(LedgerError::InvalidSyncOperation(format!(
+            "refusing to import remote chunk for local device_id {local_device_id}"
+        )));
+    }
+
+    let steps_opt = run_with_busy_retry_n(max_retries, || -> Result<Option<usize>, rusqlite::Error> {
+        let tx = ImmediateTxGuard::begin(conn)?;
+        let tx_local_device_id = read_local_device_id(conn)?;
+        if trimmed_device == tx_local_device_id {
+            return Ok(None);
+        }
+
+        let mut steps_imported = 0usize;
+        {
+            let mut db_stmt = conn.prepare(
+                "INSERT INTO ingested_dbs (
+                   conversation_id, db_path, sig, last_synced_ms,
+                   workspace, branch, created_at_ms, cascade_id,
+                   parent_conversation_id, root_conversation_id, db_mtime_ms, source,
+                   account_id, device_id
+                 ) VALUES (?1, '', 'remote', ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(conversation_id) DO UPDATE SET
+                   db_path = '',
+                   sig = 'remote',
+                   last_synced_ms = excluded.last_synced_ms,
+                   workspace = NULL,
+                   branch = NULL,
+                   created_at_ms = excluded.created_at_ms,
+                   cascade_id = excluded.cascade_id,
+                   parent_conversation_id = excluded.parent_conversation_id,
+                   root_conversation_id = excluded.root_conversation_id,
+                   db_mtime_ms = excluded.db_mtime_ms,
+                   source = excluded.source,
+                   account_id = excluded.account_id
+                 WHERE ingested_dbs.device_id = excluded.device_id",
+            )?;
+
+            for conv in convs {
+                let db_mtime_ms = conv.created_at_ms.unwrap_or(now_ms);
+                let source = LedgerSource::from_raw(&conv.source).as_str();
+                db_stmt.execute(params![
+                    &conv.conversation_id,
+                    now_ms,
+                    conv.created_at_ms,
+                    &conv.cascade_id,
+                    &conv.parent_conversation_id,
+                    &conv.root_conversation_id,
+                    db_mtime_ms,
+                    source,
+                    &normalized_account,
+                    trimmed_device,
+                ])?;
+            }
+
+            let mut step_stmt = conn.prepare(
+                "INSERT INTO telemetry_steps (
+                   step_uid, conversation_id, gen_idx, entry_idx, step_index, ts_ms,
+                   model, raw_model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                   cost_usd, stream_sec, ttft_sec, valid_stream, valid_ttft,
+                   parent_conversation_id, root_conversation_id, workspace, branch, source,
+                   account_id, device_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, NULL, NULL, ?20, ?21, ?22)
+                 ON CONFLICT(step_uid) DO UPDATE SET
+                   conversation_id = excluded.conversation_id,
+                   gen_idx = excluded.gen_idx,
+                   entry_idx = excluded.entry_idx,
+                   step_index = excluded.step_index,
+                   ts_ms = excluded.ts_ms,
+                   model = excluded.model,
+                   raw_model = excluded.raw_model,
+                   input_tokens = excluded.input_tokens,
+                   cache_read_tokens = excluded.cache_read_tokens,
+                   cache_write_tokens = excluded.cache_write_tokens,
+                   output_tokens = excluded.output_tokens,
+                   cost_usd = excluded.cost_usd,
+                   stream_sec = excluded.stream_sec,
+                   ttft_sec = excluded.ttft_sec,
+                   valid_stream = excluded.valid_stream,
+                   valid_ttft = excluded.valid_ttft,
+                   parent_conversation_id = excluded.parent_conversation_id,
+                   root_conversation_id = excluded.root_conversation_id,
+                   workspace = NULL,
+                   branch = NULL,
+                   source = excluded.source,
+                   account_id = excluded.account_id
+                 WHERE telemetry_steps.device_id = excluded.device_id",
+            )?;
+
+            for step in steps {
+                let source = LedgerSource::from_raw(&step.source).as_str();
+                let changed = step_stmt.execute(params![
+                    &step.step_uid,
+                    &step.conversation_id,
+                    step.gen_idx,
+                    step.entry_idx,
+                    step.step_index,
+                    step.ts_ms,
+                    &step.model,
+                    &step.raw_model,
+                    step.input_tokens,
+                    step.cache_read_tokens,
+                    step.cache_write_tokens,
+                    step.output_tokens,
+                    step.cost_usd,
+                    step.stream_sec,
+                    step.ttft_sec,
+                    step.valid_stream,
+                    step.valid_ttft,
+                    &step.parent_conversation_id,
+                    &step.root_conversation_id,
+                    source,
+                    &normalized_account,
+                    trimmed_device,
+                ])?;
+                if changed > 0 {
+                    steps_imported += 1;
+                }
+            }
+        }
+
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_chunk_state (
+               account_id, device_id, month_key, direction, content_sha256, updated_at_ms
+             ) VALUES (?1, ?2, ?3, 'pull', ?4, ?5)",
+            params![
+                &normalized_account,
+                trimmed_device,
+                month_key,
+                sha256,
+                now_ms
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(Some(steps_imported))
+    })?;
+
+    steps_opt.ok_or_else(|| {
+        LedgerError::InvalidSyncOperation(format!(
+            "refusing to import remote chunk for local device_id {local_device_id}"
+        ))
+    })
+}
+
+pub(super) fn delete_device_data(
+    conn: &Connection,
+    target_device_id: &str,
+    max_retries: u32,
+) -> Result<usize, LedgerError> {
+    let trimmed = target_device_id.trim();
+    if trimmed.is_empty() {
+        return Err(LedgerError::InvalidSyncOperation(
+            "target device_id must not be empty".to_string(),
+        ));
+    }
+
+    run_with_busy_retry_n(max_retries, || {
+        let tx = ImmediateTxGuard::begin(conn)?;
+        let mut total_deleted = 0usize;
+        for sql in [
+            "DELETE FROM telemetry_steps WHERE device_id = ?1",
+            "DELETE FROM ingested_dbs WHERE device_id = ?1",
+            "DELETE FROM sync_devices WHERE device_id = ?1",
+            "DELETE FROM quota_snapshots WHERE device_id = ?1",
+            "DELETE FROM sync_chunk_state WHERE device_id = ?1",
+        ] {
+            total_deleted += conn.execute(sql, params![trimmed])?;
+        }
+        tx.commit()?;
+        Ok(total_deleted)
+    })
+    .map_err(LedgerError::from)
+}
+
+pub(super) fn get_sync_meta(conn: &Connection) -> Result<LedgerSyncMeta, LedgerError> {
+    let mut meta = LedgerSyncMeta::default();
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM ledger_meta
+         WHERE key IN (
+           'last_sync_push_ms',
+           'last_sync_pull_ms',
+           'last_sync_error',
+           'last_sync_remote_fingerprint'
+         )",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let value: String = row.get(1)?;
+        match key.as_str() {
+            "last_sync_push_ms" => {
+                meta.last_sync_push_ms = value.trim().parse::<i64>().ok();
+            }
+            "last_sync_pull_ms" => {
+                meta.last_sync_pull_ms = value.trim().parse::<i64>().ok();
+            }
+            "last_sync_error" => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    meta.last_sync_error = Some(trimmed.to_string());
+                }
+            }
+            "last_sync_remote_fingerprint" => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    meta.last_sync_remote_fingerprint = Some(trimmed.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(meta)
+}
+
+pub(super) fn set_sync_meta_field(
+    conn: &Connection,
+    key: &str,
+    value: Option<&str>,
+    max_retries: u32,
+) -> Result<(), LedgerError> {
+    let trimmed_key = key.trim();
+    if !matches!(
+        trimmed_key,
+        "last_sync_push_ms"
+            | "last_sync_pull_ms"
+            | "last_sync_error"
+            | "last_sync_remote_fingerprint"
+    ) {
+        return Err(LedgerError::InvalidSyncOperation(format!(
+            "unsupported sync meta key: {trimmed_key}"
+        )));
+    }
+
+    run_with_busy_retry_n(max_retries, || {
+        match value.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(v) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO ledger_meta (key, value) VALUES (?1, ?2)",
+                    params![trimmed_key, v],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM ledger_meta WHERE key = ?1",
+                    params![trimmed_key],
+                )?;
+            }
+        }
+        Ok(())
     })
     .map_err(LedgerError::from)
 }

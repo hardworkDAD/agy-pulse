@@ -3,13 +3,16 @@ mod schema;
 mod stats_report;
 mod sync;
 
+use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
 use crate::config::{self, LanguageSetting};
-use crate::domain::QuotaSnapshot;
+use crate::domain::{
+    LedgerSyncMeta, LocalMonthlyExport, QuotaSnapshot, SyncConvRecord, SyncStepRecord,
+};
 use crate::platform;
 use crate::render::resolve_language_from_locale;
 
@@ -38,6 +41,8 @@ pub enum LedgerError {
     Json(#[from] serde_json::Error),
     #[error("Invalid account email: {0}")]
     InvalidAccountEmail(String),
+    #[error("Invalid sync operation: {0}")]
+    InvalidSyncOperation(String),
 }
 
 /// Deep module owning the unified `agy-pulse-ledger.sqlite` (WAL) connection.
@@ -159,6 +164,120 @@ impl LedgerStore {
             plan_tier,
             self.max_retries,
         )
+    }
+
+    /// Return deduplicated normalized `account_id` values present in this machine's local ledger
+    /// (`ingested_dbs`, `telemetry_steps`, `quota_snapshots`), or an empty list when none exist.
+    pub fn list_local_sync_accounts(&self) -> Result<Vec<String>, LedgerError> {
+        sync::list_local_sync_accounts(&self.conn)
+    }
+
+    /// Export this machine's local conversations and steps for `account_id`, bucketed by UTC `YYYY-MM`
+    /// without host-local `db_path`, `sig`, `workspace`, or `branch`.
+    pub fn export_local_account_monthly_chunks(
+        &self,
+        account_id: &str,
+    ) -> Result<BTreeMap<String, LocalMonthlyExport>, LedgerError> {
+        sync::export_local_account_monthly_chunks(&self.conn, account_id)
+    }
+
+    /// Read this machine's local `QuotaSnapshot` for `account_id`, if present and valid.
+    pub fn read_local_account_quota_snapshot(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<QuotaSnapshot>, LedgerError> {
+        sync::read_local_account_quota_snapshot(&self.conn, account_id)
+    }
+
+    /// Read this machine's `plan_tier` for `account_id` from `sync_devices` or `quota_snapshots`.
+    pub fn read_local_device_plan_tier(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<String>, LedgerError> {
+        sync::read_local_device_plan_tier(&self.conn, account_id)
+    }
+
+    /// Read the recorded SHA-256 hash in `sync_chunk_state` for `(account_id, device_id, month_key, direction)`.
+    pub fn get_sync_chunk_hash(
+        &self,
+        account_id: &str,
+        device_id: &str,
+        month_key: &str,
+        direction: &str,
+    ) -> Result<Option<String>, LedgerError> {
+        sync::get_sync_chunk_hash(&self.conn, account_id, device_id, month_key, direction)
+    }
+
+    /// Persist a SHA-256 hash in `sync_chunk_state` for `(account_id, device_id, month_key, direction)`.
+    pub fn set_sync_chunk_hash(
+        &self,
+        account_id: &str,
+        device_id: &str,
+        month_key: &str,
+        direction: &str,
+        content_sha256: &str,
+        now_ms: i64,
+    ) -> Result<(), LedgerError> {
+        sync::set_sync_chunk_hash(
+            &self.conn,
+            account_id,
+            device_id,
+            month_key,
+            direction,
+            content_sha256,
+            now_ms,
+            self.max_retries,
+        )
+    }
+
+    /// Clear local device `push` entries in `sync_chunk_state` so subsequent pushes re-upload chunks.
+    pub fn clear_local_push_chunk_states(&self) -> Result<usize, LedgerError> {
+        sync::clear_local_push_chunk_states(&self.conn, self.max_retries)
+    }
+
+    /// Atomically import a remote device's monthly chunk into `ingested_dbs`, `telemetry_steps`,
+    /// and `sync_chunk_state(direction='pull')` within a single Immediate transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_remote_chunk(
+        &self,
+        account_id: &str,
+        device_id: &str,
+        month_key: &str,
+        sha256: &str,
+        convs: &[SyncConvRecord],
+        steps: &[SyncStepRecord],
+        now_ms: i64,
+    ) -> Result<usize, LedgerError> {
+        sync::import_remote_chunk(
+            &self.conn,
+            account_id,
+            device_id,
+            month_key,
+            sha256,
+            convs,
+            steps,
+            now_ms,
+            self.max_retries,
+        )
+    }
+
+    /// Atomically delete all rows belonging to `target_device_id` across ledger tables.
+    pub fn delete_device_data(&self, target_device_id: &str) -> Result<usize, LedgerError> {
+        sync::delete_device_data(&self.conn, target_device_id, self.max_retries)
+    }
+
+    /// Read multi-device sync metadata values from `ledger_meta`.
+    pub fn get_sync_meta(&self) -> Result<LedgerSyncMeta, LedgerError> {
+        sync::get_sync_meta(&self.conn)
+    }
+
+    /// Update or clear a supported multi-device sync metadata key in `ledger_meta`.
+    pub fn set_sync_meta_field(
+        &self,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), LedgerError> {
+        sync::set_sync_meta_field(&self.conn, key, value, self.max_retries)
     }
 
     /// Return `true` when `last_full_scan_ms` is absent or older than `max_age_ms`.
