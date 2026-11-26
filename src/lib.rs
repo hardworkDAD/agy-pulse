@@ -50,6 +50,7 @@ Usage:\n  \
   agypl install                           Deploy CLI binaries & register host statusLine (alias: --install)\n  \
   agypl uninstall [--purge-ledger]        Safely remove statusLine & caches (keeps ledger by default)\n  \
   agypl account assign <email> [options]  Assign local unassigned records to an email\n  \
+  agypl sync [init|status|prune-device]   Synchronize multi-device telemetry with remote storage\n  \
   agypl update                            Check and install the latest release (alias: --update)\n  \
   agypl help                              Show this help message (alias: --help, -h)\n  \
   agypl --version                         Show version information (alias: -V, -v, version)\n  \
@@ -318,6 +319,52 @@ fn run_sync_ledger_bg_cli(args: &[String]) -> i32 {
     0
 }
 
+fn is_truthy_env(name: &str) -> bool {
+    env::var(name).ok().is_some_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
+fn maybe_spawn_background_remote_push(store: &ledger::LedgerStore, now_ms: i64) {
+    if is_truthy_env("AGY_PULSE_NO_SYNC_AUTOSTART") {
+        return;
+    }
+    let cfg_path = platform::resolve_sync_config_path();
+    if !cfg_path.is_file() {
+        return;
+    }
+    let Ok(Some(cfg)) = sync::load_sync_config_from(&cfg_path) else {
+        return;
+    };
+    if !cfg.enabled {
+        return;
+    }
+    let Ok(meta) = store.get_sync_meta() else {
+        return;
+    };
+    let interval_ms = i64::try_from(cfg.push_interval_sec)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
+    if let Some(prev) = meta.last_sync_push_ms
+        && now_ms >= prev
+        && (now_ms - prev) < interval_ms
+    {
+        return;
+    }
+    if !store
+        .has_pending_local_sync_changes(meta.last_sync_push_ms)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if let Ok(exe) = env::current_exe() {
+        let _ = platform::spawn_detached(&exe, &["--sync-bg"]);
+    }
+}
+
 struct StatuslineWorkerOutput {
     output: Option<String>,
     summary: String,
@@ -554,6 +601,10 @@ fn run_statusline_enriched(
                         plan_tier.as_deref(),
                     );
                 }
+
+                if Instant::now() < pipeline_deadline {
+                    maybe_spawn_background_remote_push(&store, ingest.snapshot.observed_at_ms);
+                }
             }
             Err(err) => {
                 platform::write_error_log_safely(&format!("Ledger open error: {err}"));
@@ -694,6 +745,10 @@ pub fn run_cli() -> i32 {
         return ops::run_account_cli(&args);
     }
 
+    if matches!(first, Some("sync")) {
+        return sync::run_sync_cli(&args);
+    }
+
     if matches!(first, Some("update")) || args.iter().any(|a| a == "--update") {
         return ops::run_update_cli(&args);
     }
@@ -704,6 +759,10 @@ pub fn run_cli() -> i32 {
 
     if args.iter().any(|a| a == "--sync-ledger-bg") {
         return run_sync_ledger_bg_cli(&args);
+    }
+
+    if args.iter().any(|a| a == "--sync-bg") {
+        return sync::run_sync_bg();
     }
 
     if matches!(first, Some("help" | "--help" | "-h"))

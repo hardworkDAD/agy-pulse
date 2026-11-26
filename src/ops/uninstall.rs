@@ -32,6 +32,7 @@ const EXTRA_CACHE_TARGETS: &[&str] = &[
     DASHBOARD_STATE_FILENAME,
     DASHBOARD_SPAWN_LOCK_FILENAME,
     "agy-pulse-ledger-sync.lock",
+    "agy-pulse-sync.lock",
     "daily-cost.json",
     "speed-cache",
     "transcript-cache",

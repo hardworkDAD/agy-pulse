@@ -31,6 +31,17 @@ pub struct DeviceIdentity {
     pub is_local: bool,
 }
 
+/// Persisted device record stored in `sync_devices`, scoped per account and device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncDeviceRecord {
+    pub account_id: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub is_local: bool,
+    pub last_seen_ms: i64,
+    pub plan_tier: Option<String>,
+}
+
 /// Cross-device quota observation snapshot bound to an account and reporting device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaSnapshot {

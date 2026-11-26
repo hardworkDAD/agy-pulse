@@ -135,6 +135,7 @@ fn cli_supports_version_and_help_on_both_binaries() {
         assert!(help_text.contains("agypl"));
         assert!(help_text.contains("agy-pulse"));
         assert!(help_text.contains("account assign"));
+        assert!(help_text.contains("sync [init|status|prune-device]"));
         assert!(
             !help_text.contains("diagnose"),
             "v2 help must not advertise retired diagnose command: {help_text}"

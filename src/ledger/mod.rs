@@ -11,7 +11,8 @@ use rusqlite::Connection;
 
 use crate::config::{self, LanguageSetting};
 use crate::domain::{
-    LedgerSyncMeta, LocalMonthlyExport, QuotaSnapshot, SyncConvRecord, SyncStepRecord,
+    LedgerSyncMeta, LocalMonthlyExport, QuotaSnapshot, SyncConvRecord, SyncDeviceRecord,
+    SyncStepRecord,
 };
 use crate::platform;
 use crate::render::resolve_language_from_locale;
@@ -278,6 +279,21 @@ impl LedgerStore {
         value: Option<&str>,
     ) -> Result<(), LedgerError> {
         sync::set_sync_meta_field(&self.conn, key, value, self.max_retries)
+    }
+
+    /// Return all known device rows from `sync_devices` ordered by
+    /// `account_id ASC, is_local DESC, device_name ASC, device_id ASC`.
+    pub fn list_sync_devices(&self) -> Result<Vec<SyncDeviceRecord>, LedgerError> {
+        sync::list_sync_devices(&self.conn)
+    }
+
+    /// Fast hot-path check returning `true` when this machine has local syncable data newer
+    /// than `last_push_ms` (or when `last_push_ms` is `None` and local data exists).
+    pub fn has_pending_local_sync_changes(
+        &self,
+        last_push_ms: Option<i64>,
+    ) -> Result<bool, LedgerError> {
+        sync::has_pending_local_sync_changes(&self.conn, last_push_ms)
     }
 
     /// Return `true` when `last_full_scan_ms` is absent or older than `max_age_ms`.

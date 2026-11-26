@@ -1,4 +1,5 @@
 pub mod cf_worker;
+pub mod cli;
 pub mod config;
 pub mod engine;
 pub mod http_util;
@@ -10,6 +11,7 @@ pub mod webdav;
 use serde::{Deserialize, Serialize};
 
 pub use cf_worker::CfWorkerRemote;
+pub use cli::{run_sync_bg, run_sync_cli};
 pub use config::{
     RemoteConfig, SyncConfig, load_sync_config, load_sync_config_from, save_sync_config,
     save_sync_config_to,

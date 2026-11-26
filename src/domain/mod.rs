@@ -23,5 +23,5 @@ pub use quota::{
 };
 pub use sync::{
     DeviceIdentity, LedgerSyncMeta, LocalMonthlyExport, LocalMonthlyExportMap, QuotaSnapshot,
-    SyncConvRecord, SyncStepRecord, UNASSIGNED_ACCOUNT_ID, normalize_account_id,
+    SyncConvRecord, SyncDeviceRecord, SyncStepRecord, UNASSIGNED_ACCOUNT_ID, normalize_account_id,
 };

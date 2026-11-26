@@ -10,7 +10,8 @@ use serde::Serialize;
 
 use crate::domain::{
     LedgerSyncMeta, LocalMonthlyExport, ProviderQuotaSummary, QuotaSnapshot, SyncConvRecord,
-    SyncStepRecord, TokenUsage, UNASSIGNED_ACCOUNT_ID, calculate_token_cost, normalize_account_id,
+    SyncDeviceRecord, SyncStepRecord, TokenUsage, UNASSIGNED_ACCOUNT_ID, calculate_token_cost,
+    normalize_account_id,
 };
 use crate::ingest::HostReader;
 use crate::platform;
@@ -2334,4 +2335,60 @@ pub(super) fn set_sync_meta_field(
         Ok(())
     })
     .map_err(LedgerError::from)
+}
+
+pub(super) fn list_sync_devices(conn: &Connection) -> Result<Vec<SyncDeviceRecord>, LedgerError> {
+    let mut stmt = conn.prepare(
+        "SELECT account_id, device_id, device_name, is_local, last_seen_ms, plan_tier
+         FROM sync_devices
+         ORDER BY account_id ASC, is_local DESC, device_name ASC, device_id ASC",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let is_local_int: i64 = row.get(3)?;
+        out.push(SyncDeviceRecord {
+            account_id: row.get(0)?,
+            device_id: row.get(1)?,
+            device_name: row.get(2)?,
+            is_local: is_local_int != 0,
+            last_seen_ms: row.get(4)?,
+            plan_tier: row.get(5)?,
+        });
+    }
+    Ok(out)
+}
+
+pub(super) fn has_pending_local_sync_changes(
+    conn: &Connection,
+    last_push_ms: Option<i64>,
+) -> Result<bool, LedgerError> {
+    let local_device_id = read_local_device_id(conn)?;
+    let has_any_local: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ingested_dbs WHERE device_id = ?1 LIMIT 1)
+             OR EXISTS(SELECT 1 FROM telemetry_steps WHERE device_id = ?1 LIMIT 1)
+             OR EXISTS(SELECT 1 FROM quota_snapshots WHERE device_id = ?1 LIMIT 1)",
+        params![&local_device_id],
+        |r| r.get(0),
+    )?;
+    if has_any_local == 0 {
+        return Ok(false);
+    }
+
+    let Some(prev_push_ms) = last_push_ms else {
+        return Ok(true);
+    };
+
+    let (max_synced, max_quota, max_seen): (Option<i64>, Option<i64>, Option<i64>) =
+        conn.query_row(
+            "SELECT
+               (SELECT MAX(last_synced_ms) FROM ingested_dbs WHERE device_id = ?1),
+               (SELECT MAX(observed_at_ms) FROM quota_snapshots WHERE device_id = ?1),
+               (SELECT MAX(last_seen_ms) FROM sync_devices WHERE is_local = 1 AND device_id = ?1)",
+            params![&local_device_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+
+    let latest = [max_synced, max_quota, max_seen].into_iter().flatten().max();
+    Ok(latest.is_some_and(|ts| ts > prev_push_ms))
 }
