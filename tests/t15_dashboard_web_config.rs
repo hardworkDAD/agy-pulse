@@ -159,6 +159,7 @@ impl IsolatedEnv {
 
 struct HttpResponse {
     status: u16,
+    head: String,
     body: String,
 }
 
@@ -208,6 +209,7 @@ fn send_http(
         .expect("parse status code");
     HttpResponse {
         status,
+        head: head.to_string(),
         body: resp_body.to_string(),
     }
 }
@@ -2179,6 +2181,80 @@ fn t15_sync_config_conflict_corrupt_delete_and_identity_sync_integration() {
     assert_eq!(ov_after.status, 200);
     let ov_after_json: Value = serde_json::from_str(&ov_after.body).unwrap();
     assert_eq!(ov_after_json["summary"]["totalSteps"], 1);
+
+    server.shutdown();
+}
+
+#[test]
+fn t15_dashboard_html_settings_ui_anchors_placeholders_and_security_headers() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let mut guard = EnvGuard::new();
+    env.apply_env(&mut guard);
+
+    let mut server = env.start_server(300_000);
+    let port = server.info().port;
+
+    let res = send_http(port, "GET", "/", &[], "");
+    assert_eq!(res.status, 200);
+
+    let head_lower = res.head.to_ascii_lowercase();
+    assert!(
+        head_lower.contains("content-security-policy: default-src 'self'"),
+        "expected CSP header in:\n{}",
+        res.head
+    );
+    assert!(
+        head_lower.contains("x-frame-options: deny"),
+        "expected X-Frame-Options: DENY in:\n{}",
+        res.head
+    );
+    assert!(
+        head_lower.contains("cache-control: no-store"),
+        "expected Cache-Control: no-store in:\n{}",
+        res.head
+    );
+    assert!(
+        head_lower.contains("x-content-type-options: nosniff"),
+        "expected X-Content-Type-Options: nosniff in:\n{}",
+        res.head
+    );
+
+    assert!(
+        !res.body.contains("__AGY_PULSE_"),
+        "expected no unsubstituted __AGY_PULSE_* placeholders in rendered HTML"
+    );
+
+    let expected_token_decl = format!("var CSRF_TOKEN = '{}';", server.csrf_token());
+    assert_eq!(server.csrf_token().len(), 64);
+    assert!(
+        server.csrf_token().chars().all(|c| c.is_ascii_hexdigit()),
+        "expected 64-char hex CSRF token"
+    );
+    assert!(
+        res.body.contains(&expected_token_decl),
+        "expected injected CSRF token declaration in HTML"
+    );
+
+    for anchor in [
+        "id=\"btn-settings\"",
+        "id=\"settings-overlay\"",
+        "id=\"settings-drawer\"",
+        "id=\"tab-btn-pulse\"",
+        "id=\"tab-btn-sync\"",
+        "id=\"tab-pane-pulse\"",
+        "id=\"tab-pane-sync\"",
+        "X-Agy-Pulse-Token",
+        "/api/config/pulse",
+        "/api/config/pulse/preview",
+        "/api/config/sync",
+        "/api/config/sync/test",
+    ] {
+        assert!(
+            res.body.contains(anchor),
+            "expected HTML anchor '{anchor}' in dashboard response"
+        );
+    }
 
     server.shutdown();
 }

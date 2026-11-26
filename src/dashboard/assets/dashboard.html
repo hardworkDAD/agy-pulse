@@ -735,6 +735,517 @@
       color: var(--accent-2);
       margin-right: 5px;
     }
+
+    /* Settings Drawer & Config UI */
+    .settings-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      background: rgba(2, 6, 23, 0.58);
+      backdrop-filter: blur(2px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease;
+    }
+    .settings-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .settings-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 90;
+      width: min(740px, 94vw);
+      max-width: 100vw;
+      background: var(--bg-elev);
+      border-left: 1px solid var(--border-strong);
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      transform: translateX(100%);
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .settings-drawer.open {
+      transform: translateX(0);
+    }
+    @media (max-width: 640px) {
+      .settings-drawer {
+        width: 100vw;
+        border-left: none;
+      }
+    }
+    .drawer-header {
+      padding: 14px 18px 0;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-elev);
+      flex-shrink: 0;
+    }
+    .drawer-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .drawer-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .drawer-close-btn {
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      justify-content: center;
+      font-size: 16px;
+      line-height: 1;
+    }
+    .drawer-tabs {
+      display: flex;
+      gap: 6px;
+    }
+    .drawer-tab {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 14px;
+      border: 1px solid transparent;
+      border-bottom: none;
+      border-radius: 9px 9px 0 0;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      margin-bottom: -1px;
+      transition: color 0.15s, background 0.15s;
+    }
+    .drawer-tab:hover {
+      color: var(--text);
+      background: var(--bg-hover);
+    }
+    .drawer-tab.active {
+      color: var(--accent);
+      background: var(--bg-card);
+      border-color: var(--border);
+      border-bottom-color: var(--bg-card);
+    }
+    .dirty-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--warn);
+      display: none;
+      flex-shrink: 0;
+    }
+    .dirty-dot.visible {
+      display: inline-block;
+    }
+    .drawer-body {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 16px 18px 24px;
+      background: var(--bg-card);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .drawer-footer {
+      padding: 12px 18px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-elev);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      flex-shrink: 0;
+    }
+    .drawer-footer-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+    .cfg-tab-pane {
+      display: none;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .cfg-tab-pane.active {
+      display: flex;
+    }
+    .cfg-banner {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-elev);
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+    .cfg-banner.info {
+      border-color: rgba(56, 189, 248, 0.35);
+      background: rgba(56, 189, 248, 0.10);
+      color: var(--text);
+    }
+    .cfg-banner.warn {
+      border-color: rgba(245, 158, 11, 0.45);
+      background: var(--warn-soft);
+      color: var(--text);
+    }
+    .cfg-banner.error {
+      border-color: rgba(244, 63, 94, 0.45);
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
+    .cfg-banner.success {
+      border-color: rgba(16, 185, 129, 0.45);
+      background: var(--accent-soft);
+      color: var(--text);
+    }
+    .cfg-banner-msg {
+      flex: 1 1 220px;
+      word-break: break-word;
+    }
+    .cfg-banner-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .preview-card {
+      border: 1px solid var(--border-strong);
+      border-radius: 11px;
+      overflow: hidden;
+      background: #0b0f19;
+      color: #e2e8f0;
+    }
+    .preview-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 12px;
+      background: #131a2a;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      font-size: 11.5px;
+      color: #94a3b8;
+    }
+    .preview-terminal {
+      padding: 11px 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      line-height: 1.48;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-x: auto;
+      min-height: 44px;
+      color: #e2e8f0;
+      background: #0b0f19;
+    }
+    .cfg-meta-box {
+      padding: 9px 12px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .cfg-meta-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .cfg-path {
+      color: var(--text);
+      word-break: break-all;
+      font-size: 11.5px;
+    }
+    .cfg-section {
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      padding: 13px 14px;
+      background: var(--bg-elev);
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+    .cfg-section-title {
+      font-size: 13px;
+      font-weight: 700;
+      margin: 0;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .cfg-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 11px 14px;
+    }
+    @media (max-width: 580px) {
+      .cfg-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .cfg-field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .cfg-field.full {
+      grid-column: 1 / -1;
+    }
+    .cfg-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    .cfg-hint {
+      font-size: 11.5px;
+      color: var(--text-dim);
+      line-height: 1.4;
+    }
+    .cfg-error-inline {
+      font-size: 11.5px;
+      color: var(--danger);
+      font-weight: 500;
+    }
+    .cfg-input, .cfg-select {
+      width: 100%;
+      background: var(--bg-input);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 9px;
+      font-size: 12.5px;
+      font-family: inherit;
+      outline: none;
+    }
+    .cfg-input:focus, .cfg-select:focus {
+      border-color: var(--accent);
+    }
+    .cfg-input.mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    .cfg-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      cursor: pointer;
+      user-select: none;
+      font-size: 12.5px;
+    }
+    .cfg-toggle-row:hover {
+      border-color: var(--border-strong);
+      background: var(--bg-hover);
+    }
+    .cfg-toggle-row input[type="checkbox"] {
+      accent-color: var(--accent);
+      width: 15px;
+      height: 15px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .cfg-toggle-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+    }
+    @media (max-width: 580px) {
+      .cfg-toggle-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .cfg-subgroup-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-top: 2px;
+    }
+    .preset-pills {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+    .preset-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .preset-pill:hover {
+      border-color: var(--border-strong);
+      color: var(--text);
+    }
+    .preset-pill.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .color-select-wrap {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .color-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid var(--border-strong);
+      flex-shrink: 0;
+    }
+    .cfg-details {
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: var(--bg-elev);
+    }
+    .cfg-details summary {
+      padding: 11px 14px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      user-select: none;
+      color: var(--text);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .cfg-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .cfg-details summary::after {
+      content: '▸';
+      font-size: 12px;
+      color: var(--text-muted);
+      transition: transform 0.15s;
+    }
+    .cfg-details[open] summary::after {
+      transform: rotate(90deg);
+    }
+    .cfg-details-body {
+      padding: 2px 14px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+    .secret-box {
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 9px 10px;
+      background: var(--bg-input);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .secret-input-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .secret-input-row .cfg-input {
+      background: var(--bg-elev);
+    }
+    .btn-danger {
+      background: var(--danger);
+      border-color: var(--danger);
+      color: #ffffff;
+    }
+    .btn-danger:hover {
+      filter: brightness(1.06);
+      background: var(--danger);
+    }
+    .btn-danger-outline {
+      border-color: rgba(244, 63, 94, 0.45);
+      color: var(--danger);
+      background: var(--danger-soft);
+    }
+    .btn-danger-outline:hover {
+      border-color: var(--danger);
+      background: rgba(244, 63, 94, 0.22);
+    }
+    .danger-zone {
+      border: 1px solid rgba(244, 63, 94, 0.35);
+      border-radius: 11px;
+      padding: 13px 14px;
+      background: var(--danger-soft);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .danger-confirm-box {
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--bg-elev);
+      border: 1px solid rgba(244, 63, 94, 0.45);
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      font-size: 12.5px;
+    }
+    .probe-result {
+      padding: 9px 12px;
+      border-radius: 9px;
+      font-size: 12.5px;
+      border: 1px solid var(--border);
+      word-break: break-word;
+    }
+    .probe-result.ok {
+      border-color: rgba(16, 185, 129, 0.45);
+      background: var(--accent-soft);
+      color: var(--text);
+    }
+    .probe-result.fail {
+      border-color: rgba(244, 63, 94, 0.45);
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
   </style>
 </head>
 <body>
@@ -766,6 +1277,7 @@
           <a class="btn" id="btn-export-json" href="/api/export.json" download>JSON</a>
           <button type="button" class="btn" id="btn-lang">中文 / EN</button>
           <button type="button" class="btn" id="btn-theme" aria-label="Toggle theme">☀ / ☾</button>
+          <button type="button" class="btn" id="btn-settings" aria-label="Settings">⚙ <span data-i18n="settingsBtn">Settings</span></button>
         </div>
       </div>
 
@@ -993,6 +1505,31 @@
 
   <div id="chart-tooltip" class="chart-tooltip" role="tooltip"></div>
 
+  <div id="settings-overlay" class="settings-overlay" aria-hidden="true"></div>
+  <aside id="settings-drawer" class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-drawer-title" aria-hidden="true">
+    <div class="drawer-header">
+      <div class="drawer-title-row">
+        <h2 class="drawer-title" id="settings-drawer-title">⚙ <span data-i18n="settingsTitle">Settings</span></h2>
+        <button type="button" class="btn drawer-close-btn" id="settings-close" aria-label="Close">×</button>
+      </div>
+      <div class="drawer-tabs" role="tablist">
+        <button type="button" class="drawer-tab active" id="tab-btn-pulse" data-tab="pulse" role="tab" aria-selected="true">
+          <span data-i18n="tabPulse">Pulse Config</span>
+          <span class="dirty-dot" id="tab-dot-pulse"></span>
+        </button>
+        <button type="button" class="drawer-tab" id="tab-btn-sync" data-tab="sync" role="tab" aria-selected="false">
+          <span data-i18n="tabSync">Sync Config</span>
+          <span class="dirty-dot" id="tab-dot-sync"></span>
+        </button>
+      </div>
+    </div>
+    <div class="drawer-body" id="settings-drawer-body">
+      <div id="tab-pane-pulse" class="cfg-tab-pane active" role="tabpanel"></div>
+      <div id="tab-pane-sync" class="cfg-tab-pane" role="tabpanel"></div>
+    </div>
+    <div class="drawer-footer" id="settings-drawer-footer"></div>
+  </aside>
+
   <script>
   (function () {
     'use strict';
@@ -1110,7 +1647,150 @@
         subConversation: 'Subagent Conversation ID',
         high: 'High',
         mid: 'Medium',
-        low: 'Low'
+        low: 'Low',
+        settingsBtn: 'Settings',
+        settingsTitle: 'Settings',
+        tabPulse: 'Pulse Config',
+        tabSync: 'Sync Config',
+        unsavedCloseConfirm: 'You have unsaved configuration changes. Discard and close?',
+        unsavedBadge: 'Unsaved',
+        loadingConfig: 'Loading configuration...',
+        reloadLatest: 'Reload Latest Config',
+        conflictMsg: 'Configuration file was modified externally (version conflict). Reload the latest version before saving.',
+        parseErrorNotice: 'Existing configuration file has invalid JSON; modifying and saving will overwrite and repair it:',
+        envOverridePrefix: 'Env override',
+        networkError: 'Network error',
+        csrfError: 'Security check failed (CSRF/Origin). Refresh the page and try again.',
+        pulsePreviewTitle: 'Live Statusline Preview',
+        pulsePreviewLoading: 'Rendering preview...',
+        pulseScopeHint: 'Edits global Pulse config. Workspace-level agy-pulse.config.json still takes higher priority during statusline runtime.',
+        cfgFilePath: 'Config File',
+        pulseBasicTitle: 'Basic Settings',
+        pulseEnabled: 'Enable Statusline',
+        pulseLanguage: 'Language',
+        langAuto: 'Auto (System Locale)',
+        langZh: '简体中文 (zh)',
+        langEn: 'English (en)',
+        pulseThemeTitle: 'Terminal Theme',
+        themePresetsLabel: 'Presets',
+        themePrimary: 'Primary',
+        themeSecondary: 'Secondary',
+        themeWarning: 'Warning',
+        themeCritical: 'Critical',
+        colorGreen: 'Green',
+        colorGray: 'Gray',
+        colorBlue: 'Blue',
+        colorMagenta: 'Magenta',
+        colorYellow: 'Yellow',
+        colorCyan: 'Cyan',
+        colorRed: 'Red',
+        pulseQuotaIconsTitle: 'Quota & Icon Set',
+        quotaStyleLabel: 'Quota Display Style',
+        quotaStyleTable: 'Table',
+        quotaStyleCompact: 'Compact',
+        quotaStyleNone: 'None',
+        useNerdFontsLabel: 'Use Nerd Fonts',
+        unicodeLabel: 'Unicode Characters',
+        unicodeAuto: 'Auto',
+        unicodeForceOn: 'Force Unicode',
+        unicodeForceOff: 'Force ASCII',
+        breadcrumbCountLabel: 'Breadcrumb Count (0–20)',
+        pulseThresholdsTitle: 'Alert Thresholds',
+        thresholdWarningLabel: 'Warning Threshold (0.0–1.0)',
+        thresholdCriticalLabel: 'Critical Threshold (0.0–1.0)',
+        thresholdPctHint: 'Fractions from 0.0 to 1.0 (e.g. 0.70 = 70%, 0.90 = 90%)',
+        thresholdOrderErr: 'Warning threshold must be <= critical threshold (both 0.0–1.0)',
+        pulseDisplaysTitle: 'Statusline Segments (17)',
+        groupContextCache: 'Context & Cache',
+        groupSessionSpeed: 'Session & Speed',
+        groupCostDashboard: 'Cost & Dashboard',
+        showContextMonitor: 'Context Monitor',
+        showModelCache: 'Model Quota & Cache',
+        showContextBar: 'Context Progress Bar',
+        showTokenBar: 'Token Breakdown Bar',
+        showTurnCacheHitRate: 'Turn Cache Hit Rate',
+        showCurrentDir: 'Current Directory',
+        showCycleMode: 'Cycle / Plan Mode',
+        showSpeed: 'Output Speed',
+        showModel: 'Active Model Name',
+        showBreadcrumbs: 'Breadcrumbs',
+        showGitBranch: 'Git Branch',
+        showUsername: 'Username',
+        showCost: 'Conversation Cost',
+        showDailyCost: 'Daily Cost',
+        showWeeklyCost: 'Weekly Cost',
+        showRoutedCost: 'Routed Cost',
+        showDashboardUrl: 'Dashboard URL',
+        pulseAdvancedTitle: 'Advanced Options',
+        dashboardPortLabel: 'Dashboard Port (1–65535)',
+        dashboardIdleLabel: 'Idle Timeout (sec)',
+        currentRunningVal: 'Running',
+        restartRequiredHint: 'Takes effect after restarting Dashboard',
+        restartRequiredSaved: 'Port or idle timeout saved. Restart the Dashboard server for changes to take effect.',
+        customUsernameLabel: 'Custom Username (max 64 chars)',
+        terminalWidthLabel: 'Terminal Width (20–1000)',
+        cacheHitExcellentLabel: 'Cache Hit Excellent % (0–100)',
+        cacheHitPartialLabel: 'Cache Hit Partial % (0–100)',
+        speedExpireTurnsLabel: 'Speed Expire Turns (>= 1)',
+        speedExpireMinutesLabel: 'Speed Expire Minutes (> 0)',
+        iconsOverridesTitle: 'Custom Icons (max 8 columns; blank = default)',
+        iconBranchLabel: 'Branch Icon',
+        iconTokenLabel: 'Token Icon',
+        iconCtxLabel: 'Context Icon',
+        restoreDefaultsBtn: 'Restore Defaults',
+        discardBtn: 'Discard Changes',
+        savePulseBtn: 'Save Pulse Config',
+        savingBtn: 'Saving...',
+        pulseSavedOk: 'Pulse Config saved.',
+        syncMetaTitle: 'Local Sync Metadata',
+        syncFilePermBadge: '0600 Private',
+        syncLocalDeviceId: 'Local Device ID',
+        syncNotInitializedHint: 'Not initialized yet. Fill in the form and save directly to create agy-pulse-sync.json (no CLI sync init required).',
+        syncGeneralTitle: 'General Sync Settings',
+        syncEnabledLabel: 'Enable Multi-Device Sync',
+        syncDeviceNameLabel: 'Device Name (blank = hostname)',
+        syncDefaultAccountLabel: 'Default Account Email',
+        syncPushIntervalLabel: 'Push Interval (1–86400 sec)',
+        syncPrefixLabel: 'Object Prefix',
+        syncRemoteTitle: 'Sync Remote',
+        syncRemoteTypeLabel: 'Remote Type',
+        remoteTypeLocalDir: 'Local Directory (local-dir)',
+        remoteTypeWebdav: 'WebDAV',
+        remoteTypeS3: 'S3 / R2 Object Storage',
+        remoteTypeCfWorker: 'Cloudflare Worker',
+        remotePathLabel: 'Directory Path',
+        remoteUrlLabel: 'Remote URL',
+        remoteUsernameLabel: 'Username (optional)',
+        remoteEndpointLabel: 'S3 Endpoint URL',
+        remoteRegionLabel: 'Region (default: auto)',
+        remoteBucketLabel: 'Bucket Name',
+        remotePathStyleLabel: 'Use Path-Style Addressing',
+        remoteAllowInsecureHttpLabel: 'Allow Insecure HTTP (plaintext)',
+        httpInsecureWarn: 'Plaintext HTTP URL detected. Credentials and ledger data will be transmitted unencrypted; enable Allow Insecure HTTP only on trusted networks.',
+        secretPasswordLabel: 'Password',
+        secretTokenLabel: 'Bearer Token',
+        secretAccessKeyLabel: 'Access Key',
+        secretSecretKeyLabel: 'Secret Key',
+        secretConfigured: 'Configured',
+        secretNotConfigured: 'Not configured',
+        secretPendingSet: 'New value pending',
+        secretPendingClear: 'Marked to clear',
+        secretPlaceholderKeep: 'Leave blank to keep saved credential',
+        secretPlaceholderNew: 'Enter new credential',
+        secretClearBtn: 'Clear',
+        secretUndoClearBtn: 'Undo Clear',
+        testConnBtn: 'Test Connection',
+        testingConnBtn: 'Testing...',
+        testConnSuccess: 'Connection reachable',
+        testConnFail: 'Connection failed',
+        saveSyncBtn: 'Save Sync Config',
+        syncSavedOk: 'Sync Config saved.',
+        dangerZoneTitle: 'Danger Zone',
+        removeSyncBtn: 'Remove Sync Config',
+        removeSyncConfirmText: 'This only deletes local agy-pulse-sync.json. It NEVER deletes your local SQLite ledger or remote sync data.',
+        confirmRemoveBtn: 'Confirm Remove',
+        cancelBtn: 'Cancel',
+        syncDeletedOk: 'Sync Config removed. Local ledger and remote data remain intact.'
       },
       zh: {
         title: '遥测分析网页看板',
@@ -1221,7 +1901,150 @@
         subConversation: '子代理单窗对话 ID',
         high: '极佳',
         mid: '中等',
-        low: '偏低'
+        low: '偏低',
+        settingsBtn: '设置',
+        settingsTitle: '设置',
+        tabPulse: '偏好配置',
+        tabSync: '同步配置',
+        unsavedCloseConfirm: '当前有未保存的配置修改，确定放弃修改并关闭抽屉吗？',
+        unsavedBadge: '未保存',
+        loadingConfig: '正在加载配置...',
+        reloadLatest: '重新加载最新配置',
+        conflictMsg: '配置文件已被其他入口（如终端 CLI）修改，请重新加载最新配置后再保存。',
+        parseErrorNotice: '原配置文件 JSON 格式损坏；修改并点击保存后将自动覆盖修复：',
+        envOverridePrefix: '环境变量覆盖',
+        networkError: '网络请求失败',
+        csrfError: '安全校验失败（CSRF/同源检查未通过），请刷新页面后重试。',
+        pulsePreviewTitle: '实时状态栏预览',
+        pulsePreviewLoading: '正在渲染状态栏预览...',
+        pulseScopeHint: '此处读写全局偏好配置；状态栏运行期仍优先应用工作区级 agy-pulse.config.json。',
+        cfgFilePath: '配置文件路径',
+        pulseBasicTitle: '基础设置',
+        pulseEnabled: '启用状态栏',
+        pulseLanguage: '界面语言',
+        langAuto: '自动（跟随系统区域）',
+        langZh: '简体中文 (zh)',
+        langEn: 'English (en)',
+        pulseThemeTitle: '终端配色主题',
+        themePresetsLabel: '快捷预设',
+        themePrimary: '主色 (Primary)',
+        themeSecondary: '次要色 (Secondary)',
+        themeWarning: '告警色 (Warning)',
+        themeCritical: '危急色 (Critical)',
+        colorGreen: '绿色 (green)',
+        colorGray: '灰色 (gray)',
+        colorBlue: '蓝色 (blue)',
+        colorMagenta: '品红 (magenta)',
+        colorYellow: '黄色 (yellow)',
+        colorCyan: '青色 (cyan)',
+        colorRed: '红色 (red)',
+        pulseQuotaIconsTitle: '配额与图标集',
+        quotaStyleLabel: '配额展示样式',
+        quotaStyleTable: '表格 (table)',
+        quotaStyleCompact: '紧凑 (compact)',
+        quotaStyleNone: '隐藏 (none)',
+        useNerdFontsLabel: '使用 Nerd Fonts 图标',
+        unicodeLabel: 'Unicode 字符集',
+        unicodeAuto: '自动',
+        unicodeForceOn: '强制 Unicode',
+        unicodeForceOff: '强制 ASCII',
+        breadcrumbCountLabel: '面包屑数量 (0–20)',
+        pulseThresholdsTitle: '告警阈值',
+        thresholdWarningLabel: '警告阈值 (0.0–1.0)',
+        thresholdCriticalLabel: '严重阈值 (0.0–1.0)',
+        thresholdPctHint: '填写 0.0 到 1.0 之间的小数（例如 0.70 = 70%，0.90 = 90%）',
+        thresholdOrderErr: '警告阈值必须小于或等于严重阈值（且均在 0.0–1.0 之间）',
+        pulseDisplaysTitle: '状态栏显示项 (17 项)',
+        groupContextCache: '上下文与缓存',
+        groupSessionSpeed: '会话与速率',
+        groupCostDashboard: '费用与看板',
+        showContextMonitor: '上下文占用监控',
+        showModelCache: '模型配额与缓存',
+        showContextBar: '上下文进度条',
+        showTokenBar: 'Token 分布条',
+        showTurnCacheHitRate: '单轮缓存命中率',
+        showCurrentDir: '当前工作目录',
+        showCycleMode: '模式与周期',
+        showSpeed: '输出速率',
+        showModel: '当前模型名称',
+        showBreadcrumbs: '对话面包屑',
+        showGitBranch: 'Git 分支',
+        showUsername: '用户名',
+        showCost: '单窗对话费用',
+        showDailyCost: '今日费用',
+        showWeeklyCost: '本周费用',
+        showRoutedCost: '路由归因费用',
+        showDashboardUrl: '网页看板链接',
+        pulseAdvancedTitle: '高级选项',
+        dashboardPortLabel: '网页看板端口 (1–65535)',
+        dashboardIdleLabel: '空闲超时（秒）',
+        currentRunningVal: '当前运行',
+        restartRequiredHint: '重启网页看板后生效',
+        restartRequiredSaved: '端口或空闲超时已保存，重启网页看板后生效。',
+        customUsernameLabel: '自定义用户名（最多 64 字符）',
+        terminalWidthLabel: '终端宽度覆盖 (20–1000)',
+        cacheHitExcellentLabel: '缓存命中极佳阈值 % (0–100)',
+        cacheHitPartialLabel: '缓存命中中等阈值 % (0–100)',
+        speedExpireTurnsLabel: '速率过期轮次 (>= 1)',
+        speedExpireMinutesLabel: '速率过期分钟 (> 0)',
+        iconsOverridesTitle: '自定义图标覆盖（最多 8 列字符，留空恢复默认）',
+        iconBranchLabel: '分支图标',
+        iconTokenLabel: 'Token 图标',
+        iconCtxLabel: '上下文图标',
+        restoreDefaultsBtn: '恢复默认',
+        discardBtn: '放弃修改',
+        savePulseBtn: '保存偏好配置',
+        savingBtn: '保存中...',
+        pulseSavedOk: '偏好配置已保存。',
+        syncMetaTitle: '本机同步元数据',
+        syncFilePermBadge: '0600 私有权限',
+        syncLocalDeviceId: '本机设备 ID',
+        syncNotInitializedHint: '首次尚未初始化：直接填写下方配置并保存即可创建 agy-pulse-sync.json，无需先在终端执行 agypl sync init。',
+        syncGeneralTitle: '基础同步设置',
+        syncEnabledLabel: '启用多机同步',
+        syncDeviceNameLabel: '本机设备名（留空回退系统主机名）',
+        syncDefaultAccountLabel: '默认账号邮箱',
+        syncPushIntervalLabel: '推送间隔（1–86400 秒）',
+        syncPrefixLabel: '对象路径前缀',
+        syncRemoteTitle: '同步远端',
+        syncRemoteTypeLabel: '同步远端类型',
+        remoteTypeLocalDir: '本地共享目录 (local-dir)',
+        remoteTypeWebdav: 'WebDAV',
+        remoteTypeS3: 'S3 / R2 对象存储',
+        remoteTypeCfWorker: 'Cloudflare Worker',
+        remotePathLabel: '同步目录路径',
+        remoteUrlLabel: '远端 URL',
+        remoteUsernameLabel: '用户名（可选）',
+        remoteEndpointLabel: 'S3 Endpoint URL',
+        remoteRegionLabel: '区域 Region（默认 auto）',
+        remoteBucketLabel: '存储桶 Bucket',
+        remotePathStyleLabel: '使用 Path-Style 路径风格',
+        remoteAllowInsecureHttpLabel: '允许非加密 HTTP 明文传输',
+        httpInsecureWarn: '检测到非加密 HTTP 地址，凭据与账本数据将明文传输，仅建议在可信局域网内勾选允许非加密 HTTP。',
+        secretPasswordLabel: '密码 (Password)',
+        secretTokenLabel: '访问令牌 (Token)',
+        secretAccessKeyLabel: 'Access Key',
+        secretSecretKeyLabel: 'Secret Key',
+        secretConfigured: '已配置',
+        secretNotConfigured: '未配置',
+        secretPendingSet: '待写入新凭据',
+        secretPendingClear: '待清除',
+        secretPlaceholderKeep: '留空保留已保存凭据',
+        secretPlaceholderNew: '输入新凭据',
+        secretClearBtn: '清除',
+        secretUndoClearBtn: '撤销清除',
+        testConnBtn: '测试连接',
+        testingConnBtn: '探测中...',
+        testConnSuccess: '连通性探测成功',
+        testConnFail: '连通性探测失败',
+        saveSyncBtn: '保存同步配置',
+        syncSavedOk: '同步配置已保存。',
+        dangerZoneTitle: '危险操作区',
+        removeSyncBtn: '移除同步配置',
+        removeSyncConfirmText: '确认仅删除本机 agy-pulse-sync.json？绝不会删除本地 SQLite 账本与任何远端数据。',
+        confirmRemoveBtn: '确认移除',
+        cancelBtn: '取消',
+        syncDeletedOk: '同步配置已移除，本地账本与远端数据均完好保留。'
       }
     };
 
@@ -2470,6 +3293,1897 @@
       }
     }
 
+    // ========================================================================
+    // Settings Drawer (Pulse Config & Sync Config)
+    // ========================================================================
+    var ANSI_COLOR_HEX = {
+      green: '#10b981',
+      gray: '#94a3b8',
+      blue: '#3b82f6',
+      magenta: '#d946ef',
+      yellow: '#eab308',
+      cyan: '#06b6d4',
+      red: '#ef4444'
+    };
+
+    var ANSI_SGR_FG = {
+      30: '#475569',
+      31: '#f87171',
+      32: '#34d399',
+      33: '#fbbf24',
+      34: '#60a5fa',
+      35: '#c084fc',
+      36: '#22d3ee',
+      37: '#e2e8f0',
+      90: '#94a3b8',
+      91: '#fca5a5',
+      92: '#6ee7b7',
+      93: '#fde047',
+      94: '#93c5fd',
+      95: '#d8b4fe',
+      96: '#67e8f9',
+      97: '#f8fafc'
+    };
+
+    var PULSE_TOGGLE_GROUPS = [
+      {
+        titleKey: 'groupContextCache',
+        keys: [
+          'showContextMonitor',
+          'showModelCache',
+          'showContextBar',
+          'showTokenBar',
+          'showTurnCacheHitRate'
+        ]
+      },
+      {
+        titleKey: 'groupSessionSpeed',
+        keys: [
+          'showCurrentDir',
+          'showCycleMode',
+          'showSpeed',
+          'showModel',
+          'showBreadcrumbs',
+          'showGitBranch',
+          'showUsername'
+        ]
+      },
+      {
+        titleKey: 'groupCostDashboard',
+        keys: [
+          'showCost',
+          'showDailyCost',
+          'showWeeklyCost',
+          'showRoutedCost',
+          'showDashboardUrl'
+        ]
+      }
+    ];
+
+    var settingsUi = {
+      open: false,
+      activeTab: 'pulse'
+    };
+
+    var pulseState = {
+      loaded: false,
+      loading: false,
+      saving: false,
+      version: 'absent',
+      filePath: '',
+      exists: false,
+      parseError: null,
+      savedConfig: null,
+      draft: null,
+      defaults: null,
+      themePresets: [],
+      allowedColors: ['green', 'gray', 'blue', 'magenta', 'yellow', 'cyan', 'red'],
+      envOverrides: {},
+      runtime: { currentPort: 0, currentIdleTimeoutSec: 0 },
+      dirty: false,
+      banner: null,
+      previewAnsi: '',
+      previewError: null,
+      previewLoading: false,
+      previewTimer: null,
+      previewSeq: 0,
+      advancedOpen: false
+    };
+
+    var syncState = {
+      loaded: false,
+      loading: false,
+      saving: false,
+      testing: false,
+      deleting: false,
+      version: 'absent',
+      filePath: '',
+      exists: false,
+      parseError: null,
+      localDeviceId: '',
+      envOverrides: {},
+      diskRemote: null,
+      savedSnapshotJson: '',
+      draft: null,
+      draftsByType: null,
+      dirty: false,
+      banner: null,
+      probeResult: null,
+      confirmDelete: false
+    };
+
+    function deepClone(obj) {
+      return JSON.parse(JSON.stringify(obj));
+    }
+
+    async function configRequest(method, path, bodyObj) {
+      var headers = { 'X-Agy-Pulse-Token': CSRF_TOKEN };
+      var opts = {
+        method: method,
+        headers: headers,
+        cache: 'no-store'
+      };
+      if (bodyObj !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(bodyObj);
+      }
+      try {
+        var res = await fetch(path, opts);
+        var data = null;
+        try {
+          data = await res.json();
+        } catch (e) {
+          data = null;
+        }
+        return { ok: res.ok, status: res.status, data: data, networkError: false };
+      } catch (err) {
+        return {
+          ok: false,
+          status: 0,
+          data: { error: err && err.message ? err.message : t('networkError') },
+          networkError: true
+        };
+      }
+    }
+
+    function ansiToHtml(raw) {
+      var text = String(raw || '');
+      if (!text) return '';
+      var out = [];
+      var bold = false;
+      var dim = false;
+      var color = null;
+      var re = /\x1b\[([0-9;]*)m/g;
+      var lastIndex = 0;
+
+      function pushChunk(chunk) {
+        if (!chunk) return;
+        // Strip any unexpected non-SGR escape sequence before escaping HTML.
+        var cleaned = chunk.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+        if (!cleaned) return;
+        var escaped = escHtml(cleaned);
+        var styles = [];
+        if (color) styles.push('color:' + color);
+        if (bold) styles.push('font-weight:700');
+        if (dim) styles.push('opacity:0.68');
+        if (styles.length) {
+          out.push('<span style="' + styles.join(';') + '">' + escaped + '</span>');
+        } else {
+          out.push(escaped);
+        }
+      }
+
+      var m;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > lastIndex) {
+          pushChunk(text.slice(lastIndex, m.index));
+        }
+        var codes = m[1] === '' ? [0] : m[1].split(';');
+        for (var i = 0; i < codes.length; i++) {
+          var code = parseInt(codes[i], 10);
+          if (isNaN(code) || code === 0) {
+            bold = false;
+            dim = false;
+            color = null;
+          } else if (code === 1) {
+            bold = true;
+          } else if (code === 2) {
+            dim = true;
+          } else if (code === 22) {
+            bold = false;
+            dim = false;
+          } else if (code === 39) {
+            color = null;
+          } else if (ANSI_SGR_FG[code]) {
+            color = ANSI_SGR_FG[code];
+          }
+        }
+        lastIndex = re.lastIndex;
+      }
+      if (lastIndex < text.length) {
+        pushChunk(text.slice(lastIndex));
+      }
+      return out.join('');
+    }
+
+    function normalizeColorName(raw, fallback) {
+      var val = String(raw || '').trim().toLowerCase();
+      if (val === 'grey') val = 'gray';
+      if (pulseState.allowedColors.indexOf(val) !== -1) return val;
+      return fallback || 'green';
+    }
+
+    function normalizeThemeObject(themeVal, presets) {
+      var presetList = Array.isArray(presets) ? presets : pulseState.themePresets;
+      if (typeof themeVal === 'string') {
+        var trimmed = themeVal.trim().toLowerCase();
+        for (var i = 0; i < presetList.length; i++) {
+          if (String(presetList[i].name || '').toLowerCase() === trimmed) {
+            var pc = presetList[i].colors || {};
+            return {
+              primary: normalizeColorName(pc.primary, 'green'),
+              secondary: normalizeColorName(pc.secondary, 'gray'),
+              warning: normalizeColorName(pc.warning, 'yellow'),
+              critical: normalizeColorName(pc.critical, 'red')
+            };
+          }
+        }
+        return {
+          primary: normalizeColorName(trimmed, 'green'),
+          secondary: 'gray',
+          warning: 'yellow',
+          critical: 'red'
+        };
+      }
+      var obj = (themeVal && typeof themeVal === 'object') ? themeVal : {};
+      return {
+        primary: normalizeColorName(obj.primary, 'green'),
+        secondary: normalizeColorName(obj.secondary, 'gray'),
+        warning: normalizeColorName(obj.warning, 'yellow'),
+        critical: normalizeColorName(obj.critical, 'red')
+      };
+    }
+
+    function normalizePulseDto(rawDto, presets) {
+      var cfg = deepClone(rawDto || {});
+      cfg.enabled = cfg.enabled !== false;
+      cfg.language = (cfg.language === 'zh' || cfg.language === 'en' || cfg.language === 'auto') ? cfg.language : 'auto';
+      cfg.theme = normalizeThemeObject(cfg.theme, presets);
+      cfg.thresholds = cfg.thresholds || { warning: 0.7, critical: 0.9 };
+      if (typeof cfg.thresholds.warning !== 'number') cfg.thresholds.warning = 0.7;
+      if (typeof cfg.thresholds.critical !== 'number') cfg.thresholds.critical = 0.9;
+      cfg.display = cfg.display || {};
+      if (!cfg.display.quotaStyle) cfg.display.quotaStyle = 'table';
+      if (cfg.display.breadcrumbCount === undefined) cfg.display.breadcrumbCount = 3;
+      if (cfg.display.unicode === undefined) cfg.display.unicode = null;
+      if (!cfg.display.cacheHitThresholds || (cfg.display.cacheHitThresholds.excellent == null && cfg.display.cacheHitThresholds.partial == null)) {
+        cfg.display.cacheHitThresholds = null;
+      }
+      cfg.icons = cfg.icons || { branch: null, token: null, ctx: null };
+      return {
+        enabled: cfg.enabled,
+        language: cfg.language,
+        theme: cfg.theme,
+        thresholds: {
+          warning: Number(cfg.thresholds.warning),
+          critical: Number(cfg.thresholds.critical)
+        },
+        display: cfg.display,
+        icons: {
+          branch: cfg.icons.branch || null,
+          token: cfg.icons.token || null,
+          ctx: cfg.icons.ctx || null
+        }
+      };
+    }
+
+    function matchingThemePresetName(themeObj) {
+      if (!themeObj) return null;
+      for (var i = 0; i < pulseState.themePresets.length; i++) {
+        var p = pulseState.themePresets[i];
+        var c = p.colors || {};
+        if (
+          c.primary === themeObj.primary &&
+          c.secondary === themeObj.secondary &&
+          c.warning === themeObj.warning &&
+          c.critical === themeObj.critical
+        ) {
+          return p.name;
+        }
+      }
+      return null;
+    }
+
+    function updateDirtyDots() {
+      var pDot = document.getElementById('tab-dot-pulse');
+      var sDot = document.getElementById('tab-dot-sync');
+      if (pDot) pDot.classList.toggle('visible', !!pulseState.dirty);
+      if (sDot) sDot.classList.toggle('visible', !!syncState.dirty);
+    }
+
+    function updatePulseDirty() {
+      if (!pulseState.draft || !pulseState.savedConfig) {
+        pulseState.dirty = false;
+      } else {
+        pulseState.dirty = JSON.stringify(pulseState.draft) !== JSON.stringify(pulseState.savedConfig);
+      }
+      updateDirtyDots();
+      renderDrawerFooter();
+    }
+
+    function validatePulseDraftLocal(d) {
+      if (!d) return null;
+      var w = Number(d.thresholds.warning);
+      var c = Number(d.thresholds.critical);
+      if (!isFinite(w) || w < 0 || w > 1 || !isFinite(c) || c < 0 || c > 1 || w > c) {
+        return t('thresholdOrderErr');
+      }
+      return null;
+    }
+
+    function formatApiError(res) {
+      if (!res) return t('networkError');
+      if (res.status === 403) return t('csrfError');
+      var d = res.data || {};
+      if (d.field) return String(d.field) + ': ' + String(d.error || ('HTTP ' + res.status));
+      return String(d.error || ('HTTP ' + res.status));
+    }
+
+    function schedulePulsePreview(immediate) {
+      if (pulseState.previewTimer) {
+        clearTimeout(pulseState.previewTimer);
+        pulseState.previewTimer = null;
+      }
+      if (!pulseState.draft) return;
+      var localErr = validatePulseDraftLocal(pulseState.draft);
+      if (localErr) {
+        pulseState.previewError = localErr;
+        updatePreviewDom();
+        return;
+      }
+      var delay = immediate ? 0 : 150;
+      pulseState.previewTimer = setTimeout(function () {
+        runPulsePreviewRequest();
+      }, delay);
+    }
+
+    async function runPulsePreviewRequest() {
+      if (!pulseState.draft) return;
+      var seq = ++pulseState.previewSeq;
+      pulseState.previewLoading = true;
+      pulseState.previewError = null;
+      updatePreviewDom();
+
+      var payload = {
+        config: pulseState.draft,
+        terminalCols: pulseState.draft.display && pulseState.draft.display.terminalWidth
+          ? pulseState.draft.display.terminalWidth
+          : 100
+      };
+      var res = await configRequest('POST', '/api/config/pulse/preview', payload);
+      if (seq !== pulseState.previewSeq) return;
+      pulseState.previewLoading = false;
+      if (res.ok && res.data) {
+        pulseState.previewAnsi = res.data.ansi || '';
+        pulseState.previewError = null;
+      } else {
+        pulseState.previewError = formatApiError(res);
+      }
+      updatePreviewDom();
+    }
+
+    function updatePreviewDom() {
+      var termEl = document.getElementById('pulse-preview-terminal');
+      var statusEl = document.getElementById('pulse-preview-status');
+      if (!termEl) return;
+      if (statusEl) {
+        statusEl.textContent = pulseState.previewLoading ? t('pulsePreviewLoading') : '';
+      }
+      if (pulseState.previewError) {
+        termEl.innerHTML = '<span style="color:#f87171;">' + escHtml(pulseState.previewError) + '</span>';
+      } else {
+        termEl.innerHTML = ansiToHtml(pulseState.previewAnsi);
+      }
+    }
+
+    async function loadPulseConfig() {
+      pulseState.loading = true;
+      pulseState.banner = null;
+      renderPulsePane();
+      renderDrawerFooter();
+
+      var res = await configRequest('GET', '/api/config/pulse');
+      pulseState.loading = false;
+      if (!res.ok || !res.data) {
+        pulseState.banner = { kind: 'error', msg: formatApiError(res) };
+        renderPulsePane();
+        renderDrawerFooter();
+        return;
+      }
+
+      var data = res.data;
+      pulseState.loaded = true;
+      pulseState.version = data.version || 'absent';
+      pulseState.filePath = data.filePath || '';
+      pulseState.exists = !!data.exists;
+      pulseState.parseError = data.parseError || null;
+      pulseState.themePresets = Array.isArray(data.themePresets) ? data.themePresets : [];
+      if (Array.isArray(data.allowedColors) && data.allowedColors.length) {
+        pulseState.allowedColors = data.allowedColors.slice();
+      }
+      pulseState.envOverrides = data.envOverrides || {};
+      pulseState.runtime = data.runtime || { currentPort: 0, currentIdleTimeoutSec: 0 };
+      pulseState.defaults = normalizePulseDto(data.defaults, pulseState.themePresets);
+      pulseState.savedConfig = normalizePulseDto(data.config, pulseState.themePresets);
+      pulseState.draft = deepClone(pulseState.savedConfig);
+      pulseState.dirty = false;
+      pulseState.banner = null;
+
+      updateDirtyDots();
+      renderPulsePane();
+      renderDrawerFooter();
+      schedulePulsePreview(true);
+    }
+
+    async function savePulseConfig() {
+      if (!pulseState.draft || pulseState.saving) return;
+      var localErr = validatePulseDraftLocal(pulseState.draft);
+      if (localErr) {
+        pulseState.banner = { kind: 'error', msg: localErr };
+        renderPulsePane();
+        return;
+      }
+
+      pulseState.saving = true;
+      pulseState.banner = null;
+      renderDrawerFooter();
+
+      var res = await configRequest('PUT', '/api/config/pulse', {
+        expectedVersion: pulseState.version,
+        config: pulseState.draft
+      });
+      pulseState.saving = false;
+
+      if (res.status === 409) {
+        pulseState.banner = { kind: 'warn', msg: t('conflictMsg'), conflict: true };
+        renderPulsePane();
+        renderDrawerFooter();
+        return;
+      }
+      if (!res.ok || !res.data) {
+        pulseState.banner = { kind: 'error', msg: formatApiError(res) };
+        renderPulsePane();
+        renderDrawerFooter();
+        return;
+      }
+
+      var data = res.data;
+      pulseState.version = data.version || pulseState.version;
+      pulseState.filePath = data.filePath || pulseState.filePath;
+      pulseState.exists = !!data.exists;
+      pulseState.parseError = data.parseError || null;
+      pulseState.envOverrides = data.envOverrides || {};
+      pulseState.runtime = data.runtime || pulseState.runtime;
+      pulseState.savedConfig = normalizePulseDto(data.config, pulseState.themePresets);
+      pulseState.draft = deepClone(pulseState.savedConfig);
+      pulseState.dirty = false;
+
+      if (data.resolvedLanguage === 'zh' || data.resolvedLanguage === 'en') {
+        try {
+          if (pulseState.savedConfig.language === 'auto') {
+            localStorage.removeItem('agy_pulse_lang');
+          } else {
+            localStorage.setItem('agy_pulse_lang', data.resolvedLanguage);
+          }
+        } catch (e) {}
+        state.lang = data.resolvedLanguage;
+        applyTranslations();
+        renderAll();
+      }
+
+      pulseState.banner = {
+        kind: 'success',
+        msg: data.restartRequired ? t('restartRequiredSaved') : t('pulseSavedOk'),
+        restartRequired: !!data.restartRequired
+      };
+
+      updateDirtyDots();
+      renderPulsePane();
+      if (syncState.loaded) renderSyncPane();
+      renderDrawerFooter();
+      schedulePulsePreview(true);
+    }
+
+    function renderEnvBadge(overrideObj) {
+      if (!overrideObj || !overrideObj.envVar) return '';
+      return '<span class="badge badge-warn" title="' + escHtml(overrideObj.envVar + '=' + overrideObj.value) + '">' +
+        escHtml(t('envOverridePrefix') + ': ' + overrideObj.envVar + ' (' + overrideObj.value + ')') +
+      '</span>';
+    }
+
+    function colorLabelText(name) {
+      var keyMap = {
+        green: 'colorGreen',
+        gray: 'colorGray',
+        blue: 'colorBlue',
+        magenta: 'colorMagenta',
+        yellow: 'colorYellow',
+        cyan: 'colorCyan',
+        red: 'colorRed'
+      };
+      return keyMap[name] ? t(keyMap[name]) : name;
+    }
+
+    function renderPulsePane() {
+      var pane = document.getElementById('tab-pane-pulse');
+      if (!pane) return;
+
+      if (pulseState.loading && !pulseState.loaded) {
+        pane.innerHTML = '<div class="cfg-banner info"><div class="cfg-banner-msg">' + escHtml(t('loadingConfig')) + '</div></div>';
+        return;
+      }
+      if (!pulseState.draft) {
+        var errBanner = pulseState.banner
+          ? '<div class="cfg-banner error"><div class="cfg-banner-msg">' + escHtml(pulseState.banner.msg) + '</div><div class="cfg-banner-actions"><button type="button" class="btn" id="btn-pulse-reload">' + escHtml(t('reloadLatest')) + '</button></div></div>'
+          : '';
+        pane.innerHTML = errBanner;
+        var reloadInit = document.getElementById('btn-pulse-reload');
+        if (reloadInit) reloadInit.addEventListener('click', loadPulseConfig);
+        return;
+      }
+
+      var d = pulseState.draft;
+      var disp = d.display;
+      var env = pulseState.envOverrides || {};
+      var rt = pulseState.runtime || {};
+      var activePreset = matchingThemePresetName(d.theme);
+      var html = [];
+
+      if (pulseState.banner) {
+        html.push(
+          '<div class="cfg-banner ' + escHtml(pulseState.banner.kind) + '">' +
+            '<div class="cfg-banner-msg">' + escHtml(pulseState.banner.msg) + '</div>' +
+            (pulseState.banner.conflict
+              ? '<div class="cfg-banner-actions"><button type="button" class="btn" id="btn-pulse-reload">' + escHtml(t('reloadLatest')) + '</button></div>'
+              : '') +
+          '</div>'
+        );
+      }
+
+      if (pulseState.parseError) {
+        html.push(
+          '<div class="cfg-banner warn">' +
+            '<div class="cfg-banner-msg">' + escHtml(t('parseErrorNotice')) + ' <span class="mono">' + escHtml(pulseState.parseError) + '</span></div>' +
+          '</div>'
+        );
+      }
+
+      // Live statusline preview
+      html.push(
+        '<div class="preview-card">' +
+          '<div class="preview-bar">' +
+            '<span>' + escHtml(t('pulsePreviewTitle')) + '</span>' +
+            '<span id="pulse-preview-status" class="mono"></span>' +
+          '</div>' +
+          '<div class="preview-terminal" id="pulse-preview-terminal"></div>' +
+        '</div>'
+      );
+
+      // Global scope bar
+      html.push(
+        '<div class="cfg-meta-box">' +
+          '<div class="cfg-meta-row">' +
+            '<span>' + escHtml(t('cfgFilePath')) + ': <span class="mono cfg-path">' + escHtml(pulseState.filePath) + '</span></span>' +
+          '</div>' +
+          '<div class="cfg-hint">' + escHtml(t('pulseScopeHint')) + '</div>' +
+        '</div>'
+      );
+
+      // Basic settings
+      html.push(
+        '<div class="cfg-section">' +
+          '<h3 class="cfg-section-title">' + escHtml(t('pulseBasicTitle')) + '</h3>' +
+          '<div class="cfg-grid">' +
+            '<div class="cfg-field">' +
+              '<label class="cfg-toggle-row">' +
+                '<span>' + escHtml(t('pulseEnabled')) + '</span>' +
+                '<input type="checkbox" id="pulse-enabled"' + (d.enabled ? ' checked' : '') + '>' +
+              '</label>' +
+            '</div>' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('pulseLanguage')) + '</span>' + renderEnvBadge(env.language) + '</div>' +
+              '<select class="cfg-select" id="pulse-language">' +
+                '<option value="auto"' + (d.language === 'auto' ? ' selected' : '') + '>' + escHtml(t('langAuto')) + '</option>' +
+                '<option value="zh"' + (d.language === 'zh' ? ' selected' : '') + '>' + escHtml(t('langZh')) + '</option>' +
+                '<option value="en"' + (d.language === 'en' ? ' selected' : '') + '>' + escHtml(t('langEn')) + '</option>' +
+              '</select>' +
+            '</div>' +
+          '</div>' +
+        '</div>'
+      );
+
+      // Theme presets & 4 colors
+      var presetBtns = [];
+      for (var p = 0; p < pulseState.themePresets.length; p++) {
+        var pr = pulseState.themePresets[p];
+        var pCol = (pr.colors && pr.colors.primary) || 'green';
+        var dotHex = ANSI_COLOR_HEX[pCol] || '#10b981';
+        presetBtns.push(
+          '<button type="button" class="preset-pill' + (activePreset === pr.name ? ' active' : '') + '" data-preset="' + escHtml(pr.name) + '">' +
+            '<span class="dot" style="background:' + escHtml(dotHex) + '"></span>' +
+            escHtml(pr.name) +
+          '</button>'
+        );
+      }
+      function renderColorSelect(id, labelKey, curColor) {
+        var opts = [];
+        for (var ci = 0; ci < pulseState.allowedColors.length; ci++) {
+          var cname = pulseState.allowedColors[ci];
+          opts.push('<option value="' + escHtml(cname) + '"' + (curColor === cname ? ' selected' : '') + '>' + escHtml(colorLabelText(cname)) + '</option>');
+        }
+        return (
+          '<div class="cfg-field">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t(labelKey)) + '</span></div>' +
+            '<div class="color-select-wrap">' +
+              '<span class="color-swatch" id="' + id + '-swatch" style="background:' + escHtml(ANSI_COLOR_HEX[curColor] || '#10b981') + '"></span>' +
+              '<select class="cfg-select" id="' + id + '">' + opts.join('') + '</select>' +
+            '</div>' +
+          '</div>'
+        );
+      }
+      html.push(
+        '<div class="cfg-section">' +
+          '<h3 class="cfg-section-title">' + escHtml(t('pulseThemeTitle')) + '</h3>' +
+          '<div class="cfg-field">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t('themePresetsLabel')) + '</span></div>' +
+            '<div class="preset-pills" id="pulse-preset-pills">' + presetBtns.join('') + '</div>' +
+          '</div>' +
+          '<div class="cfg-grid">' +
+            renderColorSelect('pulse-theme-primary', 'themePrimary', d.theme.primary) +
+            renderColorSelect('pulse-theme-secondary', 'themeSecondary', d.theme.secondary) +
+            renderColorSelect('pulse-theme-warning', 'themeWarning', d.theme.warning) +
+            renderColorSelect('pulse-theme-critical', 'themeCritical', d.theme.critical) +
+          '</div>' +
+        '</div>'
+      );
+
+      // Quota & Icon Set
+      var unicodeVal = disp.unicode === true ? 'true' : (disp.unicode === false ? 'false' : 'auto');
+      html.push(
+        '<div class="cfg-section">' +
+          '<h3 class="cfg-section-title">' + escHtml(t('pulseQuotaIconsTitle')) + '</h3>' +
+          '<div class="cfg-grid">' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('quotaStyleLabel')) + '</span></div>' +
+              '<select class="cfg-select" id="pulse-quota-style">' +
+                '<option value="table"' + (disp.quotaStyle === 'table' ? ' selected' : '') + '>' + escHtml(t('quotaStyleTable')) + '</option>' +
+                '<option value="compact"' + (disp.quotaStyle === 'compact' ? ' selected' : '') + '>' + escHtml(t('quotaStyleCompact')) + '</option>' +
+                '<option value="none"' + (disp.quotaStyle === 'none' ? ' selected' : '') + '>' + escHtml(t('quotaStyleNone')) + '</option>' +
+              '</select>' +
+            '</div>' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('unicodeLabel')) + '</span>' + renderEnvBadge(env.unicode) + '</div>' +
+              '<select class="cfg-select" id="pulse-unicode">' +
+                '<option value="auto"' + (unicodeVal === 'auto' ? ' selected' : '') + '>' + escHtml(t('unicodeAuto')) + '</option>' +
+                '<option value="true"' + (unicodeVal === 'true' ? ' selected' : '') + '>' + escHtml(t('unicodeForceOn')) + '</option>' +
+                '<option value="false"' + (unicodeVal === 'false' ? ' selected' : '') + '>' + escHtml(t('unicodeForceOff')) + '</option>' +
+              '</select>' +
+            '</div>' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('breadcrumbCountLabel')) + '</span></div>' +
+              '<input type="number" class="cfg-input mono" id="pulse-breadcrumb-count" min="0" max="20" step="1" value="' + escHtml(disp.breadcrumbCount === null || disp.breadcrumbCount === undefined ? '' : String(disp.breadcrumbCount)) + '">' +
+            '</div>' +
+            '<div class="cfg-field" style="justify-content:flex-end;">' +
+              '<label class="cfg-toggle-row">' +
+                '<span>' + escHtml(t('useNerdFontsLabel')) + '</span>' +
+                '<input type="checkbox" id="pulse-nerd-fonts"' + (disp.useNerdFonts ? ' checked' : '') + '>' +
+              '</label>' +
+            '</div>' +
+          '</div>' +
+        '</div>'
+      );
+
+      // Alert thresholds
+      var threshErr = validatePulseDraftLocal(d);
+      html.push(
+        '<div class="cfg-section">' +
+          '<h3 class="cfg-section-title">' + escHtml(t('pulseThresholdsTitle')) + '</h3>' +
+          '<div class="cfg-grid">' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('thresholdWarningLabel')) + '</span></div>' +
+              '<input type="number" class="cfg-input mono" id="pulse-thresh-warn" min="0" max="1" step="0.05" value="' + escHtml(String(d.thresholds.warning)) + '">' +
+            '</div>' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('thresholdCriticalLabel')) + '</span></div>' +
+              '<input type="number" class="cfg-input mono" id="pulse-thresh-crit" min="0" max="1" step="0.05" value="' + escHtml(String(d.thresholds.critical)) + '">' +
+            '</div>' +
+          '</div>' +
+          '<div class="cfg-hint">' + escHtml(t('thresholdPctHint')) + '</div>' +
+          '<div class="cfg-error-inline" id="pulse-thresh-err" style="display:' + (threshErr ? 'block' : 'none') + ';">' + escHtml(threshErr || '') + '</div>' +
+        '</div>'
+      );
+
+      // 17 display toggles grouped
+      var toggleSections = [];
+      for (var gi = 0; gi < PULSE_TOGGLE_GROUPS.length; gi++) {
+        var grp = PULSE_TOGGLE_GROUPS[gi];
+        var items = [];
+        for (var ki = 0; ki < grp.keys.length; ki++) {
+          var fk = grp.keys[ki];
+          items.push(
+            '<label class="cfg-toggle-row">' +
+              '<span>' + escHtml(t(fk)) + '</span>' +
+              '<input type="checkbox" class="pulse-show-toggle" data-key="' + escHtml(fk) + '"' + (disp[fk] ? ' checked' : '') + '>' +
+            '</label>'
+          );
+        }
+        toggleSections.push(
+          '<div class="cfg-subgroup-title">' + escHtml(t(grp.titleKey)) + '</div>' +
+          '<div class="cfg-toggle-grid">' + items.join('') + '</div>'
+        );
+      }
+      html.push(
+        '<div class="cfg-section">' +
+          '<h3 class="cfg-section-title">' + escHtml(t('pulseDisplaysTitle')) + '</h3>' +
+          toggleSections.join('') +
+        '</div>'
+      );
+
+      // Collapsible Advanced options
+      var cht = disp.cacheHitThresholds || {};
+      var icons = d.icons || {};
+      html.push(
+        '<details class="cfg-details" id="pulse-advanced-details"' + (pulseState.advancedOpen ? ' open' : '') + '>' +
+          '<summary>' + escHtml(t('pulseAdvancedTitle')) + '</summary>' +
+          '<div class="cfg-details-body">' +
+            '<div class="cfg-grid">' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('dashboardPortLabel')) + '</span>' + renderEnvBadge(env.dashboardPort) + '</div>' +
+                '<input type="number" class="cfg-input mono" id="pulse-dashboard-port" min="1" max="65535" placeholder="3789" value="' + escHtml(disp.dashboardPort == null ? '' : String(disp.dashboardPort)) + '">' +
+                '<div class="cfg-hint">' + escHtml(t('currentRunningVal') + ': ' + (rt.currentPort || '—') + ' · ' + t('restartRequiredHint')) + '</div>' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('dashboardIdleLabel')) + '</span>' + renderEnvBadge(env.dashboardIdleTimeoutSec) + '</div>' +
+                '<input type="number" class="cfg-input mono" id="pulse-dashboard-idle" min="0" step="1" placeholder="600" value="' + escHtml(disp.dashboardIdleTimeoutSec == null ? '' : String(disp.dashboardIdleTimeoutSec)) + '">' +
+                '<div class="cfg-hint">' + escHtml(t('currentRunningVal') + ': ' + (rt.currentIdleTimeoutSec !== undefined ? rt.currentIdleTimeoutSec + 's' : '—') + ' · ' + t('restartRequiredHint')) + '</div>' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('customUsernameLabel')) + '</span></div>' +
+                '<input type="text" class="cfg-input" id="pulse-username" maxlength="64" value="' + escHtml(disp.username || '') + '">' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('terminalWidthLabel')) + '</span></div>' +
+                '<input type="number" class="cfg-input mono" id="pulse-terminal-width" min="20" max="1000" step="1" value="' + escHtml(disp.terminalWidth == null ? '' : String(disp.terminalWidth)) + '">' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('cacheHitExcellentLabel')) + '</span></div>' +
+                '<input type="number" class="cfg-input mono" id="pulse-cht-excellent" min="0" max="100" step="1" value="' + escHtml(cht.excellent == null ? '' : String(cht.excellent)) + '">' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('cacheHitPartialLabel')) + '</span></div>' +
+                '<input type="number" class="cfg-input mono" id="pulse-cht-partial" min="0" max="100" step="1" value="' + escHtml(cht.partial == null ? '' : String(cht.partial)) + '">' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('speedExpireTurnsLabel')) + '</span></div>' +
+                '<input type="number" class="cfg-input mono" id="pulse-expire-turns" min="1" step="1" value="' + escHtml(disp.modelSpeedExpireTurns == null ? '' : String(disp.modelSpeedExpireTurns)) + '">' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('speedExpireMinutesLabel')) + '</span></div>' +
+                '<input type="number" class="cfg-input mono" id="pulse-expire-minutes" min="0.1" step="0.5" value="' + escHtml(disp.modelSpeedExpireMinutes == null ? '' : String(disp.modelSpeedExpireMinutes)) + '">' +
+              '</div>' +
+            '</div>' +
+            '<div class="cfg-subgroup-title">' + escHtml(t('iconsOverridesTitle')) + '</div>' +
+            '<div class="cfg-grid">' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('iconBranchLabel')) + '</span></div>' +
+                '<input type="text" class="cfg-input mono" id="pulse-icon-branch" value="' + escHtml(icons.branch || '') + '">' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('iconTokenLabel')) + '</span></div>' +
+                '<input type="text" class="cfg-input mono" id="pulse-icon-token" value="' + escHtml(icons.token || '') + '">' +
+              '</div>' +
+              '<div class="cfg-field">' +
+                '<div class="cfg-label-row"><span>' + escHtml(t('iconCtxLabel')) + '</span></div>' +
+                '<input type="text" class="cfg-input mono" id="pulse-icon-ctx" value="' + escHtml(icons.ctx || '') + '">' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</details>'
+      );
+
+      pane.innerHTML = html.join('');
+      updatePreviewDom();
+      bindPulseEvents();
+    }
+
+    function bindPulseEvents() {
+      var d = pulseState.draft;
+      if (!d) return;
+
+      var reloadBtn = document.getElementById('btn-pulse-reload');
+      if (reloadBtn) reloadBtn.addEventListener('click', loadPulseConfig);
+
+      var advEl = document.getElementById('pulse-advanced-details');
+      if (advEl) {
+        advEl.addEventListener('toggle', function () {
+          pulseState.advancedOpen = advEl.open;
+        });
+      }
+
+      function onDraftChanged(skipPreview) {
+        updatePulseDirty();
+        if (!skipPreview) schedulePulsePreview(false);
+      }
+
+      document.getElementById('pulse-enabled').addEventListener('change', function (e) {
+        d.enabled = !!e.target.checked;
+        onDraftChanged(false);
+      });
+      document.getElementById('pulse-language').addEventListener('change', function (e) {
+        d.language = e.target.value || 'auto';
+        onDraftChanged(false);
+      });
+
+      var presetBtns = document.querySelectorAll('#pulse-preset-pills .preset-pill');
+      function syncThemeControlsFromDraft() {
+        var activeName = matchingThemePresetName(d.theme);
+        for (var i = 0; i < presetBtns.length; i++) {
+          var pn = presetBtns[i].getAttribute('data-preset');
+          presetBtns[i].classList.toggle('active', pn === activeName);
+        }
+        var keys = ['primary', 'secondary', 'warning', 'critical'];
+        for (var k = 0; k < keys.length; k++) {
+          var sel = document.getElementById('pulse-theme-' + keys[k]);
+          var sw = document.getElementById('pulse-theme-' + keys[k] + '-swatch');
+          if (sel) sel.value = d.theme[keys[k]];
+          if (sw) sw.style.background = ANSI_COLOR_HEX[d.theme[keys[k]]] || '#10b981';
+        }
+      }
+      for (var i = 0; i < presetBtns.length; i++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            var pname = btn.getAttribute('data-preset');
+            d.theme = normalizeThemeObject(pname, pulseState.themePresets);
+            syncThemeControlsFromDraft();
+            onDraftChanged(false);
+          });
+        })(presetBtns[i]);
+      }
+
+      ['primary', 'secondary', 'warning', 'critical'].forEach(function (ck) {
+        var sel = document.getElementById('pulse-theme-' + ck);
+        if (!sel) return;
+        sel.addEventListener('change', function (e) {
+          d.theme[ck] = normalizeColorName(e.target.value, 'green');
+          syncThemeControlsFromDraft();
+          onDraftChanged(false);
+        });
+      });
+
+      document.getElementById('pulse-quota-style').addEventListener('change', function (e) {
+        d.display.quotaStyle = e.target.value || 'table';
+        onDraftChanged(false);
+      });
+      document.getElementById('pulse-unicode').addEventListener('change', function (e) {
+        var v = e.target.value;
+        d.display.unicode = v === 'true' ? true : (v === 'false' ? false : null);
+        onDraftChanged(false);
+      });
+      document.getElementById('pulse-nerd-fonts').addEventListener('change', function (e) {
+        d.display.useNerdFonts = !!e.target.checked;
+        onDraftChanged(false);
+      });
+      document.getElementById('pulse-breadcrumb-count').addEventListener('input', function (e) {
+        var raw = String(e.target.value || '').trim();
+        d.display.breadcrumbCount = raw === '' ? null : parseInt(raw, 10);
+        onDraftChanged(false);
+      });
+
+      function onThreshInput() {
+        var wRaw = String(document.getElementById('pulse-thresh-warn').value || '').trim();
+        var cRaw = String(document.getElementById('pulse-thresh-crit').value || '').trim();
+        d.thresholds.warning = wRaw === '' ? NaN : Number(wRaw);
+        d.thresholds.critical = cRaw === '' ? NaN : Number(cRaw);
+        var err = validatePulseDraftLocal(d);
+        var errEl = document.getElementById('pulse-thresh-err');
+        if (errEl) {
+          errEl.textContent = err || '';
+          errEl.style.display = err ? 'block' : 'none';
+        }
+        onDraftChanged(false);
+      }
+      document.getElementById('pulse-thresh-warn').addEventListener('input', onThreshInput);
+      document.getElementById('pulse-thresh-crit').addEventListener('input', onThreshInput);
+
+      var toggles = document.querySelectorAll('.pulse-show-toggle');
+      for (var ti = 0; ti < toggles.length; ti++) {
+        (function (cb) {
+          cb.addEventListener('change', function () {
+            var key = cb.getAttribute('data-key');
+            if (key) {
+              d.display[key] = !!cb.checked;
+              onDraftChanged(false);
+            }
+          });
+        })(toggles[ti]);
+      }
+
+      document.getElementById('pulse-dashboard-port').addEventListener('input', function (e) {
+        var raw = String(e.target.value || '').trim();
+        d.display.dashboardPort = raw === '' ? null : parseInt(raw, 10);
+        onDraftChanged(true);
+      });
+      document.getElementById('pulse-dashboard-idle').addEventListener('input', function (e) {
+        var raw = String(e.target.value || '').trim();
+        d.display.dashboardIdleTimeoutSec = raw === '' ? null : parseInt(raw, 10);
+        onDraftChanged(true);
+      });
+      document.getElementById('pulse-username').addEventListener('input', function (e) {
+        var raw = String(e.target.value || '').trim();
+        d.display.username = raw === '' ? null : raw;
+        onDraftChanged(false);
+      });
+      document.getElementById('pulse-terminal-width').addEventListener('input', function (e) {
+        var raw = String(e.target.value || '').trim();
+        d.display.terminalWidth = raw === '' ? null : parseInt(raw, 10);
+        onDraftChanged(false);
+      });
+
+      function onCacheHitInput() {
+        var exRaw = String(document.getElementById('pulse-cht-excellent').value || '').trim();
+        var paRaw = String(document.getElementById('pulse-cht-partial').value || '').trim();
+        if (exRaw === '' && paRaw === '') {
+          d.display.cacheHitThresholds = null;
+        } else {
+          d.display.cacheHitThresholds = {
+            excellent: exRaw === '' ? null : Number(exRaw),
+            partial: paRaw === '' ? null : Number(paRaw)
+          };
+        }
+        onDraftChanged(false);
+      }
+      document.getElementById('pulse-cht-excellent').addEventListener('input', onCacheHitInput);
+      document.getElementById('pulse-cht-partial').addEventListener('input', onCacheHitInput);
+
+      document.getElementById('pulse-expire-turns').addEventListener('input', function (e) {
+        var raw = String(e.target.value || '').trim();
+        d.display.modelSpeedExpireTurns = raw === '' ? null : parseInt(raw, 10);
+        onDraftChanged(false);
+      });
+      document.getElementById('pulse-expire-minutes').addEventListener('input', function (e) {
+        var raw = String(e.target.value || '').trim();
+        d.display.modelSpeedExpireMinutes = raw === '' ? null : Number(raw);
+        onDraftChanged(false);
+      });
+
+      ['branch', 'token', 'ctx'].forEach(function (ik) {
+        var el = document.getElementById('pulse-icon-' + ik);
+        if (!el) return;
+        el.addEventListener('input', function (e) {
+          var raw = String(e.target.value || '').trim();
+          d.icons[ik] = raw === '' ? null : raw;
+          onDraftChanged(false);
+        });
+      });
+    }
+
+    // ------------------------------------------------------------------------
+    // Sync Config Tab
+    // ------------------------------------------------------------------------
+    function makeEmptySyncDraftsByType() {
+      return {
+        'local-dir': {
+          type: 'local-dir',
+          path: ''
+        },
+        webdav: {
+          type: 'webdav',
+          url: '',
+          username: '',
+          allowInsecureHttp: false,
+          secrets: {
+            password: { value: '', clear: false },
+            token: { value: '', clear: false }
+          }
+        },
+        s3: {
+          type: 's3',
+          endpoint: '',
+          region: 'auto',
+          bucket: '',
+          pathStyle: true,
+          allowInsecureHttp: false,
+          secrets: {
+            accessKey: { value: '', clear: false },
+            secretKey: { value: '', clear: false }
+          }
+        },
+        'cf-worker': {
+          type: 'cf-worker',
+          url: '',
+          allowInsecureHttp: false,
+          secrets: {
+            token: { value: '', clear: false }
+          }
+        }
+      };
+    }
+
+    function populateSyncStateFromResponse(data) {
+      var cfg = data.config || {};
+      var remote = cfg.remote || { type: 'local-dir', path: '' };
+      var rType = remote.type || 'local-dir';
+
+      syncState.loaded = true;
+      syncState.version = data.version || 'absent';
+      syncState.filePath = data.filePath || '';
+      syncState.exists = !!data.exists;
+      syncState.parseError = data.parseError || null;
+      syncState.localDeviceId = data.localDeviceId || cfg.deviceId || '';
+      syncState.envOverrides = data.envOverrides || {};
+      syncState.diskRemote = deepClone(remote);
+      syncState.confirmDelete = false;
+
+      var drafts = makeEmptySyncDraftsByType();
+      if (rType === 'local-dir') {
+        drafts['local-dir'].path = remote.path || '';
+      } else if (rType === 'webdav') {
+        drafts.webdav.url = remote.url || '';
+        drafts.webdav.username = remote.username || '';
+        drafts.webdav.allowInsecureHttp = !!remote.allowInsecureHttp;
+      } else if (rType === 's3') {
+        drafts.s3.endpoint = remote.endpoint || '';
+        drafts.s3.region = remote.region || 'auto';
+        drafts.s3.bucket = remote.bucket || '';
+        drafts.s3.pathStyle = remote.pathStyle !== false;
+        drafts.s3.allowInsecureHttp = !!remote.allowInsecureHttp;
+      } else if (rType === 'cf-worker') {
+        drafts['cf-worker'].url = remote.url || '';
+        drafts['cf-worker'].allowInsecureHttp = !!remote.allowInsecureHttp;
+      }
+
+      syncState.draftsByType = drafts;
+      syncState.draft = {
+        enabled: !!cfg.enabled,
+        deviceName: cfg.deviceName || '',
+        defaultAccount: cfg.defaultAccount || '',
+        pushIntervalSec: cfg.pushIntervalSec || 300,
+        prefix: cfg.prefix || 'agy-pulse-sync',
+        remoteType: rType
+      };
+      syncState.savedSnapshotJson = JSON.stringify({
+        draft: syncState.draft,
+        draftsByType: syncState.draftsByType
+      });
+      syncState.dirty = false;
+      updateDirtyDots();
+    }
+
+    function updateSyncDirty() {
+      if (!syncState.draft || !syncState.draftsByType) {
+        syncState.dirty = false;
+      } else {
+        var curJson = JSON.stringify({
+          draft: syncState.draft,
+          draftsByType: syncState.draftsByType
+        });
+        syncState.dirty = curJson !== syncState.savedSnapshotJson;
+      }
+      updateDirtyDots();
+      renderDrawerFooter();
+    }
+
+    function secretMutationFromDraft(entry) {
+      if (entry && entry.clear) return { mode: 'clear' };
+      var trimmed = entry && entry.value ? String(entry.value).trim() : '';
+      if (trimmed.length > 0) return { mode: 'set', value: trimmed };
+      return { mode: 'keep' };
+    }
+
+    function buildSyncWritePayload() {
+      var d = syncState.draft;
+      var rType = d.remoteType;
+      var rd = syncState.draftsByType[rType];
+      var remotePayload;
+
+      if (rType === 'local-dir') {
+        remotePayload = {
+          type: 'local-dir',
+          path: String(rd.path || '').trim()
+        };
+      } else if (rType === 'webdav') {
+        var u = String(rd.username || '').trim();
+        remotePayload = {
+          type: 'webdav',
+          url: String(rd.url || '').trim(),
+          username: u === '' ? null : u,
+          allowInsecureHttp: !!rd.allowInsecureHttp,
+          secrets: {
+            password: secretMutationFromDraft(rd.secrets.password),
+            token: secretMutationFromDraft(rd.secrets.token)
+          }
+        };
+      } else if (rType === 's3') {
+        remotePayload = {
+          type: 's3',
+          endpoint: String(rd.endpoint || '').trim(),
+          region: String(rd.region || '').trim() || 'auto',
+          bucket: String(rd.bucket || '').trim(),
+          pathStyle: !!rd.pathStyle,
+          allowInsecureHttp: !!rd.allowInsecureHttp,
+          secrets: {
+            accessKey: secretMutationFromDraft(rd.secrets.accessKey),
+            secretKey: secretMutationFromDraft(rd.secrets.secretKey)
+          }
+        };
+      } else {
+        remotePayload = {
+          type: 'cf-worker',
+          url: String(rd.url || '').trim(),
+          allowInsecureHttp: !!rd.allowInsecureHttp,
+          secrets: {
+            token: secretMutationFromDraft(rd.secrets.token)
+          }
+        };
+      }
+
+      var devName = String(d.deviceName || '').trim();
+      var defAcct = String(d.defaultAccount || '').trim();
+      var pushSec = parseInt(String(d.pushIntervalSec || '').trim(), 10);
+
+      return {
+        enabled: !!d.enabled,
+        deviceName: devName === '' ? null : devName,
+        defaultAccount: defAcct === '' ? null : defAcct,
+        pushIntervalSec: isFinite(pushSec) ? pushSec : 0,
+        prefix: String(d.prefix || '').trim(),
+        remote: remotePayload
+      };
+    }
+
+    function isSyncSecretConfiguredOnDisk(remoteType, secretKey) {
+      if (!syncState.diskRemote || syncState.diskRemote.type !== remoteType) return false;
+      var secs = syncState.diskRemote.secrets || {};
+      return !!(secs[secretKey] && secs[secretKey].configured);
+    }
+
+    function syncSecretEnvVar(remoteType, secretKey) {
+      var env = syncState.envOverrides || {};
+      if (remoteType === 'webdav') {
+        if (secretKey === 'password') return env.password || null;
+        if (secretKey === 'token') return env.token || null;
+      } else if (remoteType === 's3') {
+        if (secretKey === 'accessKey') return env.accessKey || null;
+        if (secretKey === 'secretKey') return env.secretKey || null;
+      } else if (remoteType === 'cf-worker') {
+        if (secretKey === 'token') return env.token || null;
+      }
+      return null;
+    }
+
+    function isPlaintextHttpUrl(url) {
+      return /^http:\/\//i.test(String(url || '').trim());
+    }
+
+    async function loadSyncConfig() {
+      syncState.loading = true;
+      syncState.banner = null;
+      syncState.probeResult = null;
+      renderSyncPane();
+      renderDrawerFooter();
+
+      var res = await configRequest('GET', '/api/config/sync');
+      syncState.loading = false;
+      if (!res.ok || !res.data) {
+        syncState.banner = { kind: 'error', msg: formatApiError(res) };
+        renderSyncPane();
+        renderDrawerFooter();
+        return;
+      }
+
+      populateSyncStateFromResponse(res.data);
+      syncState.banner = null;
+      renderSyncPane();
+      renderDrawerFooter();
+    }
+
+    async function testSyncConnection() {
+      if (!syncState.draft || syncState.testing) return;
+      syncState.testing = true;
+      syncState.probeResult = null;
+      syncState.banner = null;
+      renderSyncPane();
+      renderDrawerFooter();
+
+      var payload = buildSyncWritePayload();
+      var res = await configRequest('POST', '/api/config/sync/test', { config: payload });
+      syncState.testing = false;
+
+      if (!res.ok || !res.data) {
+        syncState.probeResult = {
+          ok: false,
+          target: '',
+          error: formatApiError(res),
+          latencyMs: 0
+        };
+      } else {
+        syncState.probeResult = res.data;
+      }
+      renderSyncPane();
+      renderDrawerFooter();
+    }
+
+    async function saveSyncConfig() {
+      if (!syncState.draft || syncState.saving) return;
+      syncState.saving = true;
+      syncState.banner = null;
+      renderDrawerFooter();
+
+      var payload = buildSyncWritePayload();
+      var res = await configRequest('PUT', '/api/config/sync', {
+        expectedVersion: syncState.version,
+        config: payload
+      });
+      syncState.saving = false;
+
+      if (res.status === 409) {
+        syncState.banner = { kind: 'warn', msg: t('conflictMsg'), conflict: true };
+        renderSyncPane();
+        renderDrawerFooter();
+        return;
+      }
+      if (!res.ok || !res.data) {
+        syncState.banner = { kind: 'error', msg: formatApiError(res) };
+        renderSyncPane();
+        renderDrawerFooter();
+        return;
+      }
+
+      populateSyncStateFromResponse(res.data);
+      syncState.banner = {
+        kind: 'success',
+        msg: t('syncSavedOk'),
+        showSyncNow: !!syncState.draft.enabled
+      };
+      renderSyncPane();
+      renderDrawerFooter();
+      fetchOverview();
+    }
+
+    async function deleteSyncConfigConfirmed() {
+      if (syncState.deleting) return;
+      syncState.deleting = true;
+      syncState.banner = null;
+      renderSyncPane();
+      renderDrawerFooter();
+
+      var res = await configRequest('DELETE', '/api/config/sync', {
+        expectedVersion: syncState.version
+      });
+      syncState.deleting = false;
+
+      if (res.status === 409) {
+        syncState.confirmDelete = false;
+        syncState.banner = { kind: 'warn', msg: t('conflictMsg'), conflict: true };
+        renderSyncPane();
+        renderDrawerFooter();
+        return;
+      }
+      if (!res.ok || !res.data) {
+        syncState.banner = { kind: 'error', msg: formatApiError(res) };
+        renderSyncPane();
+        renderDrawerFooter();
+        return;
+      }
+
+      await loadSyncConfig();
+      syncState.banner = { kind: 'success', msg: t('syncDeletedOk') };
+      renderSyncPane();
+      renderDrawerFooter();
+      fetchOverview();
+    }
+
+    function secretStatusBadgeHtml(remoteType, secretKey, entry) {
+      var diskConfigured = isSyncSecretConfiguredOnDisk(remoteType, secretKey);
+      var envVar = syncSecretEnvVar(remoteType, secretKey);
+      var badges = [];
+      if (entry && entry.clear) {
+        badges.push('<span class="badge badge-danger">' + escHtml(t('secretPendingClear')) + '</span>');
+      } else if (entry && entry.value && String(entry.value).trim().length > 0) {
+        badges.push('<span class="badge badge-warn">' + escHtml(t('secretPendingSet')) + '</span>');
+      } else if (diskConfigured) {
+        badges.push('<span class="badge badge-accent">' + escHtml(t('secretConfigured')) + '</span>');
+      } else {
+        badges.push('<span class="badge">' + escHtml(t('secretNotConfigured')) + '</span>');
+      }
+      if (envVar) {
+        badges.push('<span class="badge badge-warn">' + escHtml(t('envOverridePrefix') + ' (' + envVar + ')') + '</span>');
+      }
+      return badges.join(' ');
+    }
+
+    function renderSyncSecretWidget(remoteType, secretKey, labelKey, entry) {
+      var diskConfigured = isSyncSecretConfiguredOnDisk(remoteType, secretKey);
+      var placeholder = diskConfigured ? t('secretPlaceholderKeep') : t('secretPlaceholderNew');
+      var showClearBtn = diskConfigured || (entry && entry.clear);
+      var isClearing = !!(entry && entry.clear);
+      return (
+        '<div class="secret-box" data-secret-box="' + escHtml(secretKey) + '">' +
+          '<div class="cfg-label-row">' +
+            '<span>' + escHtml(t(labelKey)) + '</span>' +
+            '<span class="secret-badges" data-secret-badges="' + escHtml(secretKey) + '">' +
+              secretStatusBadgeHtml(remoteType, secretKey, entry) +
+            '</span>' +
+          '</div>' +
+          '<div class="secret-input-row">' +
+            '<input type="password" class="cfg-input mono sync-secret-input" data-secret-key="' + escHtml(secretKey) + '" autocomplete="new-password" placeholder="' + escHtml(placeholder) + '" value="' + escHtml(entry ? entry.value : '') + '">' +
+            (showClearBtn
+              ? '<button type="button" class="btn ' + (isClearing ? '' : 'btn-danger-outline') + ' sync-secret-clear-btn" data-secret-key="' + escHtml(secretKey) + '">' + escHtml(isClearing ? t('secretUndoClearBtn') : t('secretClearBtn')) + '</button>'
+              : '') +
+          '</div>' +
+        '</div>'
+      );
+    }
+
+    function renderSyncPane() {
+      var pane = document.getElementById('tab-pane-sync');
+      if (!pane) return;
+
+      if (syncState.loading && !syncState.loaded) {
+        pane.innerHTML = '<div class="cfg-banner info"><div class="cfg-banner-msg">' + escHtml(t('loadingConfig')) + '</div></div>';
+        return;
+      }
+      if (!syncState.draft || !syncState.draftsByType) {
+        var errBanner = syncState.banner
+          ? '<div class="cfg-banner error"><div class="cfg-banner-msg">' + escHtml(syncState.banner.msg) + '</div><div class="cfg-banner-actions"><button type="button" class="btn" id="btn-sync-reload">' + escHtml(t('reloadLatest')) + '</button></div></div>'
+          : '';
+        pane.innerHTML = errBanner;
+        var reloadInit = document.getElementById('btn-sync-reload');
+        if (reloadInit) reloadInit.addEventListener('click', loadSyncConfig);
+        return;
+      }
+
+      var d = syncState.draft;
+      var rType = d.remoteType;
+      var rd = syncState.draftsByType[rType];
+      var html = [];
+
+      if (syncState.banner) {
+        var actionsHtml = '';
+        if (syncState.banner.conflict) {
+          actionsHtml += '<button type="button" class="btn" id="btn-sync-reload">' + escHtml(t('reloadLatest')) + '</button>';
+        }
+        if (syncState.banner.showSyncNow) {
+          actionsHtml += '<button type="button" class="btn btn-primary" id="btn-sync-saved-now">' + escHtml(t('syncNow')) + '</button>';
+        }
+        html.push(
+          '<div class="cfg-banner ' + escHtml(syncState.banner.kind) + '">' +
+            '<div class="cfg-banner-msg">' + escHtml(syncState.banner.msg) + '</div>' +
+            (actionsHtml ? '<div class="cfg-banner-actions">' + actionsHtml + '</div>' : '') +
+          '</div>'
+        );
+      }
+
+      if (syncState.parseError) {
+        html.push(
+          '<div class="cfg-banner warn">' +
+            '<div class="cfg-banner-msg">' + escHtml(t('parseErrorNotice')) + ' <span class="mono">' + escHtml(syncState.parseError) + '</span></div>' +
+          '</div>'
+        );
+      }
+
+      // Meta info bar
+      html.push(
+        '<div class="cfg-meta-box">' +
+          '<div class="cfg-meta-row">' +
+            '<span>' + escHtml(t('cfgFilePath')) + ': <span class="mono cfg-path">' + escHtml(syncState.filePath) + '</span></span>' +
+            '<span class="badge badge-accent">' + escHtml(t('syncFilePermBadge')) + '</span>' +
+          '</div>' +
+          '<div class="cfg-meta-row">' +
+            '<span>' + escHtml(t('syncLocalDeviceId')) + ': <span class="mono cfg-path">' + escHtml(syncState.localDeviceId) + '</span></span>' +
+          '</div>' +
+          (!syncState.exists ? '<div class="cfg-hint">' + escHtml(t('syncNotInitializedHint')) + '</div>' : '') +
+        '</div>'
+      );
+
+      // General sync fields
+      html.push(
+        '<div class="cfg-section">' +
+          '<h3 class="cfg-section-title">' + escHtml(t('syncGeneralTitle')) + '</h3>' +
+          '<div class="cfg-grid">' +
+            '<div class="cfg-field full">' +
+              '<label class="cfg-toggle-row">' +
+                '<span>' + escHtml(t('syncEnabledLabel')) + '</span>' +
+                '<input type="checkbox" id="sync-enabled"' + (d.enabled ? ' checked' : '') + '>' +
+              '</label>' +
+            '</div>' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('syncDeviceNameLabel')) + '</span></div>' +
+              '<input type="text" class="cfg-input" id="sync-device-name" maxlength="128" value="' + escHtml(d.deviceName) + '">' +
+            '</div>' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('syncDefaultAccountLabel')) + '</span></div>' +
+              '<input type="email" class="cfg-input" id="sync-default-account" placeholder="alice@example.com" value="' + escHtml(d.defaultAccount) + '">' +
+            '</div>' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('syncPushIntervalLabel')) + '</span></div>' +
+              '<input type="number" class="cfg-input mono" id="sync-push-interval" min="1" max="86400" step="1" value="' + escHtml(String(d.pushIntervalSec)) + '">' +
+            '</div>' +
+            '<div class="cfg-field">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('syncPrefixLabel')) + '</span></div>' +
+              '<input type="text" class="cfg-input mono" id="sync-prefix" value="' + escHtml(d.prefix) + '">' +
+            '</div>' +
+          '</div>' +
+        '</div>'
+      );
+
+      // Remote type & fields
+      var remoteFieldsHtml = '';
+      if (rType === 'local-dir') {
+        remoteFieldsHtml =
+          '<div class="cfg-field full">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t('remotePathLabel')) + '</span></div>' +
+            '<input type="text" class="cfg-input mono" id="sync-remote-path" placeholder="/path/to/sync-dir" value="' + escHtml(rd.path) + '">' +
+          '</div>';
+      } else if (rType === 'webdav') {
+        var davHttpWarn = isPlaintextHttpUrl(rd.url);
+        remoteFieldsHtml =
+          '<div class="cfg-field full">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t('remoteUrlLabel')) + '</span></div>' +
+            '<input type="url" class="cfg-input mono" id="sync-remote-url" placeholder="https:' + '//dav.example.com/pulse" value="' + escHtml(rd.url) + '">' +
+          '</div>' +
+          '<div class="cfg-field full">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t('remoteUsernameLabel')) + '</span></div>' +
+            '<input type="text" class="cfg-input" id="sync-remote-username" value="' + escHtml(rd.username) + '">' +
+          '</div>' +
+          '<div class="cfg-field">' +
+            renderSyncSecretWidget('webdav', 'password', 'secretPasswordLabel', rd.secrets.password) +
+          '</div>' +
+          '<div class="cfg-field">' +
+            renderSyncSecretWidget('webdav', 'token', 'secretTokenLabel', rd.secrets.token) +
+          '</div>' +
+          '<div class="cfg-field full">' +
+            '<label class="cfg-toggle-row">' +
+              '<span>' + escHtml(t('remoteAllowInsecureHttpLabel')) + '</span>' +
+              '<input type="checkbox" id="sync-remote-insecure"' + (rd.allowInsecureHttp ? ' checked' : '') + '>' +
+            '</label>' +
+            '<div class="cfg-banner warn" id="sync-http-warn" style="display:' + (davHttpWarn ? 'flex' : 'none') + ';margin-top:6px;"><div class="cfg-banner-msg">' + escHtml(t('httpInsecureWarn')) + '</div></div>' +
+          '</div>';
+      } else if (rType === 's3') {
+        var s3HttpWarn = isPlaintextHttpUrl(rd.endpoint);
+        remoteFieldsHtml =
+          '<div class="cfg-field full">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t('remoteEndpointLabel')) + '</span></div>' +
+            '<input type="url" class="cfg-input mono" id="sync-remote-endpoint" placeholder="https:' + '//s3.example.com" value="' + escHtml(rd.endpoint) + '">' +
+          '</div>' +
+          '<div class="cfg-field">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t('remoteRegionLabel')) + '</span></div>' +
+            '<input type="text" class="cfg-input mono" id="sync-remote-region" value="' + escHtml(rd.region) + '">' +
+          '</div>' +
+          '<div class="cfg-field">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t('remoteBucketLabel')) + '</span></div>' +
+            '<input type="text" class="cfg-input mono" id="sync-remote-bucket" value="' + escHtml(rd.bucket) + '">' +
+          '</div>' +
+          '<div class="cfg-field">' +
+            renderSyncSecretWidget('s3', 'accessKey', 'secretAccessKeyLabel', rd.secrets.accessKey) +
+          '</div>' +
+          '<div class="cfg-field">' +
+            renderSyncSecretWidget('s3', 'secretKey', 'secretSecretKeyLabel', rd.secrets.secretKey) +
+          '</div>' +
+          '<div class="cfg-field">' +
+            '<label class="cfg-toggle-row">' +
+              '<span>' + escHtml(t('remotePathStyleLabel')) + '</span>' +
+              '<input type="checkbox" id="sync-remote-pathstyle"' + (rd.pathStyle ? ' checked' : '') + '>' +
+            '</label>' +
+          '</div>' +
+          '<div class="cfg-field">' +
+            '<label class="cfg-toggle-row">' +
+              '<span>' + escHtml(t('remoteAllowInsecureHttpLabel')) + '</span>' +
+              '<input type="checkbox" id="sync-remote-insecure"' + (rd.allowInsecureHttp ? ' checked' : '') + '>' +
+            '</label>' +
+          '</div>' +
+          '<div class="cfg-field full" id="sync-http-warn" style="display:' + (s3HttpWarn ? 'flex' : 'none') + ';">' +
+            '<div class="cfg-banner warn"><div class="cfg-banner-msg">' + escHtml(t('httpInsecureWarn')) + '</div></div>' +
+          '</div>';
+      } else {
+        var cfHttpWarn = isPlaintextHttpUrl(rd.url);
+        remoteFieldsHtml =
+          '<div class="cfg-field full">' +
+            '<div class="cfg-label-row"><span>' + escHtml(t('remoteUrlLabel')) + '</span></div>' +
+            '<input type="url" class="cfg-input mono" id="sync-remote-url" placeholder="https:' + '//pulse-sync.example.workers.dev" value="' + escHtml(rd.url) + '">' +
+          '</div>' +
+          '<div class="cfg-field full">' +
+            renderSyncSecretWidget('cf-worker', 'token', 'secretTokenLabel', rd.secrets.token) +
+          '</div>' +
+          '<div class="cfg-field full">' +
+            '<label class="cfg-toggle-row">' +
+              '<span>' + escHtml(t('remoteAllowInsecureHttpLabel')) + '</span>' +
+              '<input type="checkbox" id="sync-remote-insecure"' + (rd.allowInsecureHttp ? ' checked' : '') + '>' +
+            '</label>' +
+            '<div class="cfg-banner warn" id="sync-http-warn" style="display:' + (cfHttpWarn ? 'flex' : 'none') + ';margin-top:6px;"><div class="cfg-banner-msg">' + escHtml(t('httpInsecureWarn')) + '</div></div>' +
+          '</div>';
+      }
+
+      html.push(
+        '<div class="cfg-section">' +
+          '<h3 class="cfg-section-title">' + escHtml(t('syncRemoteTitle')) + '</h3>' +
+          '<div class="cfg-grid">' +
+            '<div class="cfg-field full">' +
+              '<div class="cfg-label-row"><span>' + escHtml(t('syncRemoteTypeLabel')) + '</span></div>' +
+              '<select class="cfg-select" id="sync-remote-type">' +
+                '<option value="local-dir"' + (rType === 'local-dir' ? ' selected' : '') + '>' + escHtml(t('remoteTypeLocalDir')) + '</option>' +
+                '<option value="webdav"' + (rType === 'webdav' ? ' selected' : '') + '>' + escHtml(t('remoteTypeWebdav')) + '</option>' +
+                '<option value="s3"' + (rType === 's3' ? ' selected' : '') + '>' + escHtml(t('remoteTypeS3')) + '</option>' +
+                '<option value="cf-worker"' + (rType === 'cf-worker' ? ' selected' : '') + '>' + escHtml(t('remoteTypeCfWorker')) + '</option>' +
+              '</select>' +
+            '</div>' +
+            remoteFieldsHtml +
+          '</div>' +
+        '</div>'
+      );
+
+      // Probe result box
+      if (syncState.probeResult) {
+        var pr = syncState.probeResult;
+        var prOk = !!pr.ok;
+        var prTitle = prOk ? t('testConnSuccess') : t('testConnFail');
+        var prDetail = prOk ? (pr.message || '') : (pr.error || '');
+        var prMeta = (pr.target ? pr.target + ' · ' : '') + fmtInt(pr.latencyMs || 0) + ' ms';
+        html.push(
+          '<div class="probe-result ' + (prOk ? 'ok' : 'fail') + '">' +
+            '<div><b>' + escHtml(prTitle) + '</b> <span class="mono" style="opacity:0.8;">(' + escHtml(prMeta) + ')</span></div>' +
+            (prDetail ? '<div style="margin-top:4px;">' + escHtml(prDetail) + '</div>' : '') +
+          '</div>'
+        );
+      }
+
+      // Danger zone (only when sync config file exists on disk)
+      if (syncState.exists) {
+        var confirmHtml = syncState.confirmDelete
+          ? '<div class="danger-confirm-box">' +
+              '<div>' + escHtml(t('removeSyncConfirmText')) + '</div>' +
+              '<div class="cfg-banner-actions">' +
+                '<button type="button" class="btn btn-danger" id="btn-sync-delete-confirm"' + (syncState.deleting ? ' disabled' : '') + '>' + escHtml(t('confirmRemoveBtn')) + '</button>' +
+                '<button type="button" class="btn" id="btn-sync-delete-cancel"' + (syncState.deleting ? ' disabled' : '') + '>' + escHtml(t('cancelBtn')) + '</button>' +
+              '</div>' +
+            '</div>'
+          : '<div><button type="button" class="btn btn-danger-outline" id="btn-sync-delete-open">' + escHtml(t('removeSyncBtn')) + '</button></div>';
+
+        html.push(
+          '<div class="danger-zone">' +
+            '<h3 class="cfg-section-title" style="color:var(--danger);">' + escHtml(t('dangerZoneTitle')) + '</h3>' +
+            confirmHtml +
+          '</div>'
+        );
+      }
+
+      pane.innerHTML = html.join('');
+      bindSyncEvents();
+    }
+
+    function bindSyncEvents() {
+      var d = syncState.draft;
+      if (!d || !syncState.draftsByType) return;
+      var rType = d.remoteType;
+      var rd = syncState.draftsByType[rType];
+
+      var reloadBtn = document.getElementById('btn-sync-reload');
+      if (reloadBtn) reloadBtn.addEventListener('click', loadSyncConfig);
+
+      var syncNowBtn = document.getElementById('btn-sync-saved-now');
+      if (syncNowBtn) {
+        syncNowBtn.addEventListener('click', function () {
+          triggerRemoteSync(true);
+        });
+      }
+
+      document.getElementById('sync-enabled').addEventListener('change', function (e) {
+        d.enabled = !!e.target.checked;
+        updateSyncDirty();
+      });
+      document.getElementById('sync-device-name').addEventListener('input', function (e) {
+        d.deviceName = e.target.value || '';
+        updateSyncDirty();
+      });
+      document.getElementById('sync-default-account').addEventListener('input', function (e) {
+        d.defaultAccount = e.target.value || '';
+        updateSyncDirty();
+      });
+      document.getElementById('sync-push-interval').addEventListener('input', function (e) {
+        var raw = String(e.target.value || '').trim();
+        d.pushIntervalSec = raw === '' ? 0 : parseInt(raw, 10);
+        updateSyncDirty();
+      });
+      document.getElementById('sync-prefix').addEventListener('input', function (e) {
+        d.prefix = e.target.value || '';
+        updateSyncDirty();
+      });
+
+      document.getElementById('sync-remote-type').addEventListener('change', function (e) {
+        d.remoteType = e.target.value || 'local-dir';
+        syncState.probeResult = null;
+        updateSyncDirty();
+        renderSyncPane();
+      });
+
+      function updateHttpWarn(urlVal) {
+        var warnEl = document.getElementById('sync-http-warn');
+        if (warnEl) {
+          warnEl.style.display = isPlaintextHttpUrl(urlVal) ? 'flex' : 'none';
+        }
+      }
+
+      if (rType === 'local-dir') {
+        document.getElementById('sync-remote-path').addEventListener('input', function (e) {
+          rd.path = e.target.value || '';
+          updateSyncDirty();
+        });
+      } else if (rType === 'webdav') {
+        document.getElementById('sync-remote-url').addEventListener('input', function (e) {
+          rd.url = e.target.value || '';
+          updateHttpWarn(rd.url);
+          updateSyncDirty();
+        });
+        document.getElementById('sync-remote-username').addEventListener('input', function (e) {
+          rd.username = e.target.value || '';
+          updateSyncDirty();
+        });
+        document.getElementById('sync-remote-insecure').addEventListener('change', function (e) {
+          rd.allowInsecureHttp = !!e.target.checked;
+          updateSyncDirty();
+        });
+      } else if (rType === 's3') {
+        document.getElementById('sync-remote-endpoint').addEventListener('input', function (e) {
+          rd.endpoint = e.target.value || '';
+          updateHttpWarn(rd.endpoint);
+          updateSyncDirty();
+        });
+        document.getElementById('sync-remote-region').addEventListener('input', function (e) {
+          rd.region = e.target.value || '';
+          updateSyncDirty();
+        });
+        document.getElementById('sync-remote-bucket').addEventListener('input', function (e) {
+          rd.bucket = e.target.value || '';
+          updateSyncDirty();
+        });
+        document.getElementById('sync-remote-pathstyle').addEventListener('change', function (e) {
+          rd.pathStyle = !!e.target.checked;
+          updateSyncDirty();
+        });
+        document.getElementById('sync-remote-insecure').addEventListener('change', function (e) {
+          rd.allowInsecureHttp = !!e.target.checked;
+          updateSyncDirty();
+        });
+      } else {
+        document.getElementById('sync-remote-url').addEventListener('input', function (e) {
+          rd.url = e.target.value || '';
+          updateHttpWarn(rd.url);
+          updateSyncDirty();
+        });
+        document.getElementById('sync-remote-insecure').addEventListener('change', function (e) {
+          rd.allowInsecureHttp = !!e.target.checked;
+          updateSyncDirty();
+        });
+      }
+
+      var secretInputs = document.querySelectorAll('.sync-secret-input');
+      for (var si = 0; si < secretInputs.length; si++) {
+        (function (inp) {
+          inp.addEventListener('input', function () {
+            var sk = inp.getAttribute('data-secret-key');
+            if (!sk || !rd.secrets || !rd.secrets[sk]) return;
+            rd.secrets[sk].value = inp.value || '';
+            if (String(inp.value || '').trim().length > 0) {
+              rd.secrets[sk].clear = false;
+            }
+            var box = document.querySelector('[data-secret-badges="' + sk + '"]');
+            if (box) box.innerHTML = secretStatusBadgeHtml(rType, sk, rd.secrets[sk]);
+            var clearBtn = document.querySelector('.sync-secret-clear-btn[data-secret-key="' + sk + '"]');
+            if (clearBtn) {
+              clearBtn.textContent = rd.secrets[sk].clear ? t('secretUndoClearBtn') : t('secretClearBtn');
+              clearBtn.className = 'btn ' + (rd.secrets[sk].clear ? '' : 'btn-danger-outline') + ' sync-secret-clear-btn';
+            }
+            updateSyncDirty();
+          });
+        })(secretInputs[si]);
+      }
+
+      var clearBtns = document.querySelectorAll('.sync-secret-clear-btn');
+      for (var cb = 0; cb < clearBtns.length; cb++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            var sk = btn.getAttribute('data-secret-key');
+            if (!sk || !rd.secrets || !rd.secrets[sk]) return;
+            rd.secrets[sk].clear = !rd.secrets[sk].clear;
+            if (rd.secrets[sk].clear) rd.secrets[sk].value = '';
+            updateSyncDirty();
+            renderSyncPane();
+          });
+        })(clearBtns[cb]);
+      }
+
+      var delOpen = document.getElementById('btn-sync-delete-open');
+      if (delOpen) {
+        delOpen.addEventListener('click', function () {
+          syncState.confirmDelete = true;
+          renderSyncPane();
+        });
+      }
+      var delCancel = document.getElementById('btn-sync-delete-cancel');
+      if (delCancel) {
+        delCancel.addEventListener('click', function () {
+          syncState.confirmDelete = false;
+          renderSyncPane();
+        });
+      }
+      var delConfirm = document.getElementById('btn-sync-delete-confirm');
+      if (delConfirm) {
+        delConfirm.addEventListener('click', deleteSyncConfigConfirmed);
+      }
+    }
+
+    function renderDrawerFooter() {
+      var footer = document.getElementById('settings-drawer-footer');
+      if (!footer) return;
+
+      if (settingsUi.activeTab === 'pulse') {
+        var pReady = !!pulseState.draft;
+        var pBusy = pulseState.loading || pulseState.saving;
+        footer.innerHTML =
+          '<div>' +
+            '<button type="button" class="btn" id="btn-pulse-defaults"' + (!pReady || pBusy || !pulseState.defaults ? ' disabled' : '') + '>' + escHtml(t('restoreDefaultsBtn')) + '</button>' +
+          '</div>' +
+          '<div class="drawer-footer-actions">' +
+            '<button type="button" class="btn" id="btn-pulse-discard"' + (!pReady || pBusy || !pulseState.dirty ? ' disabled' : '') + '>' + escHtml(t('discardBtn')) + '</button>' +
+            '<button type="button" class="btn btn-primary" id="btn-pulse-save"' + (!pReady || pBusy ? ' disabled' : '') + '>' + escHtml(pulseState.saving ? t('savingBtn') : t('savePulseBtn')) + '</button>' +
+          '</div>';
+
+        var defBtn = document.getElementById('btn-pulse-defaults');
+        if (defBtn) {
+          defBtn.addEventListener('click', function () {
+            if (!pulseState.defaults) return;
+            pulseState.draft = deepClone(pulseState.defaults);
+            pulseState.banner = null;
+            updatePulseDirty();
+            renderPulsePane();
+            schedulePulsePreview(true);
+          });
+        }
+        var discBtn = document.getElementById('btn-pulse-discard');
+        if (discBtn) {
+          discBtn.addEventListener('click', function () {
+            if (!pulseState.savedConfig) return;
+            pulseState.draft = deepClone(pulseState.savedConfig);
+            pulseState.banner = null;
+            updatePulseDirty();
+            renderPulsePane();
+            schedulePulsePreview(true);
+          });
+        }
+        var saveBtn = document.getElementById('btn-pulse-save');
+        if (saveBtn) saveBtn.addEventListener('click', savePulseConfig);
+      } else {
+        var sReady = !!syncState.draft;
+        var sBusy = syncState.loading || syncState.saving || syncState.deleting;
+        footer.innerHTML =
+          '<div>' +
+            '<button type="button" class="btn" id="btn-sync-test"' + (!sReady || sBusy || syncState.testing ? ' disabled' : '') + '>' + escHtml(syncState.testing ? t('testingConnBtn') : t('testConnBtn')) + '</button>' +
+          '</div>' +
+          '<div class="drawer-footer-actions">' +
+            '<button type="button" class="btn" id="btn-sync-discard"' + (!sReady || sBusy || !syncState.dirty ? ' disabled' : '') + '>' + escHtml(t('discardBtn')) + '</button>' +
+            '<button type="button" class="btn btn-primary" id="btn-sync-save"' + (!sReady || sBusy ? ' disabled' : '') + '>' + escHtml(syncState.saving ? t('savingBtn') : t('saveSyncBtn')) + '</button>' +
+          '</div>';
+
+        var testBtn = document.getElementById('btn-sync-test');
+        if (testBtn) testBtn.addEventListener('click', testSyncConnection);
+        var sDiscBtn = document.getElementById('btn-sync-discard');
+        if (sDiscBtn) {
+          sDiscBtn.addEventListener('click', function () {
+            if (!syncState.savedSnapshotJson) return;
+            var snap = JSON.parse(syncState.savedSnapshotJson);
+            syncState.draft = snap.draft;
+            syncState.draftsByType = snap.draftsByType;
+            syncState.banner = null;
+            syncState.probeResult = null;
+            syncState.confirmDelete = false;
+            updateSyncDirty();
+            renderSyncPane();
+          });
+        }
+        var sSaveBtn = document.getElementById('btn-sync-save');
+        if (sSaveBtn) sSaveBtn.addEventListener('click', saveSyncConfig);
+      }
+    }
+
+    function switchSettingsTab(tab) {
+      settingsUi.activeTab = tab === 'sync' ? 'sync' : 'pulse';
+      var pBtn = document.getElementById('tab-btn-pulse');
+      var sBtn = document.getElementById('tab-btn-sync');
+      var pPane = document.getElementById('tab-pane-pulse');
+      var sPane = document.getElementById('tab-pane-sync');
+      if (pBtn) {
+        pBtn.classList.toggle('active', settingsUi.activeTab === 'pulse');
+        pBtn.setAttribute('aria-selected', settingsUi.activeTab === 'pulse' ? 'true' : 'false');
+      }
+      if (sBtn) {
+        sBtn.classList.toggle('active', settingsUi.activeTab === 'sync');
+        sBtn.setAttribute('aria-selected', settingsUi.activeTab === 'sync' ? 'true' : 'false');
+      }
+      if (pPane) pPane.classList.toggle('active', settingsUi.activeTab === 'pulse');
+      if (sPane) sPane.classList.toggle('active', settingsUi.activeTab === 'sync');
+
+      if (settingsUi.activeTab === 'pulse' && !pulseState.dirty && !pulseState.loading) {
+        loadPulseConfig();
+      } else if (settingsUi.activeTab === 'sync' && !syncState.dirty && !syncState.loading) {
+        loadSyncConfig();
+      }
+      renderDrawerFooter();
+    }
+
+    function openSettingsDrawer(initialTab) {
+      settingsUi.open = true;
+      var overlay = document.getElementById('settings-overlay');
+      var drawer = document.getElementById('settings-drawer');
+      if (overlay) {
+        overlay.classList.add('open');
+        overlay.setAttribute('aria-hidden', 'false');
+      }
+      if (drawer) {
+        drawer.classList.add('open');
+        drawer.setAttribute('aria-hidden', 'false');
+      }
+      switchSettingsTab(initialTab || settingsUi.activeTab);
+    }
+
+    function resetAbandonedSettingsDrafts() {
+      if (pulseState.previewTimer) {
+        clearTimeout(pulseState.previewTimer);
+        pulseState.previewTimer = null;
+      }
+      if (pulseState.loaded && pulseState.savedConfig) {
+        pulseState.draft = deepClone(pulseState.savedConfig);
+      }
+      pulseState.dirty = false;
+      pulseState.banner = null;
+      if (pulseState.loaded) renderPulsePane();
+
+      if (syncState.loaded && syncState.savedSnapshotJson) {
+        var snap = JSON.parse(syncState.savedSnapshotJson);
+        syncState.draft = snap.draft;
+        syncState.draftsByType = snap.draftsByType;
+      }
+      syncState.dirty = false;
+      syncState.banner = null;
+      syncState.probeResult = null;
+      syncState.confirmDelete = false;
+      if (syncState.loaded) renderSyncPane();
+
+      updateDirtyDots();
+      renderDrawerFooter();
+    }
+
+    function closeSettingsDrawer() {
+      if (!settingsUi.open) return;
+      var hadDirty = !!(pulseState.dirty || syncState.dirty);
+      if (hadDirty) {
+        if (!window.confirm(t('unsavedCloseConfirm'))) {
+          return;
+        }
+        resetAbandonedSettingsDrafts();
+      }
+      settingsUi.open = false;
+      var overlay = document.getElementById('settings-overlay');
+      var drawer = document.getElementById('settings-drawer');
+      if (overlay) {
+        overlay.classList.remove('open');
+        overlay.setAttribute('aria-hidden', 'true');
+      }
+      if (drawer) {
+        drawer.classList.remove('open');
+        drawer.setAttribute('aria-hidden', 'true');
+      }
+    }
+
     function bindEvents() {
       document.getElementById('btn-theme').addEventListener('click', function () {
         applyTheme(state.theme === 'dark' ? 'light' : 'dark');
@@ -2480,6 +5194,26 @@
         try { localStorage.setItem('agy_pulse_lang', state.lang); } catch (e) {}
         applyTranslations();
         renderAll();
+        if (pulseState.loaded) renderPulsePane();
+        if (syncState.loaded) renderSyncPane();
+        if (settingsUi.open) renderDrawerFooter();
+      });
+
+      document.getElementById('btn-settings').addEventListener('click', function () {
+        openSettingsDrawer();
+      });
+      document.getElementById('settings-close').addEventListener('click', closeSettingsDrawer);
+      document.getElementById('settings-overlay').addEventListener('click', closeSettingsDrawer);
+      document.getElementById('tab-btn-pulse').addEventListener('click', function () {
+        switchSettingsTab('pulse');
+      });
+      document.getElementById('tab-btn-sync').addEventListener('click', function () {
+        switchSettingsTab('sync');
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && settingsUi.open) {
+          closeSettingsDrawer();
+        }
       });
 
       document.getElementById('btn-sync').addEventListener('click', triggerSync);
