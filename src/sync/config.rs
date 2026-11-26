@@ -417,6 +417,57 @@ pub fn active_sync_env_overrides() -> SyncEnvOverrides {
     }
 }
 
+/// Snapshot of the raw global `agy-pulse-sync.json` without applying environment overrides.
+/// Tolerates corrupt JSON so callers can still inspect `version` and recover via `PUT`/`DELETE`.
+#[derive(Debug, Clone)]
+pub struct RawSyncConfigSnapshot {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub version: String,
+    pub parse_error: Option<String>,
+    pub config: SyncConfig,
+}
+
+/// Read a raw sync config snapshot from `path` without applying environment overrides.
+pub fn read_raw_sync_config_snapshot_at(path: &Path) -> Result<RawSyncConfigSnapshot, SyncError> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(RawSyncConfigSnapshot {
+                path: path.to_path_buf(),
+                exists: false,
+                version: "absent".to_string(),
+                parse_error: None,
+                config: SyncConfig::default(),
+            });
+        }
+        Err(err) => return Err(SyncError::Io(err)),
+    };
+
+    let version = hex::encode(Sha256::digest(&bytes));
+    let (parse_error, config) = match serde_json::from_slice::<SyncConfig>(&bytes) {
+        Ok(mut cfg) => {
+            cfg.normalize();
+            (None, cfg)
+        }
+        Err(err) => (Some(format!("invalid JSON: {err}")), SyncConfig::default()),
+    };
+
+    Ok(RawSyncConfigSnapshot {
+        path: path.to_path_buf(),
+        exists: true,
+        version,
+        parse_error,
+        config,
+    })
+}
+
+/// Read the raw global sync config snapshot from `platform::resolve_sync_config_path()`.
+pub fn read_raw_sync_config_snapshot() -> Result<RawSyncConfigSnapshot, SyncError> {
+    let path = platform::resolve_sync_config_path();
+    read_raw_sync_config_snapshot_at(&path)
+}
+
 /// Load the raw private sync configuration from `path` without applying environment overrides.
 /// Returns `Ok(Some((config, sha256_hex)))` when present, or `Ok(None)` when missing.
 pub fn load_sync_config_raw_from(path: &Path) -> Result<Option<(SyncConfig, String)>, SyncError> {

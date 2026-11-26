@@ -92,10 +92,10 @@ pub struct DashboardServerInfo {
     pub sync_report: Option<LedgerSyncReport>,
 }
 
-struct LedgerRuntime {
-    store: LedgerStore,
+pub(super) struct LedgerRuntime {
+    pub(super) store: LedgerStore,
     last_sync_instant: Option<Instant>,
-    sync_options: LedgerSyncOptions,
+    pub(super) sync_options: LedgerSyncOptions,
 }
 
 pub(super) fn refresh_sync_identity_hints(sync_options: &mut LedgerSyncOptions) {
@@ -148,13 +148,12 @@ pub(super) struct ServerSharedState {
     ledger_path: PathBuf,
     pub(super) csrf_token: String,
     pub(super) pulse_config_lock: Mutex<()>,
-    #[allow(dead_code)]
     pub(super) sync_config_lock: Mutex<()>,
     pub(super) keepalive: Arc<KeepaliveState>,
     shutdown: AtomicBool,
     sync_remote_in_progress: Arc<AtomicBool>,
     last_remote_sync_instant: Mutex<Option<Instant>>,
-    ledger: Mutex<LedgerRuntime>,
+    pub(super) ledger: Mutex<LedgerRuntime>,
 }
 
 impl ServerSharedState {
@@ -889,6 +888,12 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
         }
         "/api/config/pulse/preview" => {
             super::config_api::handle_pulse_preview_route(stream, req, shared);
+        }
+        "/api/config/sync" => {
+            super::config_api::handle_sync_config_route(stream, req, shared);
+        }
+        "/api/config/sync/test" => {
+            super::config_api::handle_sync_test_route(stream, req, shared);
         }
         "/api/health" => {
             if method != "GET" {

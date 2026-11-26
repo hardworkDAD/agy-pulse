@@ -120,6 +120,10 @@ impl IsolatedEnv {
         guard.remove("AGY_PULSE_DASHBOARD_IDLE_SEC");
         guard.remove("AGY_PULSE_FORCE_ASCII");
         guard.remove("AGY_PULSE_FORCE_UNICODE");
+        guard.remove("AGY_PULSE_SYNC_TOKEN");
+        guard.remove("AGY_PULSE_SYNC_PASSWORD");
+        guard.remove("AGY_PULSE_S3_ACCESS_KEY");
+        guard.remove("AGY_PULSE_S3_SECRET_KEY");
     }
 
     fn global_config_path(&self) -> PathBuf {
@@ -131,6 +135,14 @@ impl IsolatedEnv {
     }
 
     fn start_server(&self, idle_timeout_ms: u64) -> DashboardServer {
+        self.start_server_with_roots(idle_timeout_ms, Some(Vec::new()))
+    }
+
+    fn start_server_with_roots(
+        &self,
+        idle_timeout_ms: u64,
+        source_roots: Option<Vec<agy_pulse::ledger::SourceRoot>>,
+    ) -> DashboardServer {
         DashboardServer::start(DashboardServerConfig {
             port: 0,
             lang: LanguageSetting::En,
@@ -138,7 +150,7 @@ impl IsolatedEnv {
             defer_initial_sync: true,
             idle_timeout_ms,
             ledger_path: Some(self.ledger_path()),
-            source_roots: Some(Vec::new()),
+            source_roots,
             ..Default::default()
         })
         .expect("start isolated dashboard server")
@@ -943,6 +955,1230 @@ fn t15_pulse_preview_endpoint_no_disk_write() {
 
     // 5. Preview must never create or touch the global config file on disk
     assert!(!env.global_config_path().exists());
+
+    server.shutdown();
+}
+
+// ============================================================================
+// Sync Config HTTP API Tests (/api/config/sync, /api/config/sync/test)
+// ============================================================================
+
+struct MockSyncHttpServer {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MockSyncHttpServer {
+    fn start<F>(handler: F) -> Self
+    where
+        F: Fn(&str, &str, &[(String, String)], &[u8]) -> (u16, &'static str, Vec<u8>)
+            + Send
+            + Sync
+            + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_flag = std::sync::Arc::clone(&stop);
+        let handler = std::sync::Arc::new(handler);
+
+        let handle = std::thread::spawn(move || {
+            while !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        let header_end = loop {
+                            let n = stream.read(&mut tmp).unwrap_or(0);
+                            if n == 0 {
+                                break None;
+                            }
+                            buf.extend_from_slice(&tmp[..n]);
+                            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break Some(pos);
+                            }
+                        };
+                        let Some(pos) = header_end else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..pos]).into_owned();
+                        let mut lines = head.lines();
+                        let req_line = lines.next().unwrap_or("");
+                        let mut parts = req_line.split_whitespace();
+                        let method = parts.next().unwrap_or("").to_string();
+                        let target = parts.next().unwrap_or("").to_string();
+                        let mut headers = Vec::new();
+                        let mut content_len = 0usize;
+                        for line in lines {
+                            if let Some((k, v)) = line.split_once(':') {
+                                let name = k.trim().to_ascii_lowercase();
+                                let val = v.trim().to_string();
+                                if name == "content-length" {
+                                    content_len = val.parse().unwrap_or(0);
+                                }
+                                headers.push((name, val));
+                            }
+                        }
+                        let mut body = buf[pos + 4..].to_vec();
+                        while body.len() < content_len {
+                            let n = stream.read(&mut tmp).unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            body.extend_from_slice(&tmp[..n]);
+                        }
+                        body.truncate(content_len);
+
+                        let (status, reason, resp_body) =
+                            handler(&method, &target, &headers, &body);
+                        let resp = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            resp_body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        let _ = stream.write_all(&resp_body);
+                        let _ = stream.flush();
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            port,
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for MockSyncHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn encode_varint(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    while v >= 0x80 {
+        out.push(((v & 0x7f) as u8) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+    out
+}
+
+fn pb_varint(field_num: u32, val: u64) -> Vec<u8> {
+    let mut out = encode_varint(u64::from(field_num) << 3);
+    out.extend(encode_varint(val));
+    out
+}
+
+fn pb_bytes(field_num: u32, payload: &[u8]) -> Vec<u8> {
+    let mut out = encode_varint((u64::from(field_num) << 3) | 2);
+    out.extend(encode_varint(payload.len() as u64));
+    out.extend_from_slice(payload);
+    out
+}
+
+fn pb_str(field_num: u32, s: &str) -> Vec<u8> {
+    pb_bytes(field_num, s.as_bytes())
+}
+
+fn pb_timestamp_ms(field_num: u32, ts_ms: i64) -> Vec<u8> {
+    let sec = (ts_ms / 1000) as u64;
+    let nanos = ((ts_ms % 1000) * 1_000_000) as u64;
+    let mut inner = pb_varint(1, sec);
+    if nanos > 0 {
+        inner.extend(pb_varint(2, nanos));
+    }
+    pb_bytes(field_num, &inner)
+}
+
+fn write_test_conv_db(db_path: &std::path::Path, cid: &str, ts_ms: i64) {
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS steps (idx INTEGER PRIMARY KEY, metadata BLOB);
+         CREATE TABLE IF NOT EXISTS gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+         CREATE TABLE IF NOT EXISTS trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);",
+    )
+    .unwrap();
+
+    let mut ws = pb_str(1, "file:///work/sync-cfg-test");
+    ws.extend(pb_str(4, "main"));
+    let mut traj = pb_bytes(1, &ws);
+    traj.extend(pb_timestamp_ms(2, ts_ms));
+    traj.extend(pb_str(6, cid));
+
+    let step_meta = pb_timestamp_ms(1, ts_ms);
+
+    let mut usage = pb_varint(2, 1_000);
+    usage.extend(pb_varint(3, 500));
+    usage.extend(pb_varint(5, 200));
+    let mut gen_entry = pb_str(21, "Claude 4.6 Sonnet");
+    gen_entry.extend(pb_bytes(4, &usage));
+    let mut gen_blob = pb_varint(2, 1);
+    gen_blob.extend(pb_bytes(1, &gen_entry));
+
+    conn.execute(
+        "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?1)",
+        rusqlite::params![traj],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO steps (idx, metadata) VALUES (1, ?1)",
+        rusqlite::params![step_meta],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gen_metadata (idx, data) VALUES (1, ?1)",
+        rusqlite::params![gen_blob],
+    )
+    .unwrap();
+}
+
+#[test]
+fn t15_sync_config_security_guards_and_methods() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let mut guard = EnvGuard::new();
+    env.apply_env(&mut guard);
+
+    let mut server = env.start_server(300_000);
+    let port = server.info().port;
+    let token = server.csrf_token().to_string();
+
+    for (method, path, body) in [
+        ("GET", "/api/config/sync", ""),
+        ("PUT", "/api/config/sync", "{}"),
+        ("DELETE", "/api/config/sync", "{}"),
+        ("POST", "/api/config/sync/test", "{}"),
+    ] {
+        let missing = send_http(
+            port,
+            method,
+            path,
+            &[("Content-Type", "application/json")],
+            body,
+        );
+        assert_eq!(missing.status, 403);
+        assert_eq!(
+            serde_json::from_str::<Value>(&missing.body).unwrap()["error"],
+            "invalid or missing CSRF token"
+        );
+
+        let cross = send_http(
+            port,
+            method,
+            path,
+            &[
+                ("X-Agy-Pulse-Token", &token),
+                ("Sec-Fetch-Site", "cross-site"),
+                ("Content-Type", "application/json"),
+            ],
+            body,
+        );
+        assert_eq!(cross.status, 403);
+        assert_eq!(
+            serde_json::from_str::<Value>(&cross.body).unwrap()["error"],
+            "cross-origin request rejected"
+        );
+
+        let bad_origin = send_http(
+            port,
+            method,
+            path,
+            &[
+                ("X-Agy-Pulse-Token", &token),
+                ("Origin", "https://evil.example"),
+                ("Content-Type", "application/json"),
+            ],
+            body,
+        );
+        assert_eq!(bad_origin.status, 403);
+    }
+
+    for (method, path) in [
+        ("PUT", "/api/config/sync"),
+        ("DELETE", "/api/config/sync"),
+        ("POST", "/api/config/sync/test"),
+    ] {
+        let bad_ct = send_http(
+            port,
+            method,
+            path,
+            &[
+                ("X-Agy-Pulse-Token", &token),
+                ("Content-Type", "text/plain"),
+            ],
+            "{}",
+        );
+        assert_eq!(bad_ct.status, 400);
+        assert_eq!(
+            serde_json::from_str::<Value>(&bad_ct.body).unwrap()["error"],
+            "Content-Type must be application/json"
+        );
+    }
+
+    for (method, path) in [
+        ("POST", "/api/config/sync"),
+        ("GET", "/api/config/sync/test"),
+        ("PUT", "/api/config/sync/test"),
+        ("DELETE", "/api/config/sync/test"),
+    ] {
+        let res = send_http(
+            port,
+            method,
+            path,
+            &[
+                ("X-Agy-Pulse-Token", &token),
+                ("Content-Type", "application/json"),
+            ],
+            "{}",
+        );
+        assert_eq!(res.status, 405);
+        assert_eq!(
+            serde_json::from_str::<Value>(&res.body).unwrap()["error"],
+            "Method not allowed"
+        );
+    }
+
+    server.shutdown();
+}
+
+#[test]
+fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let mut guard = EnvGuard::new();
+    env.apply_env(&mut guard);
+
+    let mut server = env.start_server(300_000);
+    let port = server.info().port;
+    let token = server.csrf_token().to_string();
+
+    // 1. Initial GET when absent
+    let g0 = send_http(
+        port,
+        "GET",
+        "/api/config/sync",
+        &[("X-Agy-Pulse-Token", &token)],
+        "",
+    );
+    assert_eq!(g0.status, 200);
+    let j0: Value = serde_json::from_str(&g0.body).unwrap();
+    assert_eq!(j0["exists"], false);
+    assert_eq!(j0["version"], "absent");
+    assert!(j0["parseError"].is_null());
+    let local_device_id = j0["localDeviceId"].as_str().unwrap().to_string();
+    assert!(!local_device_id.is_empty());
+    assert_eq!(j0["config"]["enabled"], false);
+    assert_eq!(j0["config"]["deviceId"], local_device_id);
+    assert_eq!(j0["config"]["remote"]["type"], "local-dir");
+    assert_eq!(j0["config"]["remote"]["path"], "");
+
+    // 2. Save local-dir (creates file with 0600 and fills deviceId)
+    let local_remote_dir = env._temp.path().join("sync-remote-local");
+    let put_local = serde_json::to_string(&json!({
+        "expectedVersion": "absent",
+        "config": {
+            "enabled": true,
+            "deviceName": "workstation-1",
+            "defaultAccount": "Alice@Example.COM",
+            "pushIntervalSec": 120,
+            "prefix": "/team/pulse/",
+            "remote": {
+                "type": "local-dir",
+                "path": local_remote_dir.to_str().unwrap(),
+            }
+        }
+    }))
+    .unwrap();
+    let p1 = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &put_local,
+    );
+    assert_eq!(p1.status, 200, "{}", p1.body);
+    let jp1: Value = serde_json::from_str(&p1.body).unwrap();
+    assert_eq!(jp1["exists"], true);
+    assert_eq!(jp1["remoteChanged"], true);
+    assert_eq!(jp1["config"]["deviceId"], local_device_id);
+    assert_eq!(jp1["config"]["deviceName"], "workstation-1");
+    assert_eq!(jp1["config"]["defaultAccount"], "alice@example.com");
+    assert_eq!(jp1["config"]["pushIntervalSec"], 120);
+    assert_eq!(jp1["config"]["prefix"], "team/pulse");
+    assert_eq!(jp1["config"]["remote"]["type"], "local-dir");
+    assert!(env.sync_cfg_path.exists());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&env.sync_cfg_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    let mut cur_ver = jp1["version"].as_str().unwrap().to_string();
+
+    // 3. Save WebDAV with password + token (set) + userinfo in URL -> zero plaintext echo
+    let dav_pass = "dav-secret-pass-991";
+    let dav_tok = "dav-secret-tok-882";
+    let url_secret = "url-embedded-pass-773";
+    let put_dav = serde_json::to_string(&json!({
+        "expectedVersion": cur_ver,
+        "config": {
+            "enabled": true,
+            "deviceName": "workstation-1",
+            "defaultAccount": "alice@example.com",
+            "pushIntervalSec": 300,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "webdav",
+                "url": format!("https://alice:{url_secret}@dav.example.com/pulse/"),
+                "username": "alice",
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "password": { "mode": "set", "value": dav_pass },
+                    "token": { "mode": "set", "value": dav_tok }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let p_dav = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &put_dav,
+    );
+    assert_eq!(p_dav.status, 200, "{}", p_dav.body);
+    assert!(!p_dav.body.contains(dav_pass));
+    assert!(!p_dav.body.contains(dav_tok));
+    assert!(!p_dav.body.contains(url_secret));
+    let jdav: Value = serde_json::from_str(&p_dav.body).unwrap();
+    assert_eq!(jdav["remoteChanged"], true);
+    assert_eq!(jdav["config"]["remote"]["type"], "webdav");
+    assert_eq!(jdav["config"]["remote"]["url"], "https://dav.example.com/pulse");
+    assert_eq!(jdav["config"]["remote"]["secrets"]["password"]["configured"], true);
+    assert_eq!(jdav["config"]["remote"]["secrets"]["token"]["configured"], true);
+    cur_ver = jdav["version"].as_str().unwrap().to_string();
+
+    // Verify GET also never echoes plaintext
+    let gdav = send_http(
+        port,
+        "GET",
+        "/api/config/sync",
+        &[("X-Agy-Pulse-Token", &token)],
+        "",
+    );
+    assert_eq!(gdav.status, 200);
+    assert!(!gdav.body.contains(dav_pass));
+    assert!(!gdav.body.contains(dav_tok));
+    assert!(!gdav.body.contains(url_secret));
+
+    // Verify disk JSON keeps snake_case keys inside `remote`
+    let disk_dav: Value =
+        serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
+    assert!(disk_dav["remote"].get("allow_insecure_http").is_some());
+    assert_eq!(disk_dav["remote"]["password"], dav_pass);
+    assert_eq!(disk_dav["remote"]["token"], dav_tok);
+
+    // 4. Secret lifecycle: keep password & token while updating prefix -> remoteChanged false when same url/prefix
+    let put_dav_keep = serde_json::to_string(&json!({
+        "expectedVersion": cur_ver,
+        "config": {
+            "enabled": true,
+            "deviceName": "workstation-renamed",
+            "defaultAccount": "alice@example.com",
+            "pushIntervalSec": 300,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "webdav",
+                "url": "https://dav.example.com/pulse",
+                "username": "alice",
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "password": { "mode": "keep" },
+                    "token": { "mode": "keep" }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let p_keep = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &put_dav_keep,
+    );
+    assert_eq!(p_keep.status, 200, "{}", p_keep.body);
+    let jkeep: Value = serde_json::from_str(&p_keep.body).unwrap();
+    assert_eq!(jkeep["remoteChanged"], false);
+    assert_eq!(jkeep["config"]["remote"]["secrets"]["password"]["configured"], true);
+    assert_eq!(jkeep["config"]["remote"]["secrets"]["token"]["configured"], true);
+    let disk_keep: Value =
+        serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
+    assert_eq!(disk_keep["remote"]["password"], dav_pass);
+    assert_eq!(disk_keep["remote"]["token"], dav_tok);
+    cur_ver = jkeep["version"].as_str().unwrap().to_string();
+
+    // Clear password, keep token
+    let put_dav_clear = serde_json::to_string(&json!({
+        "expectedVersion": cur_ver,
+        "config": {
+            "enabled": true,
+            "deviceName": "workstation-renamed",
+            "defaultAccount": "alice@example.com",
+            "pushIntervalSec": 300,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "webdav",
+                "url": "https://dav.example.com/pulse",
+                "username": "alice",
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "password": { "mode": "clear" },
+                    "token": { "mode": "keep" }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let p_clear = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &put_dav_clear,
+    );
+    assert_eq!(p_clear.status, 200, "{}", p_clear.body);
+    let jclear: Value = serde_json::from_str(&p_clear.body).unwrap();
+    assert_eq!(jclear["config"]["remote"]["secrets"]["password"]["configured"], false);
+    assert_eq!(jclear["config"]["remote"]["secrets"]["token"]["configured"], true);
+    cur_ver = jclear["version"].as_str().unwrap().to_string();
+
+    // 5. Cross-type switch webdav -> cf-worker with mode=keep must NOT inherit webdav token!
+    let switch_enabled = serde_json::to_string(&json!({
+        "expectedVersion": cur_ver,
+        "config": {
+            "enabled": true,
+            "pushIntervalSec": 300,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "cf-worker",
+                "url": "https://worker.example.com",
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "token": { "mode": "keep" }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let p_switch_fail = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &switch_enabled,
+    );
+    assert_eq!(p_switch_fail.status, 400);
+    assert_eq!(
+        serde_json::from_str::<Value>(&p_switch_fail.body).unwrap()["field"],
+        "remote.secrets.token"
+    );
+
+    // Disabled save with mode=keep succeeds and has configured=false (no cross-type leakage on disk)
+    let switch_disabled = serde_json::to_string(&json!({
+        "expectedVersion": cur_ver,
+        "config": {
+            "enabled": false,
+            "pushIntervalSec": 300,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "cf-worker",
+                "url": "https://worker.example.com",
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "token": { "mode": "keep" }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let p_switch_ok = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &switch_disabled,
+    );
+    assert_eq!(p_switch_ok.status, 200, "{}", p_switch_ok.body);
+    let jsw: Value = serde_json::from_str(&p_switch_ok.body).unwrap();
+    assert_eq!(jsw["config"]["remote"]["type"], "cf-worker");
+    assert_eq!(jsw["config"]["remote"]["secrets"]["token"]["configured"], false);
+    assert!(!fs::read_to_string(&env.sync_cfg_path).unwrap().contains(dav_tok));
+    cur_ver = jsw["version"].as_str().unwrap().to_string();
+
+    // 6. Save S3 with snake_case persistence & zero plaintext echo
+    let s3_ak = "AKIA_TEST_ACCESS_441";
+    let s3_sk = "SECRET_KEY_TEST_442";
+    let put_s3 = serde_json::to_string(&json!({
+        "expectedVersion": cur_ver,
+        "config": {
+            "enabled": true,
+            "pushIntervalSec": 600,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "s3",
+                "endpoint": "https://s3.us-east-1.amazonaws.com",
+                "region": "us-east-1",
+                "bucket": "my-pulse-bucket",
+                "pathStyle": false,
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "accessKey": { "mode": "set", "value": s3_ak },
+                    "secretKey": { "mode": "set", "value": s3_sk }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let p_s3 = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &put_s3,
+    );
+    assert_eq!(p_s3.status, 200, "{}", p_s3.body);
+    assert!(!p_s3.body.contains(s3_ak));
+    assert!(!p_s3.body.contains(s3_sk));
+    let js3: Value = serde_json::from_str(&p_s3.body).unwrap();
+    assert_eq!(js3["config"]["remote"]["type"], "s3");
+    assert_eq!(js3["config"]["remote"]["pathStyle"], false);
+    assert_eq!(js3["config"]["remote"]["secrets"]["accessKey"]["configured"], true);
+    assert_eq!(js3["config"]["remote"]["secrets"]["secretKey"]["configured"], true);
+    let disk_s3: Value =
+        serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
+    assert_eq!(disk_s3["remote"]["path_style"], false);
+    assert_eq!(disk_s3["remote"]["allow_insecure_http"], false);
+    assert_eq!(disk_s3["remote"]["access_key"], s3_ak);
+    assert_eq!(disk_s3["remote"]["secret_key"], s3_sk);
+    cur_ver = js3["version"].as_str().unwrap().to_string();
+
+    // 7. Save cf-worker with explicit token
+    let cf_tok = "cf-secret-token-555";
+    let put_cf = serde_json::to_string(&json!({
+        "expectedVersion": cur_ver,
+        "config": {
+            "enabled": true,
+            "pushIntervalSec": 300,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "cf-worker",
+                "url": "https://sync.example.workers.dev",
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "token": { "mode": "set", "value": cf_tok }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let p_cf = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &put_cf,
+    );
+    assert_eq!(p_cf.status, 200, "{}", p_cf.body);
+    assert!(!p_cf.body.contains(cf_tok));
+    let jcf: Value = serde_json::from_str(&p_cf.body).unwrap();
+    assert_eq!(jcf["config"]["remote"]["type"], "cf-worker");
+    assert_eq!(jcf["config"]["remote"]["secrets"]["token"]["configured"], true);
+
+    // 8. Field validation checks -> 400 with exact field
+    let cur_ver = jcf["version"].as_str().unwrap().to_string();
+    for (bad_cfg, expected_field) in [
+        (
+            json!({
+                "enabled": false,
+                "defaultAccount": "unassigned",
+                "pushIntervalSec": 300,
+                "prefix": "agy-pulse-sync",
+                "remote": { "type": "local-dir", "path": "" }
+            }),
+            "defaultAccount",
+        ),
+        (
+            json!({
+                "enabled": false,
+                "defaultAccount": "not-an-email",
+                "pushIntervalSec": 300,
+                "prefix": "agy-pulse-sync",
+                "remote": { "type": "local-dir", "path": "" }
+            }),
+            "defaultAccount",
+        ),
+        (
+            json!({
+                "enabled": false,
+                "pushIntervalSec": 0,
+                "prefix": "agy-pulse-sync",
+                "remote": { "type": "local-dir", "path": "" }
+            }),
+            "pushIntervalSec",
+        ),
+        (
+            json!({
+                "enabled": false,
+                "pushIntervalSec": 300,
+                "prefix": "foo/../bar",
+                "remote": { "type": "local-dir", "path": "" }
+            }),
+            "prefix",
+        ),
+        (
+            json!({
+                "enabled": false,
+                "pushIntervalSec": 300,
+                "prefix": "agy-pulse-sync",
+                "remote": {
+                    "type": "cf-worker",
+                    "url": "https://sync.example.workers.dev",
+                    "secrets": { "token": { "mode": "set", "value": "   " } }
+                }
+            }),
+            "remote.secrets.token",
+        ),
+    ] {
+        let body = serde_json::to_string(&json!({
+            "expectedVersion": cur_ver,
+            "config": bad_cfg
+        }))
+        .unwrap();
+        let bad_res = send_http(
+            port,
+            "PUT",
+            "/api/config/sync",
+            &[
+                ("X-Agy-Pulse-Token", &token),
+                ("Content-Type", "application/json"),
+            ],
+            &body,
+        );
+        assert_eq!(bad_res.status, 400, "{}", bad_res.body);
+        assert_eq!(
+            serde_json::from_str::<Value>(&bad_res.body).unwrap()["field"],
+            expected_field
+        );
+    }
+
+    server.shutdown();
+}
+
+#[test]
+fn t15_sync_config_env_overrides_never_persisted_to_disk() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let mut guard = EnvGuard::new();
+    env.apply_env(&mut guard);
+
+    let env_token = "env-only-cf-token-xyz-999";
+    guard.set("AGY_PULSE_SYNC_TOKEN", env_token);
+
+    let mut server = env.start_server(300_000);
+    let port = server.info().port;
+    let token = server.csrf_token().to_string();
+
+    // Seed cf-worker without token via PUT (enabled=true allowed because env provides token)
+    let put_body = serde_json::to_string(&json!({
+        "expectedVersion": "absent",
+        "config": {
+            "enabled": true,
+            "pushIntervalSec": 300,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "cf-worker",
+                "url": "https://worker.example.com",
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "token": { "mode": "keep" }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let p_res = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &put_body,
+    );
+    assert_eq!(p_res.status, 200, "{}", p_res.body);
+    assert!(!p_res.body.contains(env_token));
+    let jp: Value = serde_json::from_str(&p_res.body).unwrap();
+    assert_eq!(jp["envOverrides"]["token"], "AGY_PULSE_SYNC_TOKEN");
+    assert_eq!(jp["config"]["remote"]["secrets"]["token"]["configured"], false);
+    assert_eq!(
+        jp["config"]["remote"]["secrets"]["token"]["overriddenByEnv"],
+        "AGY_PULSE_SYNC_TOKEN"
+    );
+
+    // Disk file must NEVER contain env token
+    let disk_raw = fs::read_to_string(&env.sync_cfg_path).unwrap();
+    assert!(!disk_raw.contains(env_token));
+
+    // GET also shows overriddenByEnv and never echoes secret
+    let g_res = send_http(
+        port,
+        "GET",
+        "/api/config/sync",
+        &[("X-Agy-Pulse-Token", &token)],
+        "",
+    );
+    assert_eq!(g_res.status, 200);
+    assert!(!g_res.body.contains(env_token));
+    let jg: Value = serde_json::from_str(&g_res.body).unwrap();
+    assert_eq!(jg["envOverrides"]["token"], "AGY_PULSE_SYNC_TOKEN");
+    assert_eq!(jg["config"]["remote"]["secrets"]["token"]["configured"], false);
+    assert_eq!(
+        jg["config"]["remote"]["secrets"]["token"]["overriddenByEnv"],
+        "AGY_PULSE_SYNC_TOKEN"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn t15_sync_config_test_endpoint_probes_and_redacts_without_disk_writes() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let mut guard = EnvGuard::new();
+    env.apply_env(&mut guard);
+
+    let mut server = env.start_server(300_000);
+    let port = server.info().port;
+    let token = server.csrf_token().to_string();
+
+    // 1. local-dir probe succeeds without creating sync_cfg_path
+    let probe_dir = env._temp.path().join("probe-local-dir");
+    let local_probe_body = serde_json::to_string(&json!({
+        "config": {
+            "enabled": false,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "local-dir",
+                "path": probe_dir.to_str().unwrap()
+            }
+        }
+    }))
+    .unwrap();
+    let res_local = send_http(
+        port,
+        "POST",
+        "/api/config/sync/test",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &local_probe_body,
+    );
+    assert_eq!(res_local.status, 200);
+    let jl: Value = serde_json::from_str(&res_local.body).unwrap();
+    assert_eq!(jl["ok"], true);
+    assert!(jl["target"].as_str().unwrap().contains("local-dir:"));
+    assert!(jl["message"].as_str().unwrap().contains("local-dir"));
+    assert!(jl["latencyMs"].is_u64());
+    assert!(!env.sync_cfg_path.exists());
+
+    // 2. Mock CF Worker server: success then 401 failure echoing secret
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String, Option<String>)>::new()));
+    let fail_mode = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let secret_tok = "mock-cf-secret-token-4321";
+    let url_pass = "mock-url-pass-8765";
+
+    let seen_srv = std::sync::Arc::clone(&seen);
+    let fail_srv = std::sync::Arc::clone(&fail_mode);
+    let mock_cf = MockSyncHttpServer::start(move |method, target, headers, _body| {
+        let auth = headers
+            .iter()
+            .find(|(k, _)| k == "authorization")
+            .map(|(_, v)| v.clone());
+        seen_srv
+            .lock()
+            .unwrap()
+            .push((method.to_string(), target.to_string(), auth));
+        if fail_srv.load(std::sync::atomic::Ordering::Relaxed) {
+            (
+                401,
+                "Unauthorized",
+                format!("bad token: {secret_tok} / {url_pass}").into_bytes(),
+            )
+        } else {
+            (200, "OK", br#"{"ok":true,"storage":"r2"}"#.to_vec())
+        }
+    });
+
+    let cf_probe_body = serde_json::to_string(&json!({
+        "config": {
+            "enabled": false,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "cf-worker",
+                "url": format!("http://127.0.0.1:{}", mock_cf.port),
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "token": { "mode": "set", "value": secret_tok }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let res_cf_ok = send_http(
+        port,
+        "POST",
+        "/api/config/sync/test",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &cf_probe_body,
+    );
+    assert_eq!(res_cf_ok.status, 200);
+    assert!(!res_cf_ok.body.contains(secret_tok));
+    let jcf_ok: Value = serde_json::from_str(&res_cf_ok.body).unwrap();
+    assert_eq!(jcf_ok["ok"], true);
+    assert!(jcf_ok["message"].as_str().unwrap().contains("r2"));
+    {
+        let log = seen.lock().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].0, "GET");
+        assert_eq!(log[0].1, "/v1/health");
+        assert_eq!(log[0].2.as_deref(), Some("Bearer mock-cf-secret-token-4321"));
+    }
+
+    fail_mode.store(true, std::sync::atomic::Ordering::Relaxed);
+    let cf_fail_body = serde_json::to_string(&json!({
+        "config": {
+            "enabled": false,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "cf-worker",
+                "url": format!("http://user:{url_pass}@127.0.0.1:{}", mock_cf.port),
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "token": { "mode": "set", "value": secret_tok }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let res_cf_fail = send_http(
+        port,
+        "POST",
+        "/api/config/sync/test",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &cf_fail_body,
+    );
+    assert_eq!(res_cf_fail.status, 200);
+    assert!(!res_cf_fail.body.contains(secret_tok));
+    assert!(!res_cf_fail.body.contains(url_pass));
+    let jcf_fail: Value = serde_json::from_str(&res_cf_fail.body).unwrap();
+    assert_eq!(jcf_fail["ok"], false);
+    assert!(!jcf_fail["error"].as_str().unwrap().is_empty());
+
+    // 3. Mock WebDAV probe success
+    let dav_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
+    let dav_seen_srv = std::sync::Arc::clone(&dav_seen);
+    let mock_dav = MockSyncHttpServer::start(move |method, _target, headers, _body| {
+        let auth = headers
+            .iter()
+            .find(|(k, _)| k == "authorization")
+            .map(|(_, v)| v.clone());
+        dav_seen_srv
+            .lock()
+            .unwrap()
+            .push((method.to_string(), auth));
+        (207, "Multi-Status", b"<D:multistatus/>".to_vec())
+    });
+
+    let dav_pass = "dav-probe-secret";
+    let dav_probe_body = serde_json::to_string(&json!({
+        "config": {
+            "enabled": false,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "webdav",
+                "url": format!("http://127.0.0.1:{}/dav", mock_dav.port),
+                "username": "alice",
+                "allowInsecureHttp": false,
+                "secrets": {
+                    "password": { "mode": "set", "value": dav_pass },
+                    "token": { "mode": "clear" }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let res_dav = send_http(
+        port,
+        "POST",
+        "/api/config/sync/test",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &dav_probe_body,
+    );
+    assert_eq!(res_dav.status, 200);
+    assert!(!res_dav.body.contains(dav_pass));
+    let jdav: Value = serde_json::from_str(&res_dav.body).unwrap();
+    assert_eq!(jdav["ok"], true);
+    {
+        let log = dav_seen.lock().unwrap();
+        assert_eq!(log[0].0, "PROPFIND");
+        assert!(log[0].1.as_deref().unwrap().starts_with("Basic "));
+    }
+
+    // 4. Invalid prefix rejected with 400
+    let bad_prefix_res = send_http(
+        port,
+        "POST",
+        "/api/config/sync/test",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        r#"{"config":{"prefix":"../escape","remote":{"type":"local-dir","path":"/tmp"}}}"#,
+    );
+    assert_eq!(bad_prefix_res.status, 400);
+    assert_eq!(
+        serde_json::from_str::<Value>(&bad_prefix_res.body).unwrap()["field"],
+        "prefix"
+    );
+
+    // Still zero disk writes!
+    assert!(!env.sync_cfg_path.exists());
+
+    server.shutdown();
+}
+
+#[test]
+fn t15_sync_config_conflict_corrupt_delete_and_identity_sync_integration() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let mut guard = EnvGuard::new();
+    env.apply_env(&mut guard);
+
+    let roots = vec![agy_pulse::ledger::SourceRoot {
+        root: env.cli_data_dir.clone(),
+        source: agy_pulse::ledger::LedgerSource::Cli,
+    }];
+    let mut server = env.start_server_with_roots(300_000, Some(roots));
+    let port = server.info().port;
+    let token = server.csrf_token().to_string();
+
+    // 1. Corrupt JSON tolerance + recovery via PUT
+    let corrupt_bytes = b"{not-valid-sync-json";
+    fs::write(&env.sync_cfg_path, corrupt_bytes).unwrap();
+    let corrupt_ver = sha256_hex(corrupt_bytes);
+
+    let g_corrupt = send_http(
+        port,
+        "GET",
+        "/api/config/sync",
+        &[("X-Agy-Pulse-Token", &token)],
+        "",
+    );
+    assert_eq!(g_corrupt.status, 200);
+    let jc: Value = serde_json::from_str(&g_corrupt.body).unwrap();
+    assert_eq!(jc["exists"], true);
+    assert_eq!(jc["version"], corrupt_ver);
+    assert!(jc["parseError"].as_str().unwrap().contains("invalid JSON"));
+
+    // 2. Stale expectedVersion -> 409 Conflict on PUT
+    let stale_put = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        r#"{"expectedVersion":"stale-ver","config":{"enabled":false,"remote":{"type":"local-dir","path":""}}}"#,
+    );
+    assert_eq!(stale_put.status, 409);
+    let jconflict: Value = serde_json::from_str(&stale_put.body).unwrap();
+    assert_eq!(jconflict["error"], "version_conflict");
+    assert_eq!(jconflict["currentVersion"], corrupt_ver);
+
+    // 3. Recover via PUT and set new defaultAccount + deviceName
+    let remote_dir = env._temp.path().join("sync-remote");
+    let put_body = serde_json::to_string(&json!({
+        "expectedVersion": corrupt_ver,
+        "config": {
+            "enabled": false,
+            "deviceName": "web-configured-rig",
+            "defaultAccount": "webcfg@example.com",
+            "pushIntervalSec": 300,
+            "prefix": "agy-pulse-sync",
+            "remote": {
+                "type": "local-dir",
+                "path": remote_dir.to_str().unwrap()
+            }
+        }
+    }))
+    .unwrap();
+    let p_ok = send_http(
+        port,
+        "PUT",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &put_body,
+    );
+    assert_eq!(p_ok.status, 200, "{}", p_ok.body);
+    let saved_ver = serde_json::from_str::<Value>(&p_ok.body).unwrap()["version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 4. Write new conversation DB, trigger POST /api/sync, verify /api/overview uses new identity
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    write_test_conv_db(
+        &env.cli_data_dir
+            .join("conversations")
+            .join("conv-web-sync-cfg-1.db"),
+        "conv-web-sync-cfg-1",
+        now_ms - 5_000,
+    );
+
+    let sync_res = send_http(
+        port,
+        "POST",
+        "/api/sync",
+        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+        "",
+    );
+    assert_eq!(sync_res.status, 200, "{}", sync_res.body);
+
+    let ov_res = send_http(port, "GET", "/api/overview?range=7d", &[], "");
+    assert_eq!(ov_res.status, 200);
+    let ov: Value = serde_json::from_str(&ov_res.body).unwrap();
+    let accounts = ov["meta"]["availableAccounts"].as_array().unwrap();
+    assert!(
+        accounts
+            .iter()
+            .any(|a| a["accountId"] == "webcfg@example.com"),
+        "expected webcfg@example.com in {accounts:?}"
+    );
+    let devices = ov["meta"]["availableDevices"].as_array().unwrap();
+    assert!(
+        devices
+            .iter()
+            .any(|d| d["deviceName"] == "web-configured-rig"),
+        "expected web-configured-rig in {devices:?}"
+    );
+
+    // 5. Stale DELETE -> 409 Conflict
+    let del_conflict = send_http(
+        port,
+        "DELETE",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        r#"{"expectedVersion":"wrong-version"}"#,
+    );
+    assert_eq!(del_conflict.status, 409);
+    assert_eq!(
+        serde_json::from_str::<Value>(&del_conflict.body).unwrap()["currentVersion"],
+        saved_ver
+    );
+    assert!(env.sync_cfg_path.exists());
+
+    // 6. Valid DELETE removes sync config only, preserving SQLite ledger data
+    let del_ok = send_http(
+        port,
+        "DELETE",
+        "/api/config/sync",
+        &[
+            ("X-Agy-Pulse-Token", &token),
+            ("Content-Type", "application/json"),
+        ],
+        &serde_json::to_string(&json!({ "expectedVersion": saved_ver })).unwrap(),
+    );
+    assert_eq!(del_ok.status, 200);
+    let jdel: Value = serde_json::from_str(&del_ok.body).unwrap();
+    assert_eq!(jdel["deleted"], true);
+    assert_eq!(jdel["version"], "absent");
+    assert!(!env.sync_cfg_path.exists());
+    assert!(env.ledger_path().exists());
+
+    // Ledger data remains queryable after deleting sync config
+    let ov_after = send_http(port, "GET", "/api/overview?range=7d", &[], "");
+    assert_eq!(ov_after.status, 200);
+    let ov_after_json: Value = serde_json::from_str(&ov_after.body).unwrap();
+    assert_eq!(ov_after_json["summary"]["totalSteps"], 1);
 
     server.shutdown();
 }

@@ -13,18 +13,22 @@ use serde::{Deserialize, Serialize};
 pub use cf_worker::CfWorkerRemote;
 pub use cli::{run_sync_bg, run_sync_cli};
 pub use config::{
-    RemoteConfig, SyncConfig, SyncEnvOverrides, active_sync_env_overrides, delete_sync_config,
+    DEFAULT_PUSH_INTERVAL_SEC, DEFAULT_SYNC_PREFIX, RawSyncConfigSnapshot, RemoteConfig,
+    SyncConfig, SyncEnvOverrides, active_sync_env_overrides, delete_sync_config,
     delete_sync_config_at, load_sync_config, load_sync_config_from, load_sync_config_raw,
-    load_sync_config_raw_from, save_sync_config, save_sync_config_to,
+    load_sync_config_raw_from, read_raw_sync_config_snapshot, read_raw_sync_config_snapshot_at,
+    save_sync_config, save_sync_config_to,
 };
+pub(crate) use config::sanitize_url_for_display;
 pub use engine::{
     PruneOutcome, SyncOutcome, SyncOutcomeKind, prune_device, pull, push, sync_both,
 };
+pub use http_util::validate_remote_url;
 pub use local_dir::LocalDirRemote;
 pub use protocol::{
     ChunkMeta, ChunkRecord, DeviceManifest, ManifestKeyParts, ManifestQuotaSnapshot,
-    decode_account_key, decode_chunk_gz, encode_account_key, encode_chunk_gz,
-    validate_relative_key,
+    decode_account_key, decode_chunk_gz, encode_account_key, encode_chunk_gz, normalize_prefix,
+    validate_relative_key, validate_single_segment,
 };
 pub use s3::S3Remote;
 pub use webdav::WebDavRemote;
