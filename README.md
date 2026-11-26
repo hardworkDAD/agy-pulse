@@ -27,12 +27,12 @@ Includes a built-in local Web Dashboard (`agypl dashboard`) and 3 provider quota
 - **Strict Compliance (Zero Off-Host Antigravity Requests)**: Never extracts OAuth tokens, system keychains, or credentials, and never sends off-host requests to Antigravity or model provider backends. All **Quota** and tier data is consumed directly from the host's `stdin` JSON payload.
 - **Context & Server Compaction Monitor**: Lock-free read-only SQLite + Protobuf decoding of server **Compaction** ceilings (`?immutable=1` / WAL temp-copy), `CHECKPOINT` peak retention, per-model cumulative cache hit breakdowns, and `Compaction imminent` alerts at 85%+.
 - **Unified Pricing & Cascade Accounting**: Single authoritative billing formula (including system prompt `f4.f1` tokens, cache tiers, and >200k long-context rates) shared identically across the **Statusline** and **Dashboard**, aggregating full **Cascade** trees (main **Conversation** + subagent descendants).
-- **Unified SQLite WAL Ledger & Persistent Keepalive Web Dashboard**: Bundled SQLite WAL **Ledger** (`agy-pulse-ledger.sqlite`) merges Antigravity CLI and IDE telemetry; `agypl dashboard open` launches a standalone `127.0.0.1` Web **Dashboard** that stays online across browser tab hiding/minimization and exits cleanly only after all open pages close.
+- **Unified SQLite WAL Ledger & Persistent Keepalive Web Dashboard**: Bundled SQLite WAL **Ledger** (`agy-pulse-ledger.sqlite`) merges Antigravity CLI and IDE telemetry; `agypl dashboard open` launches a standalone `127.0.0.1` Web **Dashboard** that stays online across browser tab hiding/minimization, exits cleanly only after all open pages close, and includes a top-bar **Settings** drawer to visually manage global **Pulse Config** (with live Rust **Statusline** preview) and **Sync Config** (sharing the same underlying config files as the CLI).
 - **Multi-Device Object Sync (Zero Conflict, Privacy-First)**: Aggregates telemetry across machines by **`Account` → `Device` → `Source` (`cli` / `ide`) → `Cascade`** and shares each **Account**'s latest **Quota Snapshot** across devices. Uploads only sanitized metadata and monthly compressed chunks — **zero conversation text, zero local `workspace` paths, and zero Git branch names**. The **Statusline** hot path stays strictly local-only and triggers throttled background pushes (`--sync-bg`), while the **Dashboard** refreshes asynchronously in the background.
 
 ## Multi-Device Sync Remotes
 
-Supported **Sync Remote** backends (one active at a time, configured in global `0600` `~/.gemini/antigravity-cli/agy-pulse-sync.json`):
+Supported **Sync Remote** backends (one active at a time, configured in global `0600` `~/.gemini/antigravity-cli/agy-pulse-sync.json` via `agypl sync init` or the local Web **Dashboard** Settings drawer):
 
 - **WebDAV** (`webdav`) — Nextcloud, Jianguoyun, Alist, Nginx/Caddy WebDAV
 - **S3-Compatible Object Storage** (`s3`) — Cloudflare R2, AWS S3, Backblaze B2, MinIO, Aliyun OSS (pure-Rust SigV4, zero OpenSSL)
@@ -42,7 +42,7 @@ Supported **Sync Remote** backends (one active at a time, configured in global `
 Quick start:
 
 ```bash
-agy-pulse sync init                   # interactive setup & connectivity probe
+agy-pulse sync init                   # interactive setup & connectivity probe (or use Dashboard Settings)
 agy-pulse sync                        # manual pull + push
 agy-pulse account assign alice@example.com   # assign local unassigned records
 ```
@@ -97,7 +97,9 @@ See [Reference Manual](./docs/reference.md#cli-commands--options) for all `stats
 
 ## Configuration
 
-Run `agypl config` for the interactive wizard, create `./agy-pulse.config.json` (workspace), or edit `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (global):
+Open the local Web **Dashboard** (`agypl dashboard open`) and click the top-bar **Settings** drawer to visually manage your global **Pulse Config** (with live **Statusline** preview and all advanced options) and **Sync Config** (supporting initialization, write-only credential editing, live connectivity testing, and removal for all 4 **Sync Remote** backends). Both the Dashboard and `agypl config` / `agypl sync init` read and write the exact same underlying config files.
+
+You can also run `agypl config` for the interactive terminal wizard, create `./agy-pulse.config.json` (workspace override), or edit `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (global):
 
 ```json
 {

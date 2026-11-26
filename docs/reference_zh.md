@@ -214,7 +214,7 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
 
 - **统一 SQLite WAL 账本（`agy-pulse-ledger.sqlite`）**：内嵌静态编译 `rusqlite`（启用 WAL 模式与忙等待超时），集中保存 CLI 与 IDE 双源**单窗对话**步级遥测、**任务树（Cascade）**父子血缘以及防**上下文压缩**倒扣的今日/7日滚动花费（文件权限 `0600`）。
 - **无锁双源采集**：**状态栏**热路径增量同步当前活跃**单窗对话**；执行 `stats` 或 `dashboard` 时自动以只读模式（`?immutable=1` 或活跃 WAL 临时副本）扫描 `~/.gemini/antigravity-cli/conversations/*.db` 与 `~/.gemini/antigravity/conversations/*.db`。
-- **长效在线网页看板**：严格绑定 `127.0.0.1` 并校验 `Host` / `Origin` 与 CSP 头；前端页面通过 `/api/keepalive` SSE 长连接 + `/api/ping` 租约 + `pagehide` `sendBeacon` `/api/disconnect` 维持在线状态，窗口最小化或切至后台标签页永不断连，仅在所有打开页面真正关闭并度过刷新宽限窗口后优雅退出。
+- **长效在线网页看板与内置「设置」抽屉**：严格绑定 `127.0.0.1` 并校验 `Host` / `Origin` 与 CSP 头；前端页面通过 `/api/keepalive` SSE 长连接 + `/api/ping` 租约 + `pagehide` `sendBeacon` `/api/disconnect` 维持在线状态，窗口最小化或切至后台标签页永不断连，仅在所有打开页面真正关闭并度过刷新宽限窗口后优雅退出。顶栏内置「设置」抽屉，可图形化管理全局**偏好配置**（含实时 Rust **状态栏**预览与全部高级选项）与全局 `0600` **同步配置**（支持全部 4 种**同步远端**初始化、只写凭据编辑、实时连通性测试与安全移除），与 `agypl config` / `agypl sync init` 共用同一底层配置文件。
 
 ### 网页看板 HTTP API
 
@@ -226,6 +226,22 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
   - 返回结构包含 `meta.account`、`meta.device`、`meta.localDeviceId`、`meta.availableAccounts`、`meta.availableDevices`、`byAccount`、`byDevice`、`accountQuotas`、`syncStatus` 以及 `sessions[].accountId` / `deviceId` / `deviceName`。
 - `GET /api/export.json` 与 `GET /api/export.csv`：同样支持 `account` 与 `device` 过滤参数（`export.csv` 另支持 `kind=timeseries|models|sessions`）。
 - `POST /api/sync-remote`：非阻塞按需触发远端双向同步（执行 `pull` + `push`），服务端默认带 30 秒防连点节流。传入查询参数 `?force=1`（或 `?force=true`）或 JSON 请求体 `{"force": true}` 可绕过节流立即执行；返回 `{ ok, enabled, changed, throttled, inProgress, pulledChunks, pushedChunks, stepsImported, error?, syncStatus }`。
+
+#### 本地配置管理接口（`/api/config/*`）
+
+全部 `/api/config/*` 路由强制执行以下安全边界：
+- **仅本机回环 + 进程级 CSRF Token**：严格绑定 `127.0.0.1`；服务端启动生成 32 字节（64 位十六进制）随机 Token 并注入 `GET /` 页面，所有 `/api/config/*` 请求必须携带 `X-Agy-Pulse-Token` 请求头（恒定时间比对，缺失或不匹配返回 `403 Forbidden`）。
+- **严格同源与 JSON Content-Type**：若存在 `Sec-Fetch-Site` 须为 `same-origin`，若存在 `Origin` 须为同端口回环来源（否则 `403`）；`PUT`/`POST`/`DELETE` 请求体须为 `Content-Type: application/json`（否则 `400`）。
+- **凭据只写不回显与乐观并发锁**：**同步配置**凭据绝不经 HTTP 回显明文，环境变量覆盖项绝不反写落盘；`PUT`/`DELETE` 须传 `expectedVersion`（文件 SHA-256 摘要或 `"absent"`），在独立 `Mutex` 锁内比对不一致时返回 `409 Conflict`（附最新 `currentVersion`）。
+
+接口清单：
+- `GET /api/config/pulse`：读取全局 `agy-pulse.config.json` 原始快照（绝不读取工作区文件、不将环境变量写回配置），返回 `version`、`defaults`、`themePresets`、`allowedColors`、`envOverrides` 元数据及当前 `runtime` 端口与空闲超时。
+- `PUT /api/config/pulse`：校验并原子保存全局**偏好配置**（深合并并保留 `columnWidth` 等未知字段与用户自定义键，置空可选字段自动移除），返回新 `version`、`config`、`envOverrides`、`restartRequired` 与 `resolvedLanguage`。
+- `POST /api/config/pulse/preview`：以草稿 `config`（及可选 `terminalCols`）直接调用 Rust `render_statusline` 引擎输出实时 ANSI **状态栏**预览（零落盘）。
+- `GET /api/config/sync`：读取全局 `0600` `agy-pulse-sync.json` 并转为 camelCase 脱敏 DTO（含 `localDeviceId`、`envOverrides` 变量名及 `secrets.*` `{ configured, overriddenByEnv }` 元数据，零明文密钥）。
+- `PUT /api/config/sync`：校验并原子写入 `0600` `agy-pulse-sync.json`，凭据字段使用只写指令（`{ "mode": "keep" | "set" | "clear" }`，仅在远端类型未变时继承磁盘原密钥），保存后立即刷新看板运行时身份提示（`defaultAccount` / `deviceName`）。
+- `POST /api/config/sync/test`：在内存中合并草稿、同类型 `"keep"` 磁盘密钥与环境变量覆盖，执行**同步远端**实时连通性探测（零落盘）；任何异常均经 `redact_sync_error_message` 脱敏后返回。
+- `DELETE /api/config/sync`：按 `expectedVersion` 乐观锁删除 `agy-pulse-sync.json` 并清空运行时身份提示，绝不触碰 SQLite **账本**或远端数据。
 
 ---
 
@@ -247,9 +263,9 @@ bash uninstall.sh        # macOS / Linux
 
 ### 配置文件路径与合并优先级
 
-1. **环境变量覆盖**：`AGY_PULSE_LANGUAGE`
-2. **工作区局部配置**（最高文件优先级）：`./agy-pulse.config.json`
-3. **全局配置**：`~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json`（兼容自动发现旧路径 `agy-pulse-runtime/runtime/agy-pulse.config.json`，或 `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`）
+1. **环境变量覆盖**：`AGY_PULSE_LANGUAGE`、`AGY_PULSE_DASHBOARD_PORT`、`AGY_PULSE_DASHBOARD_IDLE_SEC`、`AGY_PULSE_FORCE_ASCII` / `AGY_PULSE_FORCE_UNICODE`（在**网页看板**「设置」抽屉中仅作生效来源徽章提示，绝不反写落盘）
+2. **工作区局部配置**（最高文件优先级）：`./agy-pulse.config.json`（**状态栏**运行期仍优先于全局配置；**网页看板**设置抽屉绝不触碰或修改任何工作区文件）
+3. **全局配置**：`~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json`（兼容自动发现旧路径 `agy-pulse-runtime/runtime/agy-pulse.config.json`，或 `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`；`agypl config` 与**网页看板**「设置」抽屉共同读写此文件）
 4. **内置默认值**（`DisplayConfig::builtin_defaults()`，最低优先级）
 
 反序列化对旧版已退役字段（`endpoints`、`interestingModels`、`cloudQuota`、`repository`）做静默忽略；`"quotaStyle": "models"` 自动平滑回退为 `"table"`。
@@ -344,7 +360,7 @@ bash uninstall.sh        # macOS / Linux
 
 ## 多机同步私有配置（`agy-pulse-sync.json`）
 
-多机同步配置专门存放在用户全局私有文件 `~/.gemini/antigravity-cli/agy-pulse-sync.json`（或 `$AGY_PULSE_SYNC_CONFIG`），在 Unix 下强制以目录 `0700`、文件 `0600` 权限原子落盘。**严禁放入工作区 `agy-pulse.config.json`**（程序也绝不会从任何工作区目录读取同步配置），以防密钥随项目提交至 Git 仓库。
+多机同步配置专门存放在用户全局私有文件 `~/.gemini/antigravity-cli/agy-pulse-sync.json`（或 `$AGY_PULSE_SYNC_CONFIG`），在 Unix 下强制以目录 `0700`、文件 `0600` 权限原子落盘。除 `agypl sync init` 外，也可直接在本地**网页看板**顶栏「设置」抽屉的「同步配置」标签页中图形化管理（支持凭据只写不回显、`AGY_PULSE_*` 环境变量覆盖提示、实时连通性测试与安全移除）。**严禁放入工作区 `agy-pulse.config.json`**（程序也绝不会从任何工作区目录读取同步配置），以防密钥随项目提交至 Git 仓库。
 
 ### 顶层同步配置字段表
 
@@ -521,5 +537,5 @@ agy-pulse/
 ├── skills/pulse-config/SKILL.md       # Agent 交互式配置技能
 ├── docs/                              # 中英文架构、ADR、模块与参考文档
 └── tests/
-    └── t01..t14_*.rs                  # 黑盒集成测试、双端黄金对拍、多机同步与打包 E2E 套件
+    └── t01..t15_*.rs                  # 黑盒集成测试、双端黄金对拍、多机同步与网页配置 E2E 套件
 ```

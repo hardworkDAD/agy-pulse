@@ -27,12 +27,12 @@ my-project │ Google AI Pro │ plan │ 输出: 42.6 tok/s (首字 0.8s)
 - **零场外反重力请求，严守合规红线**：物理移除系统钥匙串/OAuth 令牌提取与云端配额请求，运行期绝不向反重力或模型厂商服务端发起任何场外请求；**模型配额**与套餐等级 100% 消费宿主 `stdin` 合法传入的数据。
 - **实时上下文与上下文压缩监控**：无锁只读扫描宿主 SQLite `.db` 与 Protobuf 服务端**上下文压缩**上限（`?immutable=1` / 活跃 WAL 临时副本），`CHECKPOINT` 压缩后保留历史峰值水位，支持分模型累计缓存命中行与 `>=85%` `即将触发压缩` 红色告警。
 - **统一计费口径与任务树归拢**：**状态栏**与**网页看板**共享全局唯一字数归一化与费率公式（完整计入 `f4.f1` 系统提示词、缓存读写与 >200k 长上下文阶梯定价），自动归拢**任务树（Cascade）**内主**单窗对话**与全部子代理明细。
-- **统一 SQLite WAL 账本与长效在线网页看板**：内嵌 SQLite WAL **账本**（`agy-pulse-ledger.sqlite`）合并归档 CLI 与 Antigravity IDE 遥测；`agypl dashboard open` 启动严格绑定 `127.0.0.1` 的独立小窗**网页看板**，窗口最小化或切至后台标签页始终保持在线不断连，仅在所有打开页面真正关闭后自动退出回收。
+- **统一 SQLite WAL 账本与长效在线网页看板**：内嵌 SQLite WAL **账本**（`agy-pulse-ledger.sqlite`）合并归档 CLI 与 Antigravity IDE 遥测；`agypl dashboard open` 启动严格绑定 `127.0.0.1` 的独立小窗**网页看板**，窗口最小化或切至后台标签页始终保持在线不断连，仅在所有打开页面真正关闭后自动退出回收；顶栏内置「设置」抽屉，可图形化管理全局**偏好配置**（含实时**状态栏**预览与全部高级选项）与**同步配置**（与 `agypl config` / `agypl sync init` 共用同一底层配置文件）。
 - **多机对象同步（零写冲突、隐私最小化）**：按 **`账号` → `设备` → `来源端`（`cli` / `ide`）→ `任务树`** 跨多台**设备**聚合消费统计，并共享各**账号**最新**配额快照**。同步载荷**零对话正文、零本机 `workspace` 目录路径、零 Git 分支名**；**状态栏**热路径严格仅查询本机数据并在后台节流静默 Push（`--sync-bg`），**网页看板**秒开本地**账本**后异步拉取远端更新。
 
 ## 多机同步远端
 
-支持以下 4 种**同步远端**（同一时刻激活 1 个，配置与密钥仅存全局 `0600` 私有文件 `~/.gemini/antigravity-cli/agy-pulse-sync.json`）：
+支持以下 4 种**同步远端**（同一时刻激活 1 个，配置与密钥仅存全局 `0600` 私有文件 `~/.gemini/antigravity-cli/agy-pulse-sync.json`，可通过 `agypl sync init` 或本地**网页看板**顶栏「设置」抽屉进行初始化、只写凭据编辑、实时连通性测试与移除）：
 
 - **WebDAV**（`webdav`）：坚果云、Nextcloud、Alist、Caddy/Nginx WebDAV 等
 - **S3 兼容对象存储**（`s3`）：Cloudflare R2、AWS S3、Backblaze B2、MinIO、阿里云 OSS（纯 Rust SigV4 签名，零 OpenSSL 依赖）
@@ -42,7 +42,7 @@ my-project │ Google AI Pro │ plan │ 输出: 42.6 tok/s (首字 0.8s)
 快速上手：
 
 ```bash
-agy-pulse sync init                   # 交互式配置远端并执行连通性自检
+agy-pulse sync init                   # 交互式配置远端并执行连通性自检（亦可在网页看板「设置」中配置）
 agy-pulse sync                        # 手动执行双向同步（先 Pull 后 Push）
 agy-pulse account assign alice@example.com   # 将本机未归属存量记录收编到指定账号
 ```
@@ -97,7 +97,9 @@ agypl dashboard open                         # 静默拉起后台并用独立 Ap
 
 ## 配置
 
-运行 `agypl config` 打开交互向导，或在工作区创建 `./agy-pulse.config.json` / 编辑全局 `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json`：
+可通过本地**网页看板**（`agypl dashboard open`）顶栏「设置」抽屉图形化管理全局**偏好配置**（含实时**状态栏**预览与全部高级选项）及**同步配置**（支持全部 4 种**同步远端**的初始化、只写凭据编辑、实时连通性测试与移除），与 `agypl config` / `agypl sync init` 共用同一底层配置文件。
+
+也可运行 `agypl config` 打开交互向导，或在工作区创建 `./agy-pulse.config.json`（工作区覆盖）/ 编辑全局 `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json`：
 
 ```json
 {

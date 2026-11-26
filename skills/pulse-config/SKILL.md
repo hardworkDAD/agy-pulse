@@ -115,7 +115,7 @@ Read the existing target file (if any), deep-merge user selections while preserv
 - **Local / 局部路径**: `./agy-pulse.config.json`
 - **Global / 全局路径**: `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (if a legacy `~/.gemini/antigravity-cli/agy-pulse-runtime/runtime/agy-pulse.config.json` exists, it is still discovered automatically)
 
-Alternatively, the user can run the native `agypl` (or `agy-pulse`) command directly in the terminal / 用户也可在终端直接运行原生命令 `agypl`（或 `agy-pulse`）打开交互向导、遥测看板或执行安装升级：
+Alternatively, the user can open the local Web **Dashboard** (`agypl dashboard open`) and click the top-bar **Settings** panel to visually manage both global **Pulse Config** (with live **Statusline** preview) and **Sync Config**, or run the native `agypl` (or `agy-pulse`) commands directly in the terminal / 用户也可直接打开本地**网页看板**（`agypl dashboard open`）顶栏「设置」面板可视化管理全局**偏好配置**（含实时**状态栏**预览）与**同步配置**，或在终端直接运行原生命令 `agypl`（或 `agy-pulse`）打开交互向导、遥测看板或执行安装升级：
 ```bash
 agypl config                              # or --config
 agypl stats [today|24h|7d|30d|month|all]  # or report / --stats
@@ -130,9 +130,9 @@ agypl help                                # or --help / -h
 
 ## 4. Multi-Device Sync & Account Assignment Guide / 多机同步与账号归属配置引导
 
-When the user asks to set up multi-device sync, connect a **Sync Remote** (`local-dir`, `webdav`, `s3`, or `cf-worker`), inspect sync state, or assign historical `unassigned` records to an **Account**, guide them through the dedicated CLI commands instead of editing `agy-pulse.config.json`:
+When the user asks to set up multi-device sync, connect a **Sync Remote** (`local-dir`, `webdav`, `s3`, or `cf-worker`), inspect sync state, or assign historical `unassigned` records to an **Account**, guide them to either open the local Web **Dashboard** (`agypl dashboard open`) top-bar **Settings** panel (Sync Config tab, supporting live connection tests and write-only credentials) or run the dedicated CLI commands instead of editing `agy-pulse.config.json`:
 
-当用户需要配置多机同步、连接**同步远端**（`local-dir`、`webdav`、`s3`、`cf-worker`）、查看同步状态或将本机历史未归属（`unassigned`）记录归入指定**账号**时，请引导使用以下 CLI 命令：
+当用户需要配置多机同步、连接**同步远端**（`local-dir`、`webdav`、`s3`、`cf-worker`）、查看同步状态或将本机历史未归属（`unassigned`）记录归入指定**账号**时，请引导用户打开本地**网页看板**（`agypl dashboard open`）顶栏「设置」面板可视化配置（支持实时测试连接与凭据只写不回显），或使用以下 CLI 命令，绝不要编辑 `agy-pulse.config.json`：
 
 ```bash
 agy-pulse sync init                        # interactive setup & probe / 交互式配置远端并执行连通性自检

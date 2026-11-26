@@ -212,7 +212,7 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags.
 
 - **Unified SQLite WAL Ledger (`agy-pulse-ledger.sqlite`)**: Built-in `rusqlite` (`bundled` SQLite with WAL mode and `busy_timeout`) stores all CLI and IDE **Conversation** steps, **Cascade** lineage, and monotonic rolling daily/7-day cost state (`0600` file permissions).
 - **Lock-free dual-source scanning**: `agy-pulse` incrementally syncs the active CLI **Conversation** during **Statusline** runs and scans both `~/.gemini/antigravity-cli/conversations/*.db` and `~/.gemini/antigravity/conversations/*.db` read-only (`?immutable=1` or temp-copied active WAL) during `stats` and `dashboard`.
-- **Persistent Keepalive Dashboard**: Binds strictly to `127.0.0.1`, validates `Host`/`Origin` + CSP headers, and uses `/api/keepalive` SSE streams + `/api/ping` + `pagehide` `/api/disconnect` beacons so minimized or backgrounded browser tabs stay connected indefinitely and exit only after all pages close.
+- **Persistent Keepalive Dashboard & Built-in Settings Drawer**: Binds strictly to `127.0.0.1`, validates `Host`/`Origin` + CSP headers, and uses `/api/keepalive` SSE streams + `/api/ping` + `pagehide` `/api/disconnect` beacons so minimized or backgrounded browser tabs stay connected indefinitely and exit only after all pages close. The top-bar **Settings** drawer lets you visually edit global **Pulse Config** (with live Rust **Statusline** preview and all advanced fields) and **Sync Config** (supporting all 4 **Sync Remote** backends, write-only credentials, live connection tests, and config removal), sharing the same underlying config files as `agypl config` and `agypl sync init`.
 
 ### Dashboard HTTP API
 
@@ -224,6 +224,22 @@ All endpoints validate `Host` (and `Origin` on `POST` routes) to restrict access
   - Response includes `meta.account`, `meta.device`, `meta.localDeviceId`, `meta.availableAccounts`, `meta.availableDevices`, `byAccount`, `byDevice`, `accountQuotas`, `syncStatus`, and `sessions[].accountId` / `deviceId` / `deviceName`.
 - `GET /api/export.json` & `GET /api/export.csv`: Accept the same `account` and `device` filter parameters alongside existing range/source/model/workspace filters (`export.csv` also accepts `kind=timeseries|models|sessions`).
 - `POST /api/sync-remote`: Non-blocking remote synchronization trigger (runs `pull` + `push` against the configured **Sync Remote** with a 30 s server-side throttle). Pass `?force=1` (or `?force=true`) or JSON body `{"force": true}` to bypass the throttle. Returns `{ ok, enabled, changed, throttled, inProgress, pulledChunks, pushedChunks, stepsImported, error?, syncStatus }`.
+
+#### Local Configuration Endpoints (`/api/config/*`)
+
+Security boundaries enforced on **every** `/api/config/*` route:
+- **Loopback + Process CSRF Token**: Bound strictly to `127.0.0.1`; `GET /` injects a 32-byte (64-hex) process-scoped CSRF token into the embedded page, and every `/api/config/*` request must supply it in `X-Agy-Pulse-Token` (constant-time verification; `403 Forbidden` otherwise).
+- **Strict Same-Origin & JSON Content-Type**: Rejects non-`same-origin` `Sec-Fetch-Site` or non-loopback `Origin` headers (`403 Forbidden`), and requires `Content-Type: application/json` on `PUT`/`POST`/`DELETE` requests (`400 Bad Request` otherwise).
+- **Write-Only Credentials & Optimistic Concurrency**: Sync secrets are never echoed in responses and environment overrides are never written back to disk; `PUT`/`DELETE` requests require `expectedVersion` (`sha256` hex or `"absent"`) checked under per-file mutex locks (`409 Conflict` with `currentVersion` on mismatch).
+
+Routes:
+- `GET /api/config/pulse`: Read raw global `agy-pulse.config.json` (never reads workspace files or persists env overrides), `version`, `defaults`, `themePresets`, `allowedColors`, `envOverrides` metadata, and active `runtime` port/idle timeout.
+- `PUT /api/config/pulse`: Validate and atomically write global **Pulse Config** while deep-merging and preserving unknown keys (such as `columnWidth` or user custom keys) and removing cleared optional fields. Returns updated `version`, `config`, `envOverrides`, `restartRequired`, and `resolvedLanguage`.
+- `POST /api/config/pulse/preview`: Render live ANSI **Statusline** preview for a draft `config` (and optional `terminalCols`) directly via the Rust `render_statusline` engine without writing to disk.
+- `GET /api/config/sync`: Read raw global `0600` `agy-pulse-sync.json` mapped to camelCase DTO (`localDeviceId`, `envOverrides` var names, and `secrets.*` `{ configured, overriddenByEnv }` metadata — zero plaintext secrets).
+- `PUT /api/config/sync`: Validate and atomically write `0600` `agy-pulse-sync.json` using write-only credential directives (`{ "mode": "keep" | "set" | "clear" }`; `"keep"` inherits from disk only when remote type is unchanged), and immediately refresh `DashboardServer` runtime identity hints (`defaultAccount` / `deviceName`).
+- `POST /api/config/sync/test`: Probe a draft **Sync Remote** (`local-dir`, `webdav`, `s3`, `cf-worker`) in memory without writing to disk (merging `"keep"` disk secrets and active env overrides); any error message is sanitized via `redact_sync_error_message`.
+- `DELETE /api/config/sync`: Remove `agy-pulse-sync.json` under `expectedVersion` optimistic locking and clear runtime identity hints without touching `agy-pulse-ledger.sqlite` or remote objects.
 
 ---
 
@@ -245,9 +261,9 @@ Or run `agypl uninstall` directly. Removes `agy-pulse` & `agypl` binaries, `sett
 
 ### Config Paths & Merge Precedence
 
-1. **Environment overrides**: `AGY_PULSE_LANGUAGE`
-2. **Workspace local config** (highest file priority): `./agy-pulse.config.json`
-3. **Global config**: `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (also discovers legacy `agy-pulse-runtime/runtime/agy-pulse.config.json`, or `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`)
+1. **Environment overrides**: `AGY_PULSE_LANGUAGE`, `AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_FORCE_ASCII` / `AGY_PULSE_FORCE_UNICODE` (displayed as override badges in the **Dashboard** Settings drawer and never persisted back to disk)
+2. **Workspace local config** (highest file priority): `./agy-pulse.config.json` (takes runtime precedence over global config for **Statusline**; never modified by the Web **Dashboard**)
+3. **Global config**: `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (also discovers legacy `agy-pulse-runtime/runtime/agy-pulse.config.json`, or `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`; edited by both `agypl config` and the Web **Dashboard** Settings drawer)
 4. **Built-in defaults** (`DisplayConfig::builtin_defaults()`, lowest priority)
 
 Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `repository`) are silently ignored during deserialization, and `"quotaStyle": "models"` smoothly maps to `"table"`.
@@ -342,7 +358,7 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 
 ## Multi-Device Sync Configuration (`agy-pulse-sync.json`)
 
-Multi-device sync configuration is stored exclusively in the global private file `~/.gemini/antigravity-cli/agy-pulse-sync.json` (or `$AGY_PULSE_SYNC_CONFIG`), created atomically with `0700` parent directory and `0600` file permissions on Unix. **It is never read from or written to workspace `agy-pulse.config.json`**, preventing credentials from being committed to Git repositories.
+Multi-device sync configuration is stored exclusively in the global private file `~/.gemini/antigravity-cli/agy-pulse-sync.json` (or `$AGY_PULSE_SYNC_CONFIG`), created atomically with `0700` parent directory and `0600` file permissions on Unix. Manage it via `agypl sync init` or the local Web **Dashboard** top-bar **Settings** drawer (Sync Config tab, with write-only credential inputs, active `AGY_PULSE_*` env override indicators, live connection probe, and safe removal). **It is never read from or written to workspace `agy-pulse.config.json`**, preventing credentials from being committed to Git repositories.
 
 ### Top-Level Sync Fields
 
@@ -519,5 +535,5 @@ agy-pulse/
 ├── skills/pulse-config/SKILL.md       # Agent config skill
 ├── docs/                              # Architecture, ADRs, module & reference docs (en / zh)
 └── tests/
-    └── t01..t14_*.rs                  # Black-box integration, parity, sync & packaging test suites
+    └── t01..t15_*.rs                  # Black-box integration, parity, sync & web config test suites
 ```

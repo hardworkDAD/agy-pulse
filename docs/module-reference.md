@@ -52,14 +52,29 @@
 
 ## `src/config/` — Configuration & Interactive Raw-TTY Wizard
 
-- **`mod.rs`**: Deep-merges `PulseConfig::default()` → global `agy-pulse.config.json` → workspace `./agy-pulse.config.json` → `AGY_PULSE_LANGUAGE`. Ignores retired `v1` keys and maps legacy `quotaStyle: "models"` to `Table`.
-- **`wizard.rs`**: Interactive terminal wizard (`agypl config`) with live `render_statusline` preview, scope-isolated atomic saving, and safe non-TTY fallback.
+- **`mod.rs`**:
+  - Deep-merges `PulseConfig::default()` → global `agy-pulse.config.json` → workspace `./agy-pulse.config.json` → environment overrides (`AGY_PULSE_LANGUAGE`, `AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_FORCE_ASCII`/`AGY_PULSE_FORCE_UNICODE`). Ignores retired `v1` keys and maps legacy `quotaStyle: "models"` to `Table`.
+  - Raw global snapshot & validation helpers (`read_global_config_snapshot`, `read_global_config_snapshot_at`, `read_pulse_env_overrides`, `validate_pulse_config`, `save_global_pulse_config_preserving_unknown`): return `GlobalPulseConfigSnapshot` (disk-only without env overlay, `version = sha256 | "absent"`), expose active `PulseEnvOverrides` metadata without mutating disk files, validate bounds/colors/widths, and atomically write `0600` JSON while preserving unknown keys (such as `columnWidth` or user custom keys) and removing cleared optional fields.
+- **`wizard.rs`**: Interactive terminal wizard (`agypl config`) with live `render_statusline` preview, scope-isolated atomic saving, safe non-TTY fallback, and shared `render_statusline_preview` helper reused by both the terminal wizard and the Dashboard preview API.
 
 ---
 
-## `src/dashboard/` — Local Web Dashboard, Persistent Keepalive & Shortcuts
+## `src/sync/` — Multi-Device Object Sync Engine & Remotes
 
-- **`server.rs` & `http_wire.rs` & `assets/dashboard.html`**: Binds `127.0.0.1` (`3789` with ephemeral fallback), validates `Host`/`Origin`, emits CSP headers, and serves embedded single-page HTML + `/api/overview`, `/api/sync`, `/api/health`, `/api/keepalive` (SSE), `/api/ping`, `/api/disconnect`, `/api/export.csv`, `/api/export.json`, `/icon.svg`, and `/manifest.webmanifest`.
+- **`config.rs`**:
+  - Manages global `0600` private `agy-pulse-sync.json` (`SyncConfig`, `RemoteConfig` variants `local-dir` / `webdav` / `s3` / `cf-worker`, `load_sync_config`, `save_sync_config` / `save_sync_config_to`). Never reads workspace directories.
+  - Raw snapshot & metadata helpers (`read_raw_sync_config_snapshot`, `read_raw_sync_config_snapshot_at`, `load_sync_config_raw`, `load_sync_config_raw_from`, `delete_sync_config`, `delete_sync_config_at`, `active_sync_env_overrides`): read disk config **without** applying environment overrides (so env secrets are never persisted back to disk), report `SyncEnvOverrides` (variable names only, zero secret values), and delete only the sync config file without touching the SQLite **Ledger**.
+- **`mod.rs`, `protocol.rs`, `engine.rs`, `local_dir.rs`, `webdav.rs`, `s3.rs`, `cf_worker.rs`, `cli.rs`**: Unified `SyncRemote` trait (`probe`, `list`, `get`, `put`, `delete`), single-writer-per-device wire format v1, pure-Rust SigV4 S3 signing, `push`/`pull`/`sync_both`/`prune_device`, and `agypl sync` / `--sync-bg` execution.
+
+---
+
+## `src/dashboard/` — Local Web Dashboard, Config API, Keepalive & Shortcuts
+
+- **`server.rs` & `http_wire.rs` & `assets/dashboard.html`**: Binds `127.0.0.1` (`3789` with ephemeral fallback), validates `Host`/`Origin`, emits `Content-Security-Policy` headers, generates a 32-byte (64-hex) process-scoped `csrf_token` injected into `dashboard.html`, retains request bodies (`HttpRequest.body` up to `MAX_BODY_BYTES = 64 KiB`, returning `413 Payload Too Large` when exceeded), provides `is_strict_same_origin`, `constant_time_eq`, and `is_json_content_type`, and serves `/api/overview`, `/api/sync`, `/api/sync-remote`, `/api/health`, `/api/keepalive` (SSE), `/api/ping`, `/api/disconnect`, `/api/export.csv`, `/api/export.json`, `/icon.svg`, and `/manifest.webmanifest`.
+- **`config_api.rs`**: Deep module implementing the Dashboard Settings drawer endpoints (`handle_pulse_config_route` for `GET`/`PUT /api/config/pulse`, `handle_pulse_preview_route` for `POST /api/config/pulse/preview`, `handle_sync_config_route` for `GET`/`PUT`/`DELETE /api/config/sync`, `handle_sync_test_route` for `POST /api/config/sync/test`) under key invariants:
+  - `check_config_security`: enforces constant-time `X-Agy-Pulse-Token`, `is_strict_same_origin`, and JSON `Content-Type` on mutating/preview routes.
+  - **Pulse Config**: edits strictly the global `agy-pulse.config.json` (never workspace files), preserves unknown keys, renders live **Statusline** previews via `config::render_statusline_preview`, and protects writes with `pulse_config_lock` + SHA-256 `expectedVersion` (`409 Conflict` on mismatch).
+  - **Sync Config**: translates between camelCase API DTOs and `SyncConfig` / `RemoteConfig` disk format; never echoes plaintext secrets (`password`, `token`, `accessKey`, `secretKey`); merges `keep` / `set` / `clear` credential directives (`keep` inherits only when remote type matches disk); probes drafts via `sync::build_remote(&effective).probe()` and redacts errors with `redact_sync_error_message`; protects writes/deletes with `sync_config_lock` + `409 Conflict`; refreshes `LedgerRuntime.sync_options` via `refresh_sync_identity_hints` on save/delete.
 - **`keepalive.rs`**: Tracks active page instances across SSE connections and ping leases; stays online while minimized/backgrounded and shuts down cleanly after close grace when the last page closes.
 - **`launcher.rs`**: Single-instance daemon state (`agy-pulse-dashboard.json`), Chromium `--app=<url>` detection, and fingerprint-guarded desktop shortcuts (`install-shortcut` / `uninstall-shortcut`).
 
