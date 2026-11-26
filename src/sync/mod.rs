@@ -1,10 +1,15 @@
+pub mod cf_worker;
 pub mod config;
 pub mod engine;
+pub mod http_util;
 pub mod local_dir;
 pub mod protocol;
+pub mod s3;
+pub mod webdav;
 
 use serde::{Deserialize, Serialize};
 
+pub use cf_worker::CfWorkerRemote;
 pub use config::{
     RemoteConfig, SyncConfig, load_sync_config, load_sync_config_from, save_sync_config,
     save_sync_config_to,
@@ -18,6 +23,8 @@ pub use protocol::{
     decode_account_key, decode_chunk_gz, encode_account_key, encode_chunk_gz,
     validate_relative_key,
 };
+pub use s3::S3Remote;
+pub use webdav::WebDavRemote;
 
 /// Result returned by `SyncRemote::probe()` describing the reachable remote backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,10 +80,44 @@ pub fn build_remote(cfg: &SyncConfig) -> Result<Box<dyn SyncRemote>, SyncError> 
                 trimmed,
             ))))
         }
-        RemoteConfig::WebDav { .. } => Err(SyncError::UnsupportedRemote("webdav".to_string())),
-        RemoteConfig::S3 { .. } => Err(SyncError::UnsupportedRemote("s3".to_string())),
-        RemoteConfig::CfWorker { .. } => {
-            Err(SyncError::UnsupportedRemote("cf-worker".to_string()))
-        }
+        RemoteConfig::WebDav {
+            url,
+            username,
+            password,
+            token,
+            allow_insecure_http,
+        } => Ok(Box::new(WebDavRemote::new(
+            url,
+            username.as_deref(),
+            password.as_deref(),
+            token.as_deref(),
+            *allow_insecure_http,
+        )?)),
+        RemoteConfig::S3 {
+            endpoint,
+            region,
+            bucket,
+            access_key,
+            secret_key,
+            path_style,
+            allow_insecure_http,
+        } => Ok(Box::new(S3Remote::new(
+            endpoint,
+            region,
+            bucket,
+            access_key.as_deref(),
+            secret_key.as_deref(),
+            *path_style,
+            *allow_insecure_http,
+        )?)),
+        RemoteConfig::CfWorker {
+            url,
+            token,
+            allow_insecure_http,
+        } => Ok(Box::new(CfWorkerRemote::new(
+            url,
+            token.as_deref(),
+            *allow_insecure_http,
+        )?)),
     }
 }

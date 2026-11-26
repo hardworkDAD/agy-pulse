@@ -1,0 +1,26 @@
+name = "agy-pulse-sync"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Choose ONE storage backend below (R2 takes priority if both are bound).
+# After configuring the binding, set your Bearer token secret:
+#   npx wrangler secret put SYNC_TOKEN
+
+# ---------------------------------------------------------------------------
+# Option A: Cloudflare R2 (recommended for larger ledgers; requires card on file)
+# Create bucket first:
+#   npx wrangler r2 bucket create agy-pulse-sync
+# ---------------------------------------------------------------------------
+# [[r2_buckets]]
+# binding = "BUCKET"
+# bucket_name = "agy-pulse-sync"
+
+# ---------------------------------------------------------------------------
+# Option B: Cloudflare Workers KV (free tier, no credit card required)
+# Create namespace first:
+#   npx wrangler kv namespace create AGY_PULSE_SYNC
+# Then paste the returned namespace ID below:
+# ---------------------------------------------------------------------------
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

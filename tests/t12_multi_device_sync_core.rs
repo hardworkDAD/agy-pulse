@@ -836,12 +836,9 @@ fn t12_config_0600_env_overrides_redaction_and_security_boundaries() {
         }
         other => panic!("unexpected remote variant: {other:?}"),
     }
-    assert!(matches!(
-        build_remote(&loaded_s3),
-        Err(SyncError::UnsupportedRemote(ref b)) if b == "s3"
-    ));
+    assert!(build_remote(&loaded_s3).is_ok());
 
-    // WebDAV and CfWorker env overrides + unsupported checks + serde tag names.
+    // WebDAV and CfWorker env overrides + factory checks + serde tag names.
     let parsed_dav_json: SyncConfig = serde_json::from_str(
         r#"{"enabled":true,"pushIntervalSec":0,"remote":{"type":"webdav","url":"https://dav.example.com"}}"#,
     )
@@ -885,10 +882,7 @@ fn t12_config_0600_env_overrides_redaction_and_security_boundaries() {
         }
         other => panic!("unexpected remote variant: {other:?}"),
     }
-    assert!(matches!(
-        build_remote(&loaded_dav),
-        Err(SyncError::UnsupportedRemote(ref b)) if b == "webdav"
-    ));
+    assert!(build_remote(&loaded_dav).is_ok());
 
     // Key & account_key path traversal rejections.
     for bad_key in [
