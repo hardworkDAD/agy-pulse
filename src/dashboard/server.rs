@@ -7,15 +7,17 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{SecondsFormat, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::LanguageSetting;
 use crate::ledger::{
     CsvExportKind, LedgerError, LedgerGranularity, LedgerQueryFilter, LedgerSourceFilter,
     LedgerStore, LedgerSyncOptions, LedgerSyncReport, LedgerTimeRange, SourceRoot,
+    SyncStatusOverview, redact_sync_error_message,
 };
 use crate::platform;
 use crate::render::resolve_language_from_locale;
+use crate::sync::{SyncOutcomeKind, build_remote, load_sync_config, sync_both};
 
 use super::http_wire::{
     HttpParseError, HttpRequest, is_allowed_host, is_allowed_origin, parse_query_params,
@@ -27,6 +29,7 @@ use super::keepalive::{
 use super::{DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_DASHBOARD_PORT, LOOPBACK_HOST, render_dashboard_html};
 
 const DEFAULT_AUTO_SYNC_INTERVAL_MS: u64 = 10_000;
+const REMOTE_SYNC_THROTTLE_MS: u64 = 30_000;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(15);
 const SSE_EOF_POLL_TIMEOUT: Duration = Duration::from_millis(50);
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -99,8 +102,11 @@ struct ServerSharedState {
     auto_sync_interval_ms: u64,
     sse_ping_interval: Duration,
     started_at: String,
+    ledger_path: PathBuf,
     keepalive: Arc<KeepaliveState>,
     shutdown: AtomicBool,
+    sync_remote_in_progress: Arc<AtomicBool>,
+    last_remote_sync_instant: Mutex<Option<Instant>>,
     ledger: Mutex<LedgerRuntime>,
 }
 
@@ -198,8 +204,11 @@ impl DashboardServer {
             auto_sync_interval_ms: config.auto_sync_interval_ms,
             sse_ping_interval,
             started_at: started_at.clone(),
+            ledger_path,
             keepalive,
             shutdown: AtomicBool::new(false),
+            sync_remote_in_progress: Arc::new(AtomicBool::new(false)),
+            last_remote_sync_instant: Mutex::new(None),
             ledger: Mutex::new(LedgerRuntime {
                 store,
                 last_sync_instant,
@@ -314,6 +323,39 @@ struct PingPayload {
 struct DisconnectPayload {
     ok: bool,
     active_clients: usize,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SyncRemoteBody {
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncRemotePayload {
+    ok: bool,
+    enabled: bool,
+    changed: bool,
+    throttled: bool,
+    in_progress: bool,
+    pulled_chunks: usize,
+    pushed_chunks: usize,
+    steps_imported: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    sync_status: SyncStatusOverview,
+}
+
+struct RemoteSyncGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl Drop for RemoteSyncGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 struct SseConnectionGuard {
@@ -440,6 +482,16 @@ fn parse_overview_filter(params: &[(String, String)]) -> (LedgerQueryFilter, Str
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned);
 
+    let account = query_param(params, "account")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+
+    let device = query_param(params, "device")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+
     let include_subagents = !matches!(
         query_param(params, "includeSubagents"),
         Some("false" | "0")
@@ -470,6 +522,8 @@ fn parse_overview_filter(params: &[(String, String)]) -> (LedgerQueryFilter, Str
             source,
             model,
             workspace,
+            account,
+            device,
             include_subagents,
             now_ms: None,
         },
@@ -484,9 +538,77 @@ fn current_epoch_ms_u64() -> u64 {
         .unwrap_or(0)
 }
 
+fn find_header_end_bytes(buf: &[u8]) -> Option<(usize, usize)> {
+    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        return Some((pos, 4));
+    }
+    if let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
+        return Some((pos, 2));
+    }
+    None
+}
+
+fn peek_sync_remote_force(stream: &TcpStream) -> io::Result<bool> {
+    let mut buf = [0u8; 4096];
+    let mut n = stream.peek(&mut buf)?;
+    if n == 0 {
+        return Ok(false);
+    }
+    let head_preview = String::from_utf8_lossy(&buf[..n]);
+    let first_line = head_preview.lines().next().unwrap_or("");
+    let is_sync_remote_post = {
+        let mut parts = first_line.split_whitespace();
+        let method = parts.next().unwrap_or("");
+        let target = parts.next().unwrap_or("");
+        let path = target.split('?').next().unwrap_or(target);
+        method.eq_ignore_ascii_case("POST") && path == "/api/sync-remote"
+    };
+    if !is_sync_remote_post {
+        return Ok(false);
+    }
+
+    let Some((header_end, sep_len)) = find_header_end_bytes(&buf[..n]) else {
+        return Ok(false);
+    };
+    let head_str = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
+    let content_length = head_str
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if content_length == 0 || header_end + sep_len + content_length > buf.len() {
+        return Ok(false);
+    }
+
+    for _ in 0..8 {
+        if n >= header_end + sep_len + content_length {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+        n = stream.peek(&mut buf)?;
+    }
+
+    let body_start = header_end + sep_len;
+    let body_end = (body_start + content_length).min(n);
+    if body_end <= body_start {
+        return Ok(false);
+    }
+    Ok(
+        serde_json::from_slice::<SyncRemoteBody>(&buf[body_start..body_end])
+            .is_ok_and(|b| b.force),
+    )
+}
+
 fn handle_connection(stream: &mut TcpStream, shared: &ServerSharedState) {
     let _ = stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT));
+
+    let peeked_force = match peek_sync_remote_force(stream) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
 
     let req = match read_http_request(stream) {
         Ok(r) => r,
@@ -503,10 +625,270 @@ fn handle_connection(stream: &mut TcpStream, shared: &ServerSharedState) {
         return;
     }
 
-    dispatch_request(stream, &req, shared);
+    dispatch_request(stream, &req, shared, peeked_force);
 }
 
-fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSharedState) {
+fn read_sync_status_standalone(
+    shared: &ServerSharedState,
+    cfg: Option<&crate::sync::SyncConfig>,
+    in_progress: bool,
+) -> SyncStatusOverview {
+    match LedgerStore::open_at(&shared.ledger_path) {
+        Ok(store) => store.sync_status_overview(cfg, in_progress),
+        Err(_) => SyncStatusOverview {
+            enabled: cfg.is_some_and(|c| c.enabled),
+            remote_type: cfg.map(|c| c.remote_type_str().to_string()),
+            in_progress,
+            ..Default::default()
+        },
+    }
+}
+
+fn handle_sync_remote(
+    stream: &mut TcpStream,
+    params: &[(String, String)],
+    shared: &ServerSharedState,
+    peeked_force: bool,
+) {
+    let force = peeked_force
+        || matches!(
+            query_param(params, "force").map(str::trim),
+            Some(v) if v == "1" || v.eq_ignore_ascii_case("true")
+        );
+
+    let cfg = match load_sync_config() {
+        Ok(Some(c)) if c.enabled => c,
+        Ok(opt_cfg) => {
+            let sync_status = read_sync_status_standalone(
+                shared,
+                opt_cfg.as_ref(),
+                shared.sync_remote_in_progress.load(Ordering::Acquire),
+            );
+            send_json_value(
+                stream,
+                200,
+                &SyncRemotePayload {
+                    ok: true,
+                    enabled: false,
+                    changed: false,
+                    throttled: false,
+                    in_progress: false,
+                    pulled_chunks: 0,
+                    pushed_chunks: 0,
+                    steps_imported: 0,
+                    error: None,
+                    sync_status,
+                },
+                &[],
+            );
+            return;
+        }
+        Err(err) => {
+            let redacted = redact_sync_error_message(&err.to_string(), None);
+            let mut sync_status = read_sync_status_standalone(shared, None, false);
+            if sync_status.last_error.is_none() {
+                sync_status.last_error = Some(redacted.clone());
+            }
+            send_json_value(
+                stream,
+                200,
+                &SyncRemotePayload {
+                    ok: false,
+                    enabled: false,
+                    changed: false,
+                    throttled: false,
+                    in_progress: false,
+                    pulled_chunks: 0,
+                    pushed_chunks: 0,
+                    steps_imported: 0,
+                    error: Some(redacted),
+                    sync_status,
+                },
+                &[],
+            );
+            return;
+        }
+    };
+
+    if shared
+        .sync_remote_in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let sync_status = read_sync_status_standalone(shared, Some(&cfg), true);
+        send_json_value(
+            stream,
+            200,
+            &SyncRemotePayload {
+                ok: true,
+                enabled: true,
+                changed: false,
+                throttled: false,
+                in_progress: true,
+                pulled_chunks: 0,
+                pushed_chunks: 0,
+                steps_imported: 0,
+                error: None,
+                sync_status,
+            },
+            &[],
+        );
+        return;
+    }
+
+    let guard = RemoteSyncGuard {
+        flag: &shared.sync_remote_in_progress,
+    };
+
+    if !force
+        && let Ok(last_guard) = shared.last_remote_sync_instant.lock()
+        && let Some(prev) = *last_guard
+        && (prev.elapsed().as_millis() as u64) < REMOTE_SYNC_THROTTLE_MS
+    {
+        drop(last_guard);
+        drop(guard);
+        let sync_status = read_sync_status_standalone(shared, Some(&cfg), false);
+        send_json_value(
+            stream,
+            200,
+            &SyncRemotePayload {
+                ok: true,
+                enabled: true,
+                changed: false,
+                throttled: true,
+                in_progress: false,
+                pulled_chunks: 0,
+                pushed_chunks: 0,
+                steps_imported: 0,
+                error: None,
+                sync_status,
+            },
+            &[],
+        );
+        return;
+    }
+
+    let store = match LedgerStore::open_at(&shared.ledger_path) {
+        Ok(s) => s,
+        Err(err) => {
+            let redacted = redact_sync_error_message(&err.to_string(), Some(&cfg));
+            drop(guard);
+            let sync_status = SyncStatusOverview {
+                enabled: true,
+                remote_type: Some(cfg.remote_type_str().to_string()),
+                last_error: Some(redacted.clone()),
+                in_progress: false,
+                ..Default::default()
+            };
+            send_json_value(
+                stream,
+                200,
+                &SyncRemotePayload {
+                    ok: false,
+                    enabled: true,
+                    changed: false,
+                    throttled: false,
+                    in_progress: false,
+                    pulled_chunks: 0,
+                    pushed_chunks: 0,
+                    steps_imported: 0,
+                    error: Some(redacted),
+                    sync_status,
+                },
+                &[],
+            );
+            return;
+        }
+    };
+
+    let before_quotas = store.query_latest_account_quotas().unwrap_or_default();
+    let sync_result = build_remote(&cfg).and_then(|remote| sync_both(&store, remote.as_ref(), &cfg, false));
+
+    match sync_result {
+        Ok(outcome) if outcome.kind == SyncOutcomeKind::AlreadyRunning => {
+            drop(guard);
+            let sync_status = store.sync_status_overview(Some(&cfg), true);
+            send_json_value(
+                stream,
+                200,
+                &SyncRemotePayload {
+                    ok: true,
+                    enabled: true,
+                    changed: false,
+                    throttled: false,
+                    in_progress: true,
+                    pulled_chunks: 0,
+                    pushed_chunks: 0,
+                    steps_imported: 0,
+                    error: None,
+                    sync_status,
+                },
+                &[],
+            );
+        }
+        Ok(outcome) => {
+            if let Ok(mut last_guard) = shared.last_remote_sync_instant.lock() {
+                *last_guard = Some(Instant::now());
+            }
+            let after_quotas = store.query_latest_account_quotas().unwrap_or_default();
+            let quotas_changed = before_quotas != after_quotas;
+            let changed = outcome.chunks_downloaded > 0
+                || outcome.steps_imported > 0
+                || outcome.remote_cache_cleared
+                || quotas_changed;
+            drop(guard);
+            let sync_status = store.sync_status_overview(Some(&cfg), false);
+            send_json_value(
+                stream,
+                200,
+                &SyncRemotePayload {
+                    ok: true,
+                    enabled: true,
+                    changed,
+                    throttled: false,
+                    in_progress: false,
+                    pulled_chunks: outcome.chunks_downloaded,
+                    pushed_chunks: outcome.chunks_uploaded,
+                    steps_imported: outcome.steps_imported,
+                    error: None,
+                    sync_status,
+                },
+                &[],
+            );
+        }
+        Err(err) => {
+            let redacted = redact_sync_error_message(&err.to_string(), Some(&cfg));
+            let _ = store.set_sync_meta_field("last_sync_error", Some(&redacted));
+            drop(guard);
+            let mut sync_status = store.sync_status_overview(Some(&cfg), false);
+            sync_status.last_error = Some(redacted.clone());
+            send_json_value(
+                stream,
+                200,
+                &SyncRemotePayload {
+                    ok: false,
+                    enabled: true,
+                    changed: false,
+                    throttled: false,
+                    in_progress: false,
+                    pulled_chunks: 0,
+                    pushed_chunks: 0,
+                    steps_imported: 0,
+                    error: Some(redacted),
+                    sync_status,
+                },
+                &[],
+            );
+        }
+    }
+}
+
+fn dispatch_request(
+    stream: &mut TcpStream,
+    req: &HttpRequest,
+    shared: &ServerSharedState,
+    peeked_force: bool,
+) {
     let method = req.method.as_str();
     let params = parse_query_params(&req.query);
 
@@ -664,7 +1046,11 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
             };
             shared.maybe_auto_sync(&mut guard);
             match guard.store.query_overview(&filter) {
-                Ok(overview) => send_json_value(stream, 200, &overview, &[]),
+                Ok(mut overview) => {
+                    overview.sync_status.in_progress =
+                        shared.sync_remote_in_progress.load(Ordering::Acquire);
+                    send_json_value(stream, 200, &overview, &[]);
+                }
                 Err(err) => send_error_json(stream, 500, &err.to_string()),
             }
         }
@@ -690,6 +1076,18 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 }
                 Err(err) => send_error_json(stream, 500, &err.to_string()),
             }
+        }
+        "/api/sync-remote" => {
+            if method != "POST" {
+                send_error_json(stream, 405, "Method Not Allowed");
+                return;
+            }
+            if !is_allowed_origin(req.header("origin"), shared.port) {
+                send_error_json(stream, 403, "Forbidden: invalid Origin header");
+                return;
+            }
+            shared.keepalive.touch_activity();
+            handle_sync_remote(stream, &params, shared, peeked_force);
         }
         "/api/export.csv" => {
             if method != "GET" {

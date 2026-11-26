@@ -1,11 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::env;
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::domain::compact_model_name;
+use crate::domain::{
+    ProviderQuotaSummary, UNASSIGNED_ACCOUNT_ID, compact_model_name, normalize_account_id,
+};
+use crate::sync::{RemoteConfig, SyncConfig, load_sync_config};
 
 use super::LedgerError;
 
@@ -170,6 +174,8 @@ pub struct LedgerQueryFilter {
     pub source: LedgerSourceFilter,
     pub model: Option<String>,
     pub workspace: Option<String>,
+    pub account: Option<String>,
+    pub device: Option<String>,
     pub include_subagents: bool,
     pub now_ms: Option<i64>,
 }
@@ -184,6 +190,8 @@ impl Default for LedgerQueryFilter {
             source: LedgerSourceFilter::All,
             model: None,
             workspace: None,
+            account: None,
+            device: None,
             include_subagents: true,
             now_ms: None,
         }
@@ -191,9 +199,92 @@ impl Default for LedgerQueryFilter {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountOption {
+    pub account_id: String,
+    pub device_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceOption {
+    pub device_id: String,
+    pub device_name: String,
+    pub account_ids: Vec<String>,
+    pub is_local: bool,
+    pub last_seen_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountBreakdown {
+    pub account_id: String,
+    pub cost_usd: f64,
+    pub share: f64,
+    pub steps: u64,
+    pub session_count: usize,
+    pub device_count: usize,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cache_hit_rate: f64,
+    pub avg_speed: Option<f64>,
+    pub avg_ttft_sec: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceBreakdown {
+    pub device_id: String,
+    pub device_name: String,
+    pub is_local: bool,
+    pub account_ids: Vec<String>,
+    pub cost_usd: f64,
+    pub share: f64,
+    pub steps: u64,
+    pub session_count: usize,
+    pub cli_cost_usd: f64,
+    pub ide_cost_usd: f64,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub last_seen_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountQuotaOverview {
+    pub account_id: String,
+    pub plan_tier: Option<String>,
+    pub observed_at_ms: i64,
+    pub reporter_device_id: String,
+    pub reporter_device_name: String,
+    pub quota: ProviderQuotaSummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStatusOverview {
+    pub enabled: bool,
+    pub remote_type: Option<String>,
+    pub last_push_ms: Option<i64>,
+    pub last_pull_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub in_progress: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct LedgerMeta {
     pub range: String,
     pub source: String,
+    pub account: String,
+    pub device: String,
+    #[serde(rename = "localDeviceId")]
+    pub local_device_id: String,
     #[serde(rename = "fromMs")]
     pub from_ms: i64,
     #[serde(rename = "toMs")]
@@ -212,6 +303,10 @@ pub struct LedgerMeta {
     pub available_workspaces: Vec<String>,
     #[serde(rename = "availableSources")]
     pub available_sources: Vec<String>,
+    #[serde(rename = "availableAccounts")]
+    pub available_accounts: Vec<AccountOption>,
+    #[serde(rename = "availableDevices")]
+    pub available_devices: Vec<DeviceOption>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -353,6 +448,8 @@ pub struct ChildConversationOverview {
     #[serde(rename = "conversationId")]
     pub conversation_id: String,
     pub source: LedgerSource,
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
     pub models: Vec<String>,
     pub steps: u64,
     #[serde(rename = "costUsd")]
@@ -382,6 +479,12 @@ pub struct CascadeOverview {
     #[serde(rename = "rootConversationId")]
     pub root_conversation_id: String,
     pub source: LedgerSource,
+    #[serde(rename = "accountId")]
+    pub account_id: String,
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
+    #[serde(rename = "deviceName")]
+    pub device_name: String,
     pub workspace: String,
     #[serde(rename = "workspaceLabel")]
     pub workspace_label: String,
@@ -428,6 +531,14 @@ pub struct LedgerOverview {
     pub by_model: Vec<ModelBreakdown>,
     #[serde(rename = "bySource")]
     pub by_source: Vec<SourceBreakdown>,
+    #[serde(rename = "byAccount")]
+    pub by_account: Vec<AccountBreakdown>,
+    #[serde(rename = "byDevice")]
+    pub by_device: Vec<DeviceBreakdown>,
+    #[serde(rename = "accountQuotas")]
+    pub account_quotas: Vec<AccountQuotaOverview>,
+    #[serde(rename = "syncStatus")]
+    pub sync_status: SyncStatusOverview,
     #[serde(rename = "sessions")]
     pub cascades: Vec<CascadeOverview>,
 }
@@ -577,6 +688,12 @@ pub(super) struct ConvLineageMeta {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct ConvIdentityMeta {
+    pub account_id: String,
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct StoredStepRow {
     pub conversation_id: String,
     pub ts_ms: i64,
@@ -594,15 +711,40 @@ pub(super) struct StoredStepRow {
     pub workspace: Option<String>,
     pub branch: Option<String>,
     pub source: LedgerSource,
+    pub account_id: String,
+    pub device_id: String,
 }
 
+fn normalize_row_account_id(raw: Option<String>) -> String {
+    raw.as_deref()
+        .and_then(normalize_account_id)
+        .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string())
+}
+
+fn normalize_row_device_id(raw: Option<String>, local_device_id: &str) -> String {
+    match raw {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => local_device_id.to_string(),
+    }
+}
+
+#[allow(clippy::type_complexity)]
 pub(super) fn load_ledger_rows(
     conn: &Connection,
-) -> Result<(HashMap<String, ConvLineageMeta>, Vec<StoredStepRow>), LedgerError> {
+) -> Result<
+    (
+        HashMap<String, ConvLineageMeta>,
+        HashMap<String, ConvIdentityMeta>,
+        Vec<StoredStepRow>,
+    ),
+    LedgerError,
+> {
+    let local_device_id = super::schema::read_local_device_id(conn).unwrap_or_default();
     let mut conv_meta: HashMap<String, ConvLineageMeta> = HashMap::new();
+    let mut conv_identity: HashMap<String, ConvIdentityMeta> = HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT conversation_id, workspace, branch, parent_conversation_id, root_conversation_id, source
+            "SELECT conversation_id, workspace, branch, parent_conversation_id, root_conversation_id, source, account_id, device_id
              FROM ingested_dbs",
         )?;
         let mut rows = stmt.query([])?;
@@ -612,6 +754,16 @@ pub(super) fn load_ledger_rows(
                 continue;
             }
             let src_raw: String = row.get(5)?;
+            let account_id = normalize_row_account_id(row.get::<_, Option<String>>(6)?);
+            let device_id =
+                normalize_row_device_id(row.get::<_, Option<String>>(7)?, &local_device_id);
+            conv_identity.insert(
+                cid.clone(),
+                ConvIdentityMeta {
+                    account_id,
+                    device_id,
+                },
+            );
             conv_meta.insert(
                 cid,
                 ConvLineageMeta {
@@ -633,7 +785,8 @@ pub(super) fn load_ledger_rows(
             "SELECT conversation_id, ts_ms, model, raw_model,
                     input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                     cost_usd, stream_sec, ttft_sec, valid_stream, valid_ttft,
-                    parent_conversation_id, root_conversation_id, workspace, branch, source
+                    parent_conversation_id, root_conversation_id, workspace, branch, source,
+                    account_id, device_id
              FROM telemetry_steps",
         )?;
         let mut rows = stmt.query([])?;
@@ -670,6 +823,26 @@ pub(super) fn load_ledger_rows(
             let branch = row.get::<_, Option<String>>(16)?.filter(|s| !s.is_empty());
             let src_raw: String = row.get(17)?;
             let source = LedgerSource::from_raw(&src_raw);
+            let account_id = normalize_row_account_id(row.get::<_, Option<String>>(18)?);
+            let device_id =
+                normalize_row_device_id(row.get::<_, Option<String>>(19)?, &local_device_id);
+
+            conv_identity
+                .entry(conversation_id.clone())
+                .and_modify(|existing| {
+                    if existing.account_id == UNASSIGNED_ACCOUNT_ID
+                        && account_id != UNASSIGNED_ACCOUNT_ID
+                    {
+                        existing.account_id = account_id.clone();
+                    }
+                    if existing.device_id.is_empty() && !device_id.is_empty() {
+                        existing.device_id = device_id.clone();
+                    }
+                })
+                .or_insert_with(|| ConvIdentityMeta {
+                    account_id: account_id.clone(),
+                    device_id: device_id.clone(),
+                });
 
             conv_meta
                 .entry(conversation_id.clone())
@@ -712,11 +885,13 @@ pub(super) fn load_ledger_rows(
                 workspace,
                 branch,
                 source,
+                account_id,
+                device_id,
             });
         }
     }
 
-    Ok((conv_meta, steps))
+    Ok((conv_meta, conv_identity, steps))
 }
 
 pub(super) fn resolve_root_conversation_id(
@@ -947,9 +1122,36 @@ struct SourceAcc {
     root_ids: HashSet<String>,
 }
 
+struct AccountAcc {
+    account_id: String,
+    acc: PerfAcc,
+    root_ids: HashSet<String>,
+    device_ids: HashSet<String>,
+}
+
+struct DeviceAcc {
+    device_id: String,
+    acc: PerfAcc,
+    root_ids: HashSet<String>,
+    account_ids: BTreeSet<String>,
+    cli_cost_usd: f64,
+    ide_cost_usd: f64,
+    last_step_ts_ms: i64,
+}
+
+#[derive(Default)]
+struct DeviceInfoEntry {
+    device_name: String,
+    is_local: bool,
+    last_seen_ms: i64,
+    account_ids: BTreeSet<String>,
+    plan_tiers: HashMap<String, String>,
+}
+
 struct ChildConvAcc {
     conversation_id: String,
     source: LedgerSource,
+    device_id: String,
     started_at_ms: i64,
     last_activity_ms: i64,
     acc: PerfAcc,
@@ -959,6 +1161,8 @@ struct ChildConvAcc {
 struct CascadeAcc {
     root_conversation_id: String,
     source: LedgerSource,
+    account_id: String,
+    device_id: String,
     workspace: String,
     workspace_label: String,
     branch: String,
@@ -967,6 +1171,133 @@ struct CascadeAcc {
     acc: PerfAcc,
     models_cost: HashMap<String, f64>,
     children: HashMap<String, ChildConvAcc>,
+}
+
+fn cmp_account_ids(a: &str, b: &str) -> std::cmp::Ordering {
+    match (a == UNASSIGNED_ACCOUNT_ID, b == UNASSIGNED_ACCOUNT_ID) {
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => a.cmp(b),
+    }
+}
+
+fn sort_account_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut list: Vec<String> = ids.into_iter().collect();
+    list.sort_by(|a, b| cmp_account_ids(a, b));
+    list.dedup();
+    list
+}
+
+fn strip_url_userinfo_in_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(idx) = rest.find("://") {
+        let after_scheme = &rest[idx + 3..];
+        let auth_end = after_scheme
+            .find(|c: char| c == '/' || c == '?' || c == '#' || c.is_whitespace())
+            .unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..auth_end];
+        if let Some(at_idx) = authority.rfind('@') {
+            out.push_str(&rest[..idx + 3]);
+            out.push_str(&authority[at_idx + 1..]);
+            rest = &after_scheme[auth_end..];
+        } else {
+            out.push_str(&rest[..idx + 3]);
+            rest = after_scheme;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Scrub credentials from `SyncConfig`, sync environment variables, and URL userinfo from error text.
+pub fn redact_sync_error_message(msg: &str, cfg: Option<&SyncConfig>) -> String {
+    let mut secrets: Vec<String> = Vec::new();
+    if let Some(c) = cfg {
+        match &c.remote {
+            RemoteConfig::LocalDir { .. } => {}
+            RemoteConfig::WebDav {
+                password, token, ..
+            } => {
+                if let Some(p) = password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    secrets.push(p.to_string());
+                }
+                if let Some(t) = token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    secrets.push(t.to_string());
+                    secrets.push(format!("Bearer {t}"));
+                }
+            }
+            RemoteConfig::S3 {
+                access_key,
+                secret_key,
+                ..
+            } => {
+                if let Some(ak) = access_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    secrets.push(ak.to_string());
+                }
+                if let Some(sk) = secret_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    secrets.push(sk.to_string());
+                }
+            }
+            RemoteConfig::CfWorker { token, .. } => {
+                if let Some(t) = token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    secrets.push(t.to_string());
+                    secrets.push(format!("Bearer {t}"));
+                }
+            }
+        }
+    }
+
+    for env_name in [
+        "AGY_PULSE_SYNC_TOKEN",
+        "AGY_PULSE_SYNC_PASSWORD",
+        "AGY_PULSE_S3_ACCESS_KEY",
+        "AGY_PULSE_S3_SECRET_KEY",
+    ] {
+        if let Ok(val) = env::var(env_name) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                secrets.push(trimmed.to_string());
+                if env_name == "AGY_PULSE_SYNC_TOKEN" {
+                    secrets.push(format!("Bearer {trimmed}"));
+                }
+            }
+        }
+    }
+
+    let mut out = strip_url_userinfo_in_text(msg);
+    for secret in secrets {
+        if !secret.is_empty() {
+            out = out.replace(&secret, "[REDACTED]");
+        }
+    }
+    out.chars()
+        .filter(|c| !c.is_control())
+        .take(512)
+        .collect()
+}
+
+/// Build a `SyncStatusOverview` from `ledger_meta` and the active `SyncConfig` (redacting errors).
+pub(crate) fn build_sync_status_overview(
+    conn: &Connection,
+    cfg: Option<&SyncConfig>,
+    in_progress: bool,
+) -> SyncStatusOverview {
+    let sync_meta = super::sync::get_sync_meta(conn).unwrap_or_default();
+    let last_error = sync_meta
+        .last_sync_error
+        .as_deref()
+        .map(|err| redact_sync_error_message(err, cfg))
+        .filter(|s| !s.is_empty());
+
+    SyncStatusOverview {
+        enabled: cfg.is_some_and(|c| c.enabled),
+        remote_type: cfg.map(|c| c.remote_type_str().to_string()),
+        last_push_ms: sync_meta.last_sync_push_ms,
+        last_pull_ms: sync_meta.last_sync_pull_ms,
+        last_error,
+        in_progress,
+    }
 }
 
 fn sort_model_list(models_cost: &HashMap<String, f64>) -> Vec<String> {
@@ -986,9 +1317,76 @@ pub(super) fn query_overview(
     default_now_ms: i64,
 ) -> Result<LedgerOverview, LedgerError> {
     let now_ms = filter.now_ms.unwrap_or(default_now_ms);
-    let (conv_meta, steps) = load_ledger_rows(conn)?;
+    let local_device_id = super::schema::read_local_device_id(conn).unwrap_or_default();
+    let sync_devices = super::sync::list_sync_devices(conn)?;
+    let latest_quotas = super::sync::query_latest_account_quotas(conn)?;
+    let (conv_meta, conv_identity, steps) = load_ledger_rows(conn)?;
     let time_range = resolve_time_range(filter, now_ms);
     let mut root_cache: HashMap<String, String> = HashMap::new();
+
+    let mut device_info_map: HashMap<String, DeviceInfoEntry> = HashMap::new();
+    let mut account_devices_all: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+    for dev in &sync_devices {
+        let dev_id = dev.device_id.trim();
+        if dev_id.is_empty() {
+            continue;
+        }
+        let acct = normalize_account_id(&dev.account_id)
+            .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+        let entry = device_info_map.entry(dev_id.to_string()).or_default();
+        if !dev.device_name.trim().is_empty()
+            && (entry.device_name.is_empty() || dev.last_seen_ms >= entry.last_seen_ms)
+        {
+            entry.device_name = dev.device_name.trim().to_string();
+        }
+        entry.is_local |= dev.is_local || dev_id == local_device_id;
+        if dev.last_seen_ms > entry.last_seen_ms {
+            entry.last_seen_ms = dev.last_seen_ms;
+        }
+        entry.account_ids.insert(acct.clone());
+        if let Some(ref tier) = dev.plan_tier {
+            let trimmed = tier.trim();
+            if !trimmed.is_empty() {
+                entry.plan_tiers.insert(acct.clone(), trimmed.to_string());
+            }
+        }
+        account_devices_all
+            .entry(acct)
+            .or_default()
+            .insert(dev_id.to_string());
+    }
+
+    for snap in &latest_quotas {
+        let dev_id = snap.device_id.trim();
+        if dev_id.is_empty() {
+            continue;
+        }
+        let acct = normalize_account_id(&snap.account_id)
+            .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+        let entry = device_info_map.entry(dev_id.to_string()).or_default();
+        if entry.device_name.is_empty() && !snap.device_name.trim().is_empty() {
+            entry.device_name = snap.device_name.trim().to_string();
+        }
+        entry.is_local |= dev_id == local_device_id;
+        if snap.observed_at_ms > entry.last_seen_ms {
+            entry.last_seen_ms = snap.observed_at_ms;
+        }
+        entry.account_ids.insert(acct.clone());
+        if let Some(ref tier) = snap.plan_tier {
+            let trimmed = tier.trim();
+            if !trimmed.is_empty() {
+                entry
+                    .plan_tiers
+                    .entry(acct.clone())
+                    .or_insert_with(|| trimmed.to_string());
+            }
+        }
+        account_devices_all
+            .entry(acct)
+            .or_default()
+            .insert(dev_id.to_string());
+    }
 
     let mut available_models_set: BTreeSet<String> = BTreeSet::new();
     let mut available_workspaces_set: BTreeSet<String> = BTreeSet::new();
@@ -1020,7 +1418,51 @@ pub(super) fn query_overview(
         if step.ts_ms > max_recorded_ts {
             max_recorded_ts = step.ts_ms;
         }
+
+        if !step.device_id.is_empty() {
+            let entry = device_info_map.entry(step.device_id.clone()).or_default();
+            entry.is_local |= step.device_id == local_device_id;
+            if step.ts_ms > entry.last_seen_ms {
+                entry.last_seen_ms = step.ts_ms;
+            }
+            entry.account_ids.insert(step.account_id.clone());
+            account_devices_all
+                .entry(step.account_id.clone())
+                .or_default()
+                .insert(step.device_id.clone());
+        }
     }
+
+    let mut available_accounts: Vec<AccountOption> = account_devices_all
+        .iter()
+        .map(|(account_id, devs)| AccountOption {
+            account_id: account_id.clone(),
+            device_count: devs.len(),
+        })
+        .collect();
+    available_accounts.sort_by(|a, b| cmp_account_ids(&a.account_id, &b.account_id));
+
+    let mut available_devices: Vec<DeviceOption> = device_info_map
+        .iter()
+        .map(|(device_id, info)| DeviceOption {
+            device_id: device_id.clone(),
+            device_name: if info.device_name.is_empty() {
+                device_id.clone()
+            } else {
+                info.device_name.clone()
+            },
+            account_ids: sort_account_ids(info.account_ids.iter().cloned()),
+            is_local: info.is_local,
+            last_seen_ms: info.last_seen_ms,
+        })
+        .collect();
+    available_devices.sort_by(|a, b| {
+        b.is_local
+            .cmp(&a.is_local)
+            .then_with(|| b.last_seen_ms.cmp(&a.last_seen_ms))
+            .then_with(|| a.device_name.cmp(&b.device_name))
+            .then_with(|| a.device_id.cmp(&b.device_id))
+    });
 
     let mut available_sources = Vec::new();
     if available_sources_set.contains(&LedgerSource::Cli) {
@@ -1061,10 +1503,44 @@ pub(super) fn query_overview(
     let ws_filter_raw = filter.workspace.as_deref().map(str::trim).unwrap_or("");
     let has_ws_filter = !ws_filter_raw.is_empty() && !ws_filter_raw.eq_ignore_ascii_case("all");
 
+    let account_filter = filter
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+        .map(|s| {
+            if s.eq_ignore_ascii_case(UNASSIGNED_ACCOUNT_ID) {
+                UNASSIGNED_ACCOUNT_ID.to_string()
+            } else {
+                normalize_account_id(s).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string())
+            }
+        });
+    let meta_account = account_filter
+        .clone()
+        .unwrap_or_else(|| "all".to_string());
+
+    let device_filter = filter
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+        .map(|s| {
+            if s.eq_ignore_ascii_case("local") {
+                local_device_id.clone()
+            } else {
+                s.to_string()
+            }
+        });
+    let meta_device = device_filter
+        .clone()
+        .unwrap_or_else(|| "all".to_string());
+
     let mut summary_acc = PerfAcc::default();
     let mut bucket_map: HashMap<String, BucketAcc> = HashMap::new();
     let mut model_map: HashMap<String, ModelAcc> = HashMap::new();
     let mut source_map: HashMap<LedgerSource, SourceAcc> = HashMap::new();
+    let mut account_map: HashMap<String, AccountAcc> = HashMap::new();
+    let mut device_map: HashMap<String, DeviceAcc> = HashMap::new();
     let mut cascade_map: HashMap<String, CascadeAcc> = HashMap::new();
     let mut matched_subagent_ids: HashSet<String> = HashSet::new();
 
@@ -1076,6 +1552,17 @@ pub(super) fn query_overview(
             LedgerSourceFilter::Cli if step.source != LedgerSource::Cli => continue,
             LedgerSourceFilter::Ide if step.source != LedgerSource::Ide => continue,
             _ => {}
+        }
+
+        if let Some(ref target_acct) = account_filter
+            && step.account_id != *target_acct
+        {
+            continue;
+        }
+        if let Some(ref target_dev) = device_filter
+            && step.device_id != *target_dev
+        {
+            continue;
         }
 
         let root_id = resolve_root_conversation_id(&step.conversation_id, &conv_meta, &mut root_cache);
@@ -1097,6 +1584,8 @@ pub(super) fn query_overview(
 
         let conv_m = conv_meta.get(&step.conversation_id);
         let root_m = conv_meta.get(&root_id);
+        let conv_id_meta = conv_identity.get(&step.conversation_id);
+        let root_id_meta = conv_identity.get(&root_id);
         let effective_ws = step
             .workspace
             .as_deref()
@@ -1155,13 +1644,61 @@ pub(super) fn query_overview(
         source_entry.acc.accumulate(step, is_subagent);
         source_entry.root_ids.insert(root_id.clone());
 
+        let acct_entry = account_map
+            .entry(step.account_id.clone())
+            .or_insert_with(|| AccountAcc {
+                account_id: step.account_id.clone(),
+                acc: PerfAcc::default(),
+                root_ids: HashSet::new(),
+                device_ids: HashSet::new(),
+            });
+        acct_entry.acc.accumulate(step, is_subagent);
+        acct_entry.root_ids.insert(root_id.clone());
+        if !step.device_id.is_empty() {
+            acct_entry.device_ids.insert(step.device_id.clone());
+        }
+
+        let dev_entry = device_map
+            .entry(step.device_id.clone())
+            .or_insert_with(|| DeviceAcc {
+                device_id: step.device_id.clone(),
+                acc: PerfAcc::default(),
+                root_ids: HashSet::new(),
+                account_ids: BTreeSet::new(),
+                cli_cost_usd: 0.0,
+                ide_cost_usd: 0.0,
+                last_step_ts_ms: 0,
+            });
+        dev_entry.acc.accumulate(step, is_subagent);
+        dev_entry.root_ids.insert(root_id.clone());
+        dev_entry.account_ids.insert(step.account_id.clone());
+        match step.source {
+            LedgerSource::Cli => dev_entry.cli_cost_usd += step.cost_usd,
+            LedgerSource::Ide => dev_entry.ide_cost_usd += step.cost_usd,
+        }
+        if step.ts_ms > dev_entry.last_step_ts_ms {
+            dev_entry.last_step_ts_ms = step.ts_ms;
+        }
+
         let root_cascade = cascade_map.entry(root_id.clone()).or_insert_with(|| {
             let root_ws = root_m.and_then(|m| m.workspace.as_deref()).or(effective_ws);
             let root_br = root_m.and_then(|m| m.branch.as_deref()).or(effective_branch);
             let root_src = root_m.map(|m| m.source).unwrap_or(step.source);
+            let root_acct = root_id_meta
+                .map(|m| m.account_id.as_str())
+                .filter(|a| *a != UNASSIGNED_ACCOUNT_ID)
+                .unwrap_or(&step.account_id)
+                .to_string();
+            let root_dev = root_id_meta
+                .map(|m| m.device_id.as_str())
+                .filter(|d| !d.is_empty())
+                .unwrap_or(&step.device_id)
+                .to_string();
             CascadeAcc {
                 root_conversation_id: root_id.clone(),
                 source: root_src,
+                account_id: root_acct,
+                device_id: root_dev,
                 workspace: root_ws.unwrap_or("").to_string(),
                 workspace_label: get_workspace_label(root_ws),
                 branch: root_br.unwrap_or("").to_string(),
@@ -1190,9 +1727,15 @@ pub(super) fn query_overview(
                 .entry(step.conversation_id.clone())
                 .or_insert_with(|| {
                     let child_src = conv_m.map(|m| m.source).unwrap_or(step.source);
+                    let child_dev = conv_id_meta
+                        .map(|m| m.device_id.as_str())
+                        .filter(|d| !d.is_empty())
+                        .unwrap_or(&step.device_id)
+                        .to_string();
                     ChildConvAcc {
                         conversation_id: step.conversation_id.clone(),
                         source: child_src,
+                        device_id: child_dev,
                         started_at_ms: step.ts_ms,
                         last_activity_ms: step.ts_ms,
                         acc: PerfAcc::default(),
@@ -1314,6 +1857,93 @@ pub(super) fn query_overview(
         })
         .collect();
 
+    let mut accounts_vec: Vec<AccountAcc> = account_map.into_values().collect();
+    accounts_vec.sort_by(|a, b| {
+        b.acc
+            .cost_usd
+            .partial_cmp(&a.acc.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.acc.steps.cmp(&a.acc.steps))
+            .then_with(|| cmp_account_ids(&a.account_id, &b.account_id))
+    });
+    let by_account: Vec<AccountBreakdown> = accounts_vec
+        .into_iter()
+        .map(|a| {
+            let fin = a.acc.finalize();
+            let share = if summary_acc.cost_usd > 0.0 {
+                (a.acc.cost_usd / summary_acc.cost_usd) * 100.0
+            } else {
+                0.0
+            };
+            AccountBreakdown {
+                account_id: a.account_id,
+                cost_usd: a.acc.cost_usd,
+                share,
+                steps: a.acc.steps,
+                session_count: a.root_ids.len(),
+                device_count: a.device_ids.len(),
+                input_tokens: a.acc.input_tokens,
+                cache_read_tokens: a.acc.cache_read_tokens,
+                cache_write_tokens: a.acc.cache_write_tokens,
+                output_tokens: a.acc.output_tokens,
+                total_tokens: fin.total_tokens,
+                cache_hit_rate: fin.cache_hit_rate,
+                avg_speed: fin.avg_speed,
+                avg_ttft_sec: fin.avg_ttft_sec,
+            }
+        })
+        .collect();
+
+    let mut devices_vec: Vec<DeviceAcc> = device_map.into_values().collect();
+    devices_vec.sort_by(|a, b| {
+        b.acc
+            .cost_usd
+            .partial_cmp(&a.acc.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.acc.steps.cmp(&a.acc.steps))
+            .then_with(|| a.device_id.cmp(&b.device_id))
+    });
+    let by_device: Vec<DeviceBreakdown> = devices_vec
+        .into_iter()
+        .map(|d| {
+            let fin = d.acc.finalize();
+            let share = if summary_acc.cost_usd > 0.0 {
+                (d.acc.cost_usd / summary_acc.cost_usd) * 100.0
+            } else {
+                0.0
+            };
+            let info = device_info_map.get(&d.device_id);
+            let device_name = info
+                .map(|i| i.device_name.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&d.device_id)
+                .to_string();
+            let is_local = info.is_some_and(|i| i.is_local) || d.device_id == local_device_id;
+            let last_seen_ms = info
+                .map(|i| i.last_seen_ms)
+                .unwrap_or(0)
+                .max(d.last_step_ts_ms);
+            DeviceBreakdown {
+                device_id: d.device_id,
+                device_name,
+                is_local,
+                account_ids: sort_account_ids(d.account_ids),
+                cost_usd: d.acc.cost_usd,
+                share,
+                steps: d.acc.steps,
+                session_count: d.root_ids.len(),
+                cli_cost_usd: d.cli_cost_usd,
+                ide_cost_usd: d.ide_cost_usd,
+                input_tokens: d.acc.input_tokens,
+                cache_read_tokens: d.acc.cache_read_tokens,
+                cache_write_tokens: d.acc.cache_write_tokens,
+                output_tokens: d.acc.output_tokens,
+                total_tokens: fin.total_tokens,
+                last_seen_ms,
+            }
+        })
+        .collect();
+
     let mut cascades_vec: Vec<CascadeAcc> = cascade_map.into_values().collect();
     cascades_vec.sort_by(|a, b| {
         b.last_activity_ms
@@ -1345,6 +1975,7 @@ pub(super) fn query_overview(
                     ChildConversationOverview {
                         conversation_id: ch.conversation_id,
                         source: ch.source,
+                        device_id: ch.device_id,
                         models: sort_model_list(&ch.models_cost),
                         steps: ch.acc.steps,
                         cost_usd: ch.acc.cost_usd,
@@ -1361,9 +1992,19 @@ pub(super) fn query_overview(
                 })
                 .collect();
 
+            let device_name = device_info_map
+                .get(&c.device_id)
+                .map(|i| i.device_name.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&c.device_id)
+                .to_string();
+
             CascadeOverview {
                 root_conversation_id: c.root_conversation_id,
                 source: c.source,
+                account_id: c.account_id,
+                device_id: c.device_id,
+                device_name,
                 workspace: c.workspace,
                 workspace_label: c.workspace_label,
                 branch: c.branch,
@@ -1387,6 +2028,51 @@ pub(super) fn query_overview(
             }
         })
         .collect();
+
+    let account_quotas: Vec<AccountQuotaOverview> = latest_quotas
+        .into_iter()
+        .filter(|q| {
+            account_filter
+                .as_deref()
+                .is_none_or(|target| q.account_id == target)
+        })
+        .map(|q| {
+            let info = device_info_map.get(&q.device_id);
+            let reporter_device_name = info
+                .map(|i| i.device_name.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let trimmed = q.device_name.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                })
+                .unwrap_or(&q.device_id)
+                .to_string();
+            let plan_tier = q.plan_tier.clone().or_else(|| {
+                info.and_then(|i| i.plan_tiers.get(&q.account_id).cloned())
+            });
+            AccountQuotaOverview {
+                account_id: q.account_id,
+                plan_tier,
+                observed_at_ms: q.observed_at_ms,
+                reporter_device_id: q.device_id,
+                reporter_device_name,
+                quota: q.quota,
+            }
+        })
+        .collect();
+
+    let sync_cfg_res = load_sync_config();
+    let sync_cfg = sync_cfg_res.as_ref().ok().and_then(|opt| opt.as_ref());
+    let mut sync_status = build_sync_status_overview(conn, sync_cfg, false);
+    if let Err(err) = &sync_cfg_res
+        && sync_status.last_error.is_none()
+    {
+        sync_status.last_error = Some(redact_sync_error_message(&err.to_string(), None));
+    }
 
     let from_ms = if is_unbounded_all && min_recorded_ts != i64::MAX {
         min_recorded_ts
@@ -1423,6 +2109,9 @@ pub(super) fn query_overview(
     let meta = LedgerMeta {
         range: time_range.range.as_str().to_string(),
         source: filter.source.as_str().to_string(),
+        account: meta_account,
+        device: meta_device,
+        local_device_id,
         from_ms,
         to_ms,
         granularity: granularity.as_str().to_string(),
@@ -1433,6 +2122,8 @@ pub(super) fn query_overview(
         available_models: available_models_set.into_iter().collect(),
         available_workspaces: available_workspaces_set.into_iter().collect(),
         available_sources,
+        available_accounts,
+        available_devices,
     };
 
     Ok(LedgerOverview {
@@ -1441,6 +2132,10 @@ pub(super) fn query_overview(
         timeseries,
         by_model,
         by_source,
+        by_account,
+        by_device,
+        account_quotas,
+        sync_status,
         cascades,
     })
 }
@@ -1536,6 +2231,8 @@ pub(super) fn format_ledger_csv(overview: &LedgerOverview, kind: CsvExportKind) 
                 "avgSpeed".to_string(),
                 "avgTtftSec".to_string(),
                 "models".to_string(),
+                "account_id".to_string(),
+                "device_name".to_string(),
             ]));
             for c in &overview.cascades {
                 rows.push(csv_row(&[
@@ -1560,6 +2257,8 @@ pub(super) fn format_ledger_csv(overview: &LedgerOverview, kind: CsvExportKind) 
                     fmt_num_csv(c.avg_speed, 2),
                     fmt_num_csv(c.avg_ttft_sec, 3),
                     c.models.join(";"),
+                    c.account_id.clone(),
+                    c.device_name.clone(),
                 ]));
             }
         }

@@ -1013,3 +1013,746 @@ fn t07_csv_json_exports_static_routes_and_sync_api() {
 
     server.shutdown();
 }
+
+fn send_raw_http_with_body(
+    port: u16,
+    method: &str,
+    target: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> HttpResponse {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+
+    let mut req = format!("{method} {target} HTTP/1.1\r\n");
+    let mut has_host = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("host") {
+            has_host = true;
+        }
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if !has_host {
+        req.push_str(&format!("Host: 127.0.0.1:{port}\r\n"));
+    }
+    if !body.is_empty() {
+        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    req.push_str(body);
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, resp_body) = text
+        .split_once("\r\n\r\n")
+        .expect("HTTP response header/body separator");
+    let mut lines = head.lines();
+    let status_line = lines.next().expect("status line");
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .expect("status code")
+        .parse()
+        .expect("parse status code");
+    let parsed_headers = lines
+        .filter_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            Some((k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect();
+
+    HttpResponse {
+        status,
+        headers: parsed_headers,
+        body: resp_body.to_string(),
+    }
+}
+
+fn spawn_isolated_dashboard(
+    env: &IsolatedEnv,
+    sync_cfg_path: &Path,
+    extra_args: &[&str],
+) -> (ChildGuard, u16) {
+    let mut cmd = env.base_cmd(&agypl_bin());
+    cmd.arg("dashboard")
+        .args(["--no-open", "--port", "0"])
+        .args(extra_args)
+        .env("AGY_PULSE_SYNC_CONFIG", sync_cfg_path)
+        .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
+        .env("AGY_PULSE_DISABLE_UPDATE_CHECK", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn isolated dashboard");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let guard = ChildGuard(child);
+    let mut reader = BufReader::new(stdout);
+    let mut bound_url = None;
+    for _ in 0..15 {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        if let Some(pos) = line.find("http://127.0.0.1:") {
+            let rest = &line[pos..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '.' && c != '/')
+                .unwrap_or(rest.len());
+            bound_url = Some(rest[..end].to_string());
+            break;
+        }
+    }
+    let url = bound_url.expect("isolated dashboard printed listening URL");
+    let port: u16 = url
+        .trim_start_matches("http://127.0.0.1:")
+        .parse()
+        .expect("parse bound port");
+    (guard, port)
+}
+
+#[test]
+fn t07_multi_account_device_overview_quotas_and_exports() {
+    use agy_pulse::domain::{
+        ProviderQuota, ProviderQuotaSummary, QuotaSnapshot, QuotaWindow, SyncConvRecord,
+        SyncStepRecord,
+    };
+    use agy_pulse::ledger::{LedgerSource, LedgerStore, LedgerSyncOptions, SourceRoot};
+
+    let env = IsolatedEnv::new();
+    let now = current_ms();
+    let t_local_unassigned = now - 3_600_000;
+    let t_local_alice = now - 1_800_000;
+    let t_remote_alice = now - 900_000;
+    let t_remote_bob = now - 600_000;
+
+    // 1. Unassigned IDE conversation on local device
+    write_conv_db(
+        &env.ide_data_dir.join("conversations").join("local-ide-unassigned.db"),
+        Some(&build_trajectory_blob(
+            "file:///work/unassigned-proj",
+            "main",
+            t_local_unassigned,
+            Some("local-ide-unassigned"),
+        )),
+        &[(1, build_step_metadata_blob(t_local_unassigned))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Claude 4.6 Sonnet",
+                    input_tokens: 50_000,
+                    cache_read_tokens: 150_000,
+                    output_tokens: 4_000,
+                    stream_sec: Some((20, 0)),
+                    ttft_sec: Some((1, 0)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    let ide_only_root = vec![SourceRoot {
+        root: env.ide_data_dir.clone(),
+        source: LedgerSource::Ide,
+    }];
+    let mut store = LedgerStore::open_at(&env.ledger_path()).unwrap();
+    store
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(ide_only_root),
+            device_name: Some("work-mac".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // 2. Alice CLI conversation on local device
+    write_conv_db(
+        &env.cli_data_dir.join("conversations").join("local-cli-alice.db"),
+        Some(&build_trajectory_blob(
+            "file:///work/alice-proj",
+            "feat/sync",
+            t_local_alice,
+            Some("local-cli-alice"),
+        )),
+        &[(1, build_step_metadata_blob(t_local_alice))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Gemini 4 Carbon (High)",
+                    input_tokens: 100_000,
+                    cache_read_tokens: 400_000,
+                    output_tokens: 10_000,
+                    stream_sec: Some((50, 0)),
+                    ttft_sec: Some((2, 0)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+    store.set_last_observed_email("Alice@Gmail.com").unwrap();
+    let cli_only_root = vec![SourceRoot {
+        root: env.cli_data_dir.clone(),
+        source: LedgerSource::Cli,
+    }];
+    store
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(cli_only_root),
+            default_account_id: Some("alice@gmail.com".to_string()),
+            device_name: Some("work-mac".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let local_device_id = store.local_device_id().unwrap();
+
+    // 3. Remote device records for Alice (lab-linux) and Bob (bob-win)
+    store
+        .upsert_sync_device(
+            "alice@gmail.com",
+            "dev_remote_linux",
+            "lab-linux",
+            false,
+            t_remote_alice,
+            Some("Google AI Ultra"),
+        )
+        .unwrap();
+    store
+        .import_remote_chunk(
+            "alice@gmail.com",
+            "dev_remote_linux",
+            "2026-11",
+            "sha_alice_remote",
+            &[SyncConvRecord {
+                conversation_id: "remote-alice-1".to_string(),
+                created_at_ms: Some(t_remote_alice),
+                cascade_id: "remote-alice-1".to_string(),
+                parent_conversation_id: None,
+                root_conversation_id: None,
+                source: "cli".to_string(),
+            }],
+            &[SyncStepRecord {
+                step_uid: "remote-alice-1:1:0".to_string(),
+                conversation_id: "remote-alice-1".to_string(),
+                gen_idx: 1,
+                entry_idx: 0,
+                step_index: Some(1),
+                ts_ms: t_remote_alice,
+                model: "Gemini 4 Carbon".to_string(),
+                raw_model: "Gemini 4 Carbon (High)".to_string(),
+                input_tokens: 50_000,
+                cache_read_tokens: 200_000,
+                cache_write_tokens: 0,
+                output_tokens: 4_000,
+                cost_usd: 0.16,
+                stream_sec: Some(20.0),
+                ttft_sec: Some(1.0),
+                valid_stream: 1,
+                valid_ttft: 1,
+                parent_conversation_id: None,
+                root_conversation_id: None,
+                source: "cli".to_string(),
+            }],
+            now,
+        )
+        .unwrap();
+
+    store
+        .upsert_sync_device(
+            "bob@example.com",
+            "dev_bob_win",
+            "bob-win",
+            false,
+            t_remote_bob,
+            Some("Pro"),
+        )
+        .unwrap();
+    store
+        .import_remote_chunk(
+            "bob@example.com",
+            "dev_bob_win",
+            "2026-11",
+            "sha_bob_remote",
+            &[SyncConvRecord {
+                conversation_id: "remote-bob-1".to_string(),
+                created_at_ms: Some(t_remote_bob),
+                cascade_id: "remote-bob-1".to_string(),
+                parent_conversation_id: None,
+                root_conversation_id: None,
+                source: "ide".to_string(),
+            }],
+            &[SyncStepRecord {
+                step_uid: "remote-bob-1:1:0".to_string(),
+                conversation_id: "remote-bob-1".to_string(),
+                gen_idx: 1,
+                entry_idx: 0,
+                step_index: Some(1),
+                ts_ms: t_remote_bob,
+                model: "Claude 4.6 Sonnet".to_string(),
+                raw_model: "Claude 4.6 Sonnet".to_string(),
+                input_tokens: 20_000,
+                cache_read_tokens: 100_000,
+                cache_write_tokens: 0,
+                output_tokens: 2_000,
+                cost_usd: 0.12,
+                stream_sec: Some(10.0),
+                ttft_sec: Some(0.8),
+                valid_stream: 1,
+                valid_ttft: 1,
+                parent_conversation_id: None,
+                root_conversation_id: None,
+                source: "ide".to_string(),
+            }],
+            now,
+        )
+        .unwrap();
+
+    // 4. Quota snapshots: Alice has older local snapshot & newer remote snapshot
+    store
+        .upsert_quota_snapshot(&QuotaSnapshot {
+            account_id: "alice@gmail.com".to_string(),
+            device_id: local_device_id.clone(),
+            device_name: "work-mac".to_string(),
+            plan_tier: Some("Google AI Ultra".to_string()),
+            observed_at_ms: now - 600_000,
+            quota: ProviderQuotaSummary {
+                google: ProviderQuota {
+                    five_hour: Some(QuotaWindow {
+                        remaining_fraction: 0.40,
+                        reset_time_ms: Some(now + 3_600_000),
+                    }),
+                    weekly: None,
+                },
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    store
+        .upsert_quota_snapshot(&QuotaSnapshot {
+            account_id: "alice@gmail.com".to_string(),
+            device_id: "dev_remote_linux".to_string(),
+            device_name: "lab-linux".to_string(),
+            plan_tier: Some("Google AI Ultra".to_string()),
+            observed_at_ms: now - 60_000,
+            quota: ProviderQuotaSummary {
+                google: ProviderQuota {
+                    five_hour: Some(QuotaWindow {
+                        remaining_fraction: 0.85,
+                        reset_time_ms: Some(now + 7_200_000),
+                    }),
+                    weekly: Some(QuotaWindow {
+                        remaining_fraction: 1.0,
+                        reset_time_ms: None,
+                    }),
+                },
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    store
+        .upsert_quota_snapshot(&QuotaSnapshot {
+            account_id: "bob@example.com".to_string(),
+            device_id: "dev_bob_win".to_string(),
+            device_name: "bob-win".to_string(),
+            plan_tier: Some("Pro".to_string()),
+            observed_at_ms: now - 120_000,
+            quota: ProviderQuotaSummary {
+                claude: ProviderQuota {
+                    five_hour: Some(QuotaWindow {
+                        remaining_fraction: 0.70,
+                        reset_time_ms: Some(now - 5_000),
+                    }),
+                    weekly: None,
+                },
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    drop(store);
+
+    let missing_sync_cfg = env.home_dir.join("missing-sync.json");
+    let (_guard, port) = spawn_isolated_dashboard(&env, &missing_sync_cfg, &["--no-sync"]);
+
+    // Overview (all)
+    let ov_all: Value =
+        serde_json::from_str(&send_raw_http(port, "GET", "/api/overview?range=7d", &[]).body)
+            .unwrap();
+    assert_eq!(ov_all["meta"]["account"], "all");
+    assert_eq!(ov_all["meta"]["device"], "all");
+    assert_eq!(ov_all["meta"]["localDeviceId"], local_device_id);
+    assert_eq!(ov_all["summary"]["rootSessionCount"], 4);
+
+    let avail_accts = ov_all["meta"]["availableAccounts"].as_array().unwrap();
+    assert_eq!(avail_accts.len(), 3);
+    let alice_opt = avail_accts
+        .iter()
+        .find(|a| a["accountId"] == "alice@gmail.com")
+        .unwrap();
+    assert_eq!(alice_opt["deviceCount"], 2);
+
+    let avail_devs = ov_all["meta"]["availableDevices"].as_array().unwrap();
+    assert_eq!(avail_devs.len(), 3);
+    assert_eq!(avail_devs[0]["deviceId"], local_device_id);
+    assert_eq!(avail_devs[0]["isLocal"], true);
+
+    let by_account = ov_all["byAccount"].as_array().unwrap();
+    assert_eq!(by_account.len(), 3);
+    let alice_bd = by_account
+        .iter()
+        .find(|a| a["accountId"] == "alice@gmail.com")
+        .unwrap();
+    assert!((alice_bd["costUsd"].as_f64().unwrap() - (0.34 + 0.16)).abs() < 1e-9);
+    assert_eq!(alice_bd["deviceCount"], 2);
+    assert_eq!(alice_bd["sessionCount"], 2);
+
+    let by_device = ov_all["byDevice"].as_array().unwrap();
+    assert_eq!(by_device.len(), 3);
+    let local_bd = by_device
+        .iter()
+        .find(|d| d["deviceId"] == local_device_id)
+        .unwrap();
+    assert_eq!(local_bd["isLocal"], true);
+    assert!((local_bd["cliCostUsd"].as_f64().unwrap() - 0.34).abs() < 1e-9);
+    assert!((local_bd["ideCostUsd"].as_f64().unwrap() - 0.255).abs() < 1e-9);
+
+    // Account quotas strictly pick latest snapshot per account across devices
+    let quotas = ov_all["accountQuotas"].as_array().unwrap();
+    assert_eq!(quotas.len(), 2);
+    let alice_q = quotas
+        .iter()
+        .find(|q| q["accountId"] == "alice@gmail.com")
+        .unwrap();
+    assert_eq!(alice_q["reporterDeviceId"], "dev_remote_linux");
+    assert_eq!(alice_q["reporterDeviceName"], "lab-linux");
+    assert_eq!(alice_q["planTier"], "Google AI Ultra");
+    assert!(
+        (alice_q["quota"]["google"]["five_hour"]["remaining_fraction"]
+            .as_f64()
+            .unwrap()
+            - 0.85)
+            .abs()
+            < 1e-9
+    );
+
+    // Session attribution fields
+    let sessions = ov_all["sessions"].as_array().unwrap();
+    let remote_alice_sess = sessions
+        .iter()
+        .find(|s| s["rootConversationId"] == "remote-alice-1")
+        .unwrap();
+    assert_eq!(remote_alice_sess["accountId"], "alice@gmail.com");
+    assert_eq!(remote_alice_sess["deviceId"], "dev_remote_linux");
+    assert_eq!(remote_alice_sess["deviceName"], "lab-linux");
+
+    // Filter by account=alice@gmail.com (availableAccounts still preserves all 3)
+    let ov_alice: Value = serde_json::from_str(
+        &send_raw_http(
+            port,
+            "GET",
+            "/api/overview?range=7d&account=alice@gmail.com",
+            &[],
+        )
+        .body,
+    )
+    .unwrap();
+    assert_eq!(ov_alice["meta"]["account"], "alice@gmail.com");
+    assert_eq!(ov_alice["meta"]["availableAccounts"].as_array().unwrap().len(), 3);
+    assert!((ov_alice["summary"]["totalCostUsd"].as_f64().unwrap() - 0.50).abs() < 1e-9);
+    assert_eq!(ov_alice["summary"]["rootSessionCount"], 2);
+    assert_eq!(ov_alice["accountQuotas"].as_array().unwrap().len(), 1);
+
+    // Filter by account=unassigned
+    let ov_unassigned: Value = serde_json::from_str(
+        &send_raw_http(
+            port,
+            "GET",
+            "/api/overview?range=7d&account=unassigned",
+            &[],
+        )
+        .body,
+    )
+    .unwrap();
+    assert_eq!(ov_unassigned["summary"]["rootSessionCount"], 1);
+    assert!((ov_unassigned["summary"]["totalCostUsd"].as_f64().unwrap() - 0.255).abs() < 1e-9);
+
+    // Filter by device=local
+    let ov_local: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=7d&device=local", &[]).body,
+    )
+    .unwrap();
+    assert_eq!(ov_local["meta"]["device"], local_device_id);
+    assert_eq!(ov_local["summary"]["rootSessionCount"], 2);
+    assert!((ov_local["summary"]["totalCostUsd"].as_f64().unwrap() - (0.34 + 0.255)).abs() < 1e-9);
+
+    // Export JSON with account + device filter
+    let json_filtered: Value = serde_json::from_str(
+        &send_raw_http(
+            port,
+            "GET",
+            "/api/export.json?range=7d&account=alice@gmail.com&device=dev_remote_linux",
+            &[],
+        )
+        .body,
+    )
+    .unwrap();
+    assert_eq!(json_filtered["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json_filtered["sessions"][0]["rootConversationId"],
+        "remote-alice-1"
+    );
+
+    // Export CSV with account filter and trailing account_id,device_name columns
+    let csv_alice = send_raw_http(
+        port,
+        "GET",
+        "/api/export.csv?kind=sessions&range=7d&account=alice@gmail.com",
+        &[],
+    )
+    .body;
+    let first_line = csv_alice.lines().next().unwrap();
+    assert!(first_line.starts_with("rootConversationId,source,workspace,"));
+    assert!(first_line.ends_with(",models,account_id,device_name"));
+    assert!(csv_alice.contains("remote-alice-1"));
+    assert!(csv_alice.contains("local-cli-alice"));
+    assert!(!csv_alice.contains("remote-bob-1"));
+    assert!(!csv_alice.contains("local-ide-unassigned"));
+}
+
+#[test]
+fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
+    use agy_pulse::domain::{ProviderQuota, ProviderQuotaSummary, QuotaSnapshot, QuotaWindow};
+    use agy_pulse::ledger::{LedgerSource, LedgerStore, LedgerSyncOptions, SourceRoot};
+    use agy_pulse::sync::{LocalDirRemote, RemoteConfig, SyncConfig, push, save_sync_config_to};
+
+    let env = IsolatedEnv::new();
+    let remote_dir = env._temp.path().join("remote_store");
+    fs::create_dir_all(&remote_dir).unwrap();
+
+    // Device A prepares and pushes a chunk + quota snapshot to local-dir remote
+    let device_a_cli_dir = env._temp.path().join("device_a_cli");
+    fs::create_dir_all(&device_a_cli_dir).unwrap();
+    let now = current_ms();
+    let t1 = now - 600_000;
+    write_conv_db(
+        &device_a_cli_dir.join("conversations").join("dev-a-conv.db"),
+        Some(&build_trajectory_blob(
+            "file:///work/proj-a",
+            "main",
+            t1,
+            Some("dev-a-conv"),
+        )),
+        &[(1, build_step_metadata_blob(t1))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Gemini 4 Carbon (High)",
+                    input_tokens: 40_000,
+                    cache_read_tokens: 160_000,
+                    output_tokens: 4_000,
+                    stream_sec: Some((20, 0)),
+                    ttft_sec: Some((1, 0)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    let ledger_a_path = env._temp.path().join("device_a_ledger.sqlite");
+    let mut store_a = LedgerStore::open_at(&ledger_a_path).unwrap();
+    store_a
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(vec![SourceRoot {
+                root: device_a_cli_dir,
+                source: LedgerSource::Cli,
+            }]),
+            default_account_id: Some("alice@gmail.com".to_string()),
+            device_name: Some("device-alpha".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    let dev_a_id = store_a.local_device_id().unwrap();
+    store_a
+        .upsert_quota_snapshot(&QuotaSnapshot {
+            account_id: "alice@gmail.com".to_string(),
+            device_id: dev_a_id,
+            device_name: "device-alpha".to_string(),
+            plan_tier: Some("Google AI Ultra".to_string()),
+            observed_at_ms: now - 30_000,
+            quota: ProviderQuotaSummary {
+                google: ProviderQuota {
+                    five_hour: Some(QuotaWindow {
+                        remaining_fraction: 0.91,
+                        reset_time_ms: Some(now + 10_000_000),
+                    }),
+                    weekly: None,
+                },
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+    let cfg_a = SyncConfig {
+        enabled: true,
+        device_id: None,
+        device_name: Some("device-alpha".to_string()),
+        default_account: Some("alice@gmail.com".to_string()),
+        push_interval_sec: 300,
+        prefix: "agy-pulse-sync".to_string(),
+        remote: RemoteConfig::LocalDir {
+            path: remote_dir.to_string_lossy().into_owned(),
+        },
+    };
+    let remote_a = LocalDirRemote::new(remote_dir.clone());
+    let push_out = push(&store_a, &remote_a, &cfg_a, false).unwrap();
+    assert_eq!(push_out.chunks_uploaded, 1);
+
+    // Device B (the isolated dashboard process) points AGY_PULSE_SYNC_CONFIG to local-dir remote
+    let sync_cfg_path = env._temp.path().join("sync-cfg.json");
+    let cfg_b = SyncConfig {
+        enabled: true,
+        device_id: None,
+        device_name: Some("device-beta".to_string()),
+        default_account: Some("alice@gmail.com".to_string()),
+        push_interval_sec: 300,
+        prefix: "agy-pulse-sync".to_string(),
+        remote: RemoteConfig::LocalDir {
+            path: remote_dir.to_string_lossy().into_owned(),
+        },
+    };
+    save_sync_config_to(&sync_cfg_path, &cfg_b).unwrap();
+
+    let (_guard, port) = spawn_isolated_dashboard(&env, &sync_cfg_path, &["--no-sync"]);
+
+    // 1. HTML contains multi-account/device UI hooks and sync endpoint
+    let html = send_raw_http(port, "GET", "/?lang=zh", &[]).body;
+    for hook in [
+        "/api/sync-remote",
+        "id=\"account-pills\"",
+        "id=\"device-pills\"",
+        "id=\"accounts-quotas-panel\"",
+        "id=\"accounts-quotas-grid\"",
+        "id=\"sync-status-badge\"",
+    ] {
+        assert!(html.contains(hook), "dashboard.html missing hook: {hook}");
+    }
+    for forbidden in ["HUD", "账户余额", "管理后台"] {
+        assert!(!html.contains(forbidden), "forbidden term in HTML: {forbidden}");
+    }
+
+    // 2. GET /api/overview returns immediately before remote sync
+    let before_ov: Value =
+        serde_json::from_str(&send_raw_http(port, "GET", "/api/overview?range=all", &[]).body)
+            .unwrap();
+    assert_eq!(before_ov["syncStatus"]["enabled"], true);
+    assert_eq!(before_ov["syncStatus"]["remoteType"], "local-dir");
+    assert_eq!(before_ov["sessions"].as_array().unwrap().len(), 0);
+
+    // 3. POST /api/sync-remote pulls Device A's chunk and sets changed=true
+    let sync1 = send_raw_http(port, "POST", "/api/sync-remote", &[]);
+    assert_eq!(sync1.status, 200);
+    let sync1_json: Value = serde_json::from_str(&sync1.body).unwrap();
+    assert_eq!(sync1_json["ok"], true);
+    assert_eq!(sync1_json["enabled"], true);
+    assert_eq!(sync1_json["changed"], true);
+    assert_eq!(sync1_json["throttled"], false);
+    assert!(sync1_json["pulledChunks"].as_u64().unwrap() >= 1);
+    assert!(sync1_json["stepsImported"].as_u64().unwrap() >= 1);
+
+    let after_ov: Value =
+        serde_json::from_str(&send_raw_http(port, "GET", "/api/overview?range=all", &[]).body)
+            .unwrap();
+    assert_eq!(after_ov["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(after_ov["sessions"][0]["deviceName"], "device-alpha");
+    assert_eq!(after_ov["accountQuotas"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        after_ov["accountQuotas"][0]["reporterDeviceName"],
+        "device-alpha"
+    );
+
+    // 4. Repeat POST /api/sync-remote within 30s without force hits throttle
+    let sync2_json: Value =
+        serde_json::from_str(&send_raw_http(port, "POST", "/api/sync-remote", &[]).body).unwrap();
+    assert_eq!(sync2_json["ok"], true);
+    assert_eq!(sync2_json["throttled"], true);
+    assert_eq!(sync2_json["changed"], false);
+
+    // 5. JSON body {"force":true} bypasses throttle
+    let sync3_json: Value = serde_json::from_str(
+        &send_raw_http_with_body(
+            port,
+            "POST",
+            "/api/sync-remote",
+            &[("Content-Type", "application/json")],
+            r#"{"force":true}"#,
+        )
+        .body,
+    )
+    .unwrap();
+    assert_eq!(sync3_json["ok"], true);
+    assert_eq!(sync3_json["throttled"], false);
+
+    // 6. Same remote going offline preserves previously pulled data in /api/overview and records lastError
+    fs::remove_dir_all(&remote_dir).unwrap();
+    fs::write(&remote_dir, b"simulated-offline-mount").unwrap();
+
+    let sync_offline_res = send_raw_http(port, "POST", "/api/sync-remote?force=true", &[]);
+    assert_eq!(sync_offline_res.status, 200);
+    let sync_offline_json: Value = serde_json::from_str(&sync_offline_res.body).unwrap();
+    assert_eq!(sync_offline_json["ok"], false);
+    assert_eq!(sync_offline_json["enabled"], true);
+    assert_eq!(sync_offline_json["changed"], false);
+    assert!(!sync_offline_json["error"].as_str().unwrap().is_empty());
+
+    // /api/overview still succeeds immediately with 200 and preserves previously pulled data
+    let offline_ov_res = send_raw_http(port, "GET", "/api/overview?range=all", &[]);
+    assert_eq!(offline_ov_res.status, 200);
+    let offline_ov: Value = serde_json::from_str(&offline_ov_res.body).unwrap();
+    assert_eq!(offline_ov["sessions"].as_array().unwrap().len(), 1);
+    assert!(offline_ov["syncStatus"]["lastError"].is_string());
+
+    // 7. Unreachable CF Worker remote returns ok=false with redacted error (never leaks token)
+    let unused_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let dead_port = unused_listener.local_addr().unwrap().port();
+    drop(unused_listener);
+
+    let bad_cfg = SyncConfig {
+        enabled: true,
+        device_id: None,
+        device_name: Some("device-beta".to_string()),
+        default_account: Some("alice@gmail.com".to_string()),
+        push_interval_sec: 300,
+        prefix: "agy-pulse-sync".to_string(),
+        remote: RemoteConfig::CfWorker {
+            url: format!("http://127.0.0.1:{dead_port}"),
+            token: Some("super-secret-token-xyz".to_string()),
+            allow_insecure_http: true,
+        },
+    };
+    save_sync_config_to(&sync_cfg_path, &bad_cfg).unwrap();
+
+    let sync_err_res = send_raw_http(port, "POST", "/api/sync-remote?force=true", &[]);
+    assert_eq!(sync_err_res.status, 200);
+    let sync_err_json: Value = serde_json::from_str(&sync_err_res.body).unwrap();
+    assert_eq!(sync_err_json["ok"], false);
+    assert_eq!(sync_err_json["enabled"], true);
+    assert_eq!(sync_err_json["changed"], false);
+    let err_msg = sync_err_json["error"].as_str().unwrap();
+    assert!(!err_msg.is_empty());
+    assert!(!err_msg.contains("super-secret-token-xyz"));
+
+    let bad_ov_res = send_raw_http(port, "GET", "/api/overview?range=all", &[]);
+    assert_eq!(bad_ov_res.status, 200);
+    let bad_ov: Value = serde_json::from_str(&bad_ov_res.body).unwrap();
+    let last_err = bad_ov["syncStatus"]["lastError"].as_str().unwrap();
+    assert!(!last_err.contains("super-secret-token-xyz"));
+}

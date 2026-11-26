@@ -575,6 +575,166 @@
       color: var(--text-dim);
       padding-top: 4px;
     }
+
+    /* Multi-account & multi-device controls & quota cards */
+    .identity-filters-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .pill-local-tag {
+      display: inline-block;
+      margin-left: 5px;
+      padding: 0 5px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 600;
+      background: rgba(16, 185, 129, 0.18);
+      color: var(--accent);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .pill.active .pill-local-tag {
+      background: rgba(255, 255, 255, 0.22);
+      color: #ffffff;
+      border-color: rgba(255, 255, 255, 0.4);
+    }
+    .accounts-quotas-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
+    }
+    .account-card {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .account-card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .account-card-title {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text);
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      text-align: left;
+      font-family: inherit;
+    }
+    .account-card-title:hover { color: var(--accent); }
+    .account-card-meta {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .quota-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .quota-row {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .quota-row.quota-expired {
+      opacity: 0.55;
+    }
+    .quota-row-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11.5px;
+    }
+    .quota-row-label {
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    .quota-row-val {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .quota-track {
+      height: 6px;
+      border-radius: 999px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+    .quota-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+    .quota-fill.mid { background: var(--warn); }
+    .quota-fill.low { background: var(--danger); }
+    .quota-fill.expired { background: var(--text-dim); }
+    .device-spend-bar {
+      height: 6px;
+      border-radius: 999px;
+      background: var(--bg-input);
+      overflow: hidden;
+      display: flex;
+      gap: 1px;
+    }
+    .device-spend-seg {
+      height: 100%;
+    }
+    .device-chip-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .device-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      color: var(--text-muted);
+      font-size: 11px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .device-chip:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-strong);
+      color: var(--text);
+    }
+    .device-chip.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .badge-device {
+      background: rgba(16, 185, 129, 0.12);
+      border-color: rgba(16, 185, 129, 0.28);
+      color: var(--accent);
+      margin-right: 5px;
+    }
+    .badge-account {
+      background: rgba(56, 189, 248, 0.12);
+      border-color: rgba(56, 189, 248, 0.28);
+      color: var(--accent-2);
+      margin-right: 5px;
+    }
   </style>
 </head>
 <body>
@@ -593,6 +753,7 @@
           </div>
         </div>
         <div class="actions">
+          <span class="badge" id="sync-status-badge" style="display:none;"></span>
           <button type="button" class="btn btn-primary" id="btn-sync">
             <svg id="sync-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="23 4 23 10 17 10"></polyline>
@@ -605,6 +766,21 @@
           <a class="btn" id="btn-export-json" href="/api/export.json" download>JSON</a>
           <button type="button" class="btn" id="btn-lang">中文 / EN</button>
           <button type="button" class="btn" id="btn-theme" aria-label="Toggle theme">☀ / ☾</button>
+        </div>
+      </div>
+
+      <div class="identity-filters-row" id="identity-filter-row" style="display:none;">
+        <div class="control-group">
+          <span data-i18n="accountLabel">Account</span>
+          <div class="pill-group" id="account-pills" role="group">
+            <button type="button" class="pill active" data-account="all" data-i18n="allAccounts">All Accounts</button>
+          </div>
+        </div>
+        <div class="control-group">
+          <span data-i18n="deviceLabel">Device</span>
+          <div class="pill-group" id="device-pills" role="group">
+            <button type="button" class="pill active" data-device="all" data-i18n="allDevices">All Devices</button>
+          </div>
         </div>
       </div>
 
@@ -666,6 +842,17 @@
   <main class="container">
     <div id="status-banner" class="status-banner" role="status"></div>
     <div id="source-summary-bar" class="source-summary-bar" style="display:none;"></div>
+
+    <!-- Accounts & Quotas Overview -->
+    <section class="panel" id="accounts-quotas-panel" style="display:none;">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title" data-i18n="accountsQuotasTitle">Accounts &amp; Quotas</h2>
+          <div class="panel-subtitle" data-i18n="accountsQuotasSub">Cross-device quota snapshots &amp; spend distribution per account</div>
+        </div>
+      </div>
+      <div class="accounts-quotas-grid" id="accounts-quotas-grid"></div>
+    </section>
 
     <!-- 6 KPI Cards -->
     <section class="kpi-grid" id="kpi-grid">
@@ -818,6 +1005,32 @@
         title: 'Telemetry Dashboard',
         syncNow: 'Sync Now',
         syncing: 'Syncing...',
+        syncEnabled: 'Sync ready',
+        syncLastSynced: 'Synced',
+        syncOfflineError: 'Sync offline / error',
+        accountLabel: 'Account',
+        allAccounts: 'All Accounts',
+        unassignedAccount: 'Unassigned',
+        deviceLabel: 'Device',
+        allDevices: 'All Devices',
+        localDevice: 'Local',
+        accountsQuotasTitle: 'Accounts & Quotas',
+        accountsQuotasSub: 'Cross-device quota snapshots & spend distribution per account',
+        quotaFrom: 'From',
+        expired: 'Expired',
+        justNow: 'just now',
+        minsAgo: 'min ago',
+        hoursAgo: 'h ago',
+        daysAgo: 'd ago',
+        devicesCount: 'devices',
+        deviceCountSingle: 'device',
+        noQuotaSnapshot: 'No quota snapshot reported yet',
+        deviceBreakdownLabel: 'Devices:',
+        quotaGoogle: 'Google',
+        quotaClaude: 'Claude',
+        quotaArgon: 'Argon',
+        quota5h: '5h',
+        quotaWeek: 'Week',
         rangeToday: 'Today',
         range24h: '24h',
         range7d: '7d',
@@ -845,7 +1058,7 @@
         kpiTokens: 'Total Tokens',
         kpiSpeed: 'Weighted Speed',
         kpiTtft: 'Avg TTFT',
-        kpiSessions: 'Sessions & Steps',
+        kpiSessions: 'Cascades & Steps',
         chartCostTitle: 'Cost Over Time by Model',
         chartCostSub: 'Stacked USD spend per time bucket',
         chartPerfTitle: 'Cache Hit Rate & Output Speed',
@@ -864,12 +1077,12 @@
         colTtft: 'Avg TTFT',
         colSteps: 'Steps',
         colLastActive: 'Last Active',
-        sessionTableTitle: 'Sessions & Swarm Subagent Trees',
-        sessionTableSub: 'Click a root session with subagents to expand its swarm tree',
-        searchPlaceholder: 'Search workspace / source / ID / branch / model...',
+        sessionTableTitle: 'Cascades & Swarm Subagent Trees',
+        sessionTableSub: 'Click a root cascade with subagents to expand its swarm tree',
+        searchPlaceholder: 'Search workspace / source / device / account / ID / branch / model...',
         expandAll: 'Expand All',
         collapseAll: 'Collapse All',
-        colSession: 'Session / Workspace',
+        colSession: 'Cascade / Workspace',
         colModels: 'Models',
         colCost: 'Cost',
         colTokens: 'Prompt / Out',
@@ -888,20 +1101,46 @@
         syncFailed: 'Sync failed',
         loadFailed: 'Failed to load telemetry',
         showAllSessions: 'Show all',
-        sessionsUnit: 'sessions',
+        sessionsUnit: 'cascades',
         rootSessions: 'root',
         stepsUnit: 'steps',
         backendLabel: 'Backend',
         recordedLabel: 'Recorded',
-        subConversation: 'Subagent ID',
+        subConversation: 'Subagent Conversation ID',
         high: 'High',
         mid: 'Medium',
         low: 'Low'
       },
       zh: {
-        title: '遥测分析看板',
+        title: '遥测分析网页看板',
         syncNow: '立即同步',
         syncing: '同步中...',
+        syncEnabled: '同步已启用',
+        syncLastSynced: '已同步',
+        syncOfflineError: '远端同步异常 / 离线',
+        accountLabel: '账号',
+        allAccounts: '全部账号',
+        unassignedAccount: '未归属',
+        deviceLabel: '设备',
+        allDevices: '全部设备',
+        localDevice: '本机',
+        accountsQuotasTitle: '账号与配额总览',
+        accountsQuotasSub: '各账号跨设备最新配额快照与设备花费分布',
+        quotaFrom: '来自',
+        expired: '已过期',
+        justNow: '刚刚',
+        minsAgo: '分钟前',
+        hoursAgo: '小时前',
+        daysAgo: '天前',
+        devicesCount: '台设备',
+        deviceCountSingle: '台设备',
+        noQuotaSnapshot: '暂无配额快照记录',
+        deviceBreakdownLabel: '设备占比:',
+        quotaGoogle: 'Google',
+        quotaClaude: 'Claude',
+        quotaArgon: 'Argon',
+        quota5h: '5h',
+        quotaWeek: '周',
         rangeToday: '今日',
         range24h: '近 24h',
         range7d: '近 7 天',
@@ -911,7 +1150,7 @@
         sourceAll: '全部',
         sourceCli: 'CLI',
         sourceIde: 'IDE',
-        sourceBreakdownLabel: '来源占比:',
+        sourceBreakdownLabel: '来源端占比:',
         fromLabel: '起',
         toLabel: '止',
         granularityLabel: '粒度',
@@ -929,7 +1168,7 @@
         kpiTokens: '总 Token 吞吐',
         kpiSpeed: '加权输出均速',
         kpiTtft: '平均首字 (TTFT)',
-        kpiSessions: '会话与步数规模',
+        kpiSessions: '任务树与步数规模',
         chartCostTitle: '按模型堆叠费用趋势',
         chartCostSub: '各时间段美元消耗拆解',
         chartPerfTitle: '缓存命中率与输出速度趋势',
@@ -948,18 +1187,18 @@
         colTtft: '平均首字',
         colSteps: '步数',
         colLastActive: '最近活跃',
-        sessionTableTitle: '会话明细与蜂群子代理树',
-        sessionTableSub: '点击带有子代理的根会话行可展开查看全部蜂群明细',
-        searchPlaceholder: '搜索工作区 / 来源 / 会话 ID / 分支 / 模型...',
+        sessionTableTitle: '任务树与子代理明细',
+        sessionTableSub: '点击带有子代理的根任务树行可展开查看全部蜂群明细',
+        searchPlaceholder: '搜索工作区 / 来源端 / 设备 / 账号 / ID / 分支 / 模型...',
         expandAll: '全部展开',
         collapseAll: '全部收起',
-        colSession: '会话 / 工作区',
+        colSession: '任务树 / 工作区',
         colModels: '模型',
         colCost: '费用',
         colSteps: '步数',
         colTokens: '总入 / 输出',
         noData: '当前筛选区间暂无遥测记录',
-        mainLabel: '主会话',
+        mainLabel: '主对话',
         subLabel: '子代理',
         readLabel: '缓存读',
         promptLabel: '总入',
@@ -973,12 +1212,12 @@
         syncFailed: '同步失败',
         loadFailed: '加载遥测数据失败',
         showAllSessions: '展开显示全部',
-        sessionsUnit: '条会话',
-        rootSessions: '根会话',
+        sessionsUnit: '棵任务树',
+        rootSessions: '根任务树',
         stepsUnit: '步',
         backendLabel: '账本引擎',
         recordedLabel: '总归档',
-        subConversation: '子代理 ID',
+        subConversation: '子代理单窗对话 ID',
         high: '极佳',
         mid: '中等',
         low: '偏低'
@@ -1008,6 +1247,8 @@
         source: 'all',
         model: 'all',
         workspace: 'all',
+        account: 'all',
+        device: 'all',
         includeSubagents: true
       },
       sort: { key: 'costUsd', dir: 'desc' },
@@ -1146,6 +1387,8 @@
       if (state.filter.source && state.filter.source !== 'all') params.set('source', state.filter.source);
       if (state.filter.model && state.filter.model !== 'all') params.set('model', state.filter.model);
       if (state.filter.workspace && state.filter.workspace !== 'all') params.set('workspace', state.filter.workspace);
+      if (state.filter.account && state.filter.account !== 'all') params.set('account', state.filter.account);
+      if (state.filter.device && state.filter.device !== 'all') params.set('device', state.filter.device);
       params.set('includeSubagents', state.filter.includeSubagents ? 'true' : 'false');
       return params.toString();
     }
@@ -1168,6 +1411,382 @@
       }
       el.className = 'status-banner visible ' + (kind || '');
       el.textContent = msg;
+    }
+
+    function fmtRelativeAge(ms) {
+      if (!ms || !isFinite(ms)) return '—';
+      var diff = Math.max(0, Date.now() - Number(ms));
+      var mins = Math.floor(diff / 60000);
+      if (mins < 1) return t('justNow');
+      if (mins < 60) return mins + ' ' + t('minsAgo');
+      var hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + ' ' + t('hoursAgo');
+      var days = Math.floor(hrs / 24);
+      return days + ' ' + t('daysAgo');
+    }
+
+    function fmtResetCountdown(resetMs) {
+      if (resetMs === null || resetMs === undefined) return '';
+      var diffSec = Math.max(0, Math.round((Number(resetMs) - Date.now()) / 1000));
+      if (diffSec <= 0) return t('expired');
+      var d = Math.floor(diffSec / 86400);
+      var h = Math.floor((diffSec % 86400) / 3600);
+      var m = Math.floor((diffSec % 3600) / 60);
+      if (d >= 10) return '~' + d + 'd';
+      if (d > 0) return '~' + d + 'd' + h + 'h';
+      if (h >= 10) return '~' + h + 'h';
+      if (h > 0) return '~' + h + 'h' + m + 'm';
+      return '~' + m + 'm';
+    }
+
+    function fmtQuotaPct(frac) {
+      var v = Number(frac);
+      if (!isFinite(v) || v <= 0) return 0;
+      if (v >= 1) return 100;
+      return Math.max(0, Math.min(99, Math.floor(v * 100)));
+    }
+
+    function formatAccountLabel(accountId) {
+      if (!accountId || accountId === 'unassigned') return t('unassignedAccount');
+      return accountId;
+    }
+
+    function deviceMatchesAccount(dev, acctId) {
+      if (!acctId || acctId === 'all') return true;
+      var list = Array.isArray(dev && dev.accountIds) ? dev.accountIds : [];
+      return list.indexOf(acctId) !== -1;
+    }
+
+    function renderIdentityFilters(data) {
+      var row = document.getElementById('identity-filter-row');
+      var acctGroup = document.getElementById('account-pills');
+      var devGroup = document.getElementById('device-pills');
+      if (!row || !acctGroup || !devGroup) return;
+
+      var meta = (data && data.meta) || {};
+      var accounts = Array.isArray(meta.availableAccounts) ? meta.availableAccounts : [];
+      var allDevices = Array.isArray(meta.availableDevices) ? meta.availableDevices : [];
+
+      if (!accounts.length && !allDevices.length) {
+        row.style.display = 'none';
+        acctGroup.innerHTML = '<button type="button" class="pill active" data-account="all">' + escHtml(t('allAccounts')) + '</button>';
+        devGroup.innerHTML = '<button type="button" class="pill active" data-device="all">' + escHtml(t('allDevices')) + '</button>';
+        return;
+      }
+
+      row.style.display = 'flex';
+
+      var acctHtml = '<button type="button" class="pill' + (state.filter.account === 'all' ? ' active' : '') +
+        '" data-account="all">' + escHtml(t('allAccounts')) + '</button>';
+      for (var i = 0; i < accounts.length; i++) {
+        var a = accounts[i];
+        var active = state.filter.account === a.accountId ? ' active' : '';
+        var lbl = formatAccountLabel(a.accountId);
+        var suffix = a.deviceCount > 1 ? ' (' + a.deviceCount + ')' : '';
+        acctHtml += '<button type="button" class="pill' + active + '" data-account="' + escHtml(a.accountId) + '">' +
+          escHtml(lbl + suffix) + '</button>';
+      }
+      acctGroup.innerHTML = acctHtml;
+
+      var filteredDevices = [];
+      for (var d = 0; d < allDevices.length; d++) {
+        if (deviceMatchesAccount(allDevices[d], state.filter.account)) {
+          filteredDevices.push(allDevices[d]);
+        }
+      }
+
+      if (state.filter.device !== 'all') {
+        var foundDev = false;
+        for (var fd = 0; fd < filteredDevices.length; fd++) {
+          if (filteredDevices[fd].deviceId === state.filter.device) {
+            foundDev = true;
+            break;
+          }
+        }
+        if (!foundDev) {
+          state.filter.device = 'all';
+        }
+      }
+
+      var devHtml = '<button type="button" class="pill' + (state.filter.device === 'all' ? ' active' : '') +
+        '" data-device="all">' + escHtml(t('allDevices')) + '</button>';
+      for (var j = 0; j < filteredDevices.length; j++) {
+        var dev = filteredDevices[j];
+        var dActive = state.filter.device === dev.deviceId ? ' active' : '';
+        var dName = dev.deviceName || dev.deviceId;
+        var localTag = dev.isLocal ? '<span class="pill-local-tag">' + escHtml(t('localDevice')) + '</span>' : '';
+        devHtml += '<button type="button" class="pill' + dActive + '" data-device="' + escHtml(dev.deviceId) +
+          '" title="' + escHtml(dev.deviceId) + '">' + escHtml(dName) + localTag + '</button>';
+      }
+      devGroup.innerHTML = devHtml;
+
+      var acctBtns = acctGroup.querySelectorAll('.pill');
+      for (var ab = 0; ab < acctBtns.length; ab++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            var nextAcct = btn.getAttribute('data-account') || 'all';
+            state.filter.account = nextAcct;
+            if (state.filter.device !== 'all') {
+              var keepDev = false;
+              for (var k = 0; k < allDevices.length; k++) {
+                if (allDevices[k].deviceId === state.filter.device && deviceMatchesAccount(allDevices[k], nextAcct)) {
+                  keepDev = true;
+                  break;
+                }
+              }
+              if (!keepDev) state.filter.device = 'all';
+            }
+            fetchOverview();
+          });
+        })(acctBtns[ab]);
+      }
+
+      var devBtns = devGroup.querySelectorAll('.pill');
+      for (var db = 0; db < devBtns.length; db++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            state.filter.device = btn.getAttribute('data-device') || 'all';
+            fetchOverview();
+          });
+        })(devBtns[db]);
+      }
+    }
+
+    function renderSyncStatus() {
+      var badge = document.getElementById('sync-status-badge');
+      if (!badge) return;
+      var st = state.data && state.data.syncStatus;
+      if (!st || !st.enabled) {
+        badge.style.display = 'none';
+        badge.textContent = '';
+        badge.title = '';
+        return;
+      }
+
+      badge.style.display = 'inline-flex';
+      var remoteTag = st.remoteType ? (' (' + st.remoteType + ')') : '';
+      if (remoteSyncInFlight || st.inProgress) {
+        badge.className = 'badge badge-warn';
+        badge.textContent = t('syncing');
+        badge.title = t('syncing') + remoteTag;
+      } else if (st.lastError) {
+        badge.className = 'badge badge-danger';
+        badge.textContent = t('syncOfflineError');
+        badge.title = st.lastError;
+      } else {
+        var latestMs = Math.max(Number(st.lastPullMs) || 0, Number(st.lastPushMs) || 0);
+        if (latestMs > 0) {
+          badge.className = 'badge badge-accent';
+          badge.textContent = t('syncLastSynced') + ' · ' + fmtRelativeAge(latestMs);
+          badge.title = 'Pull: ' + fmtTime(st.lastPullMs) + ' | Push: ' + fmtTime(st.lastPushMs) + remoteTag;
+        } else {
+          badge.className = 'badge';
+          badge.textContent = t('syncEnabled') + remoteTag;
+          badge.title = t('syncEnabled') + remoteTag;
+        }
+      }
+    }
+
+    function renderAccountsQuotasPanel(data) {
+      var panel = document.getElementById('accounts-quotas-panel');
+      var grid = document.getElementById('accounts-quotas-grid');
+      if (!panel || !grid) return;
+
+      var quotas = (data && Array.isArray(data.accountQuotas)) ? data.accountQuotas : [];
+      var byAccount = (data && Array.isArray(data.byAccount)) ? data.byAccount : [];
+      var byDevice = (data && Array.isArray(data.byDevice)) ? data.byDevice : [];
+      var syncEnabled = !!(data && data.syncStatus && data.syncStatus.enabled);
+
+      var shouldShow = quotas.length > 0 || byAccount.length > 1 || byDevice.length > 1 || syncEnabled;
+      if (!shouldShow) {
+        panel.style.display = 'none';
+        grid.innerHTML = '';
+        return;
+      }
+
+      var acctStatsMap = {};
+      var orderedAccounts = [];
+      for (var i = 0; i < byAccount.length; i++) {
+        acctStatsMap[byAccount[i].accountId] = byAccount[i];
+        orderedAccounts.push(byAccount[i].accountId);
+      }
+
+      var quotaMap = {};
+      for (var q = 0; q < quotas.length; q++) {
+        quotaMap[quotas[q].accountId] = quotas[q];
+        if (orderedAccounts.indexOf(quotas[q].accountId) === -1) {
+          orderedAccounts.push(quotas[q].accountId);
+        }
+      }
+
+      if (!orderedAccounts.length) {
+        panel.style.display = 'none';
+        grid.innerHTML = '';
+        return;
+      }
+
+      panel.style.display = 'flex';
+      var nowMs = Date.now();
+      var devColors = ['#10b981', '#38bdf8', '#a78bfa', '#f59e0b', '#fb923c', '#14b8a6'];
+      var cardsHtml = [];
+
+      for (var idx = 0; idx < orderedAccounts.length; idx++) {
+        var acctId = orderedAccounts[idx];
+        var stats = acctStatsMap[acctId] || null;
+        var aq = quotaMap[acctId] || null;
+        var devCount = stats ? stats.deviceCount : 0;
+        var devWord = devCount === 1 ? t('deviceCountSingle') : t('devicesCount');
+        var planBadge = (aq && aq.planTier)
+          ? '<span class="badge badge-accent">' + escHtml(aq.planTier) + '</span>'
+          : '';
+        var costText = stats
+          ? ('<span class="mono">' + escHtml(fmtUsd(stats.costUsd)) + ' (' + (Number(stats.share) || 0).toFixed(1) + '%) · ' + devCount + ' ' + escHtml(devWord) + '</span>')
+          : '';
+
+        var quotaBody = '';
+        if (aq && aq.quota) {
+          var windows = [];
+          var pushWin = function (label, win) {
+            if (!win) return;
+            windows.push({ label: label, win: win });
+          };
+          var qObj = aq.quota;
+          if (qObj.google) {
+            pushWin(t('quotaGoogle') + ' ' + t('quota5h'), qObj.google.five_hour);
+            pushWin(t('quotaGoogle') + ' ' + t('quotaWeek'), qObj.google.weekly);
+          }
+          if (qObj.claude) {
+            pushWin(t('quotaClaude') + ' ' + t('quota5h'), qObj.claude.five_hour);
+            pushWin(t('quotaClaude') + ' ' + t('quotaWeek'), qObj.claude.weekly);
+          }
+          if (qObj.argon) {
+            pushWin(t('quotaArgon') + ' ' + t('quota5h'), qObj.argon.five_hour);
+            pushWin(t('quotaArgon') + ' ' + t('quotaWeek'), qObj.argon.weekly);
+          }
+          if (Array.isArray(qObj.extras)) {
+            for (var ex = 0; ex < qObj.extras.length; ex++) {
+              var extra = qObj.extras[ex];
+              if (!extra || !extra.quota) continue;
+              pushWin(extra.key + ' ' + t('quota5h'), extra.quota.five_hour);
+              pushWin(extra.key + ' ' + t('quotaWeek'), extra.quota.weekly);
+            }
+          }
+
+          var freshness = '<div class="account-card-meta">' +
+            escHtml(t('quotaFrom')) + ' <b>' + escHtml(aq.reporterDeviceName || aq.reporterDeviceId) + '</b> · ' +
+            escHtml(fmtRelativeAge(aq.observedAtMs)) + '</div>';
+
+          if (windows.length) {
+            var rowsHtml = '';
+            for (var w = 0; w < windows.length; w++) {
+              var item = windows[w];
+              var resetMs = item.win.reset_time_ms;
+              var isExpired = (resetMs !== null && resetMs !== undefined && Number(resetMs) <= nowMs);
+              var pct = fmtQuotaPct(item.win.remaining_fraction);
+              var fillCls = isExpired ? 'expired' : (pct < 20 ? 'low' : (pct < 50 ? 'mid' : ''));
+              var rightText = isExpired
+                ? t('expired')
+                : (pct + '%' + (resetMs !== null && resetMs !== undefined ? (' · ' + fmtResetCountdown(resetMs)) : ''));
+              rowsHtml +=
+                '<div class="quota-row' + (isExpired ? ' quota-expired' : '') + '">' +
+                  '<div class="quota-row-top">' +
+                    '<span class="quota-row-label">' + escHtml(item.label) + '</span>' +
+                    '<span class="quota-row-val mono">' + escHtml(rightText) + '</span>' +
+                  '</div>' +
+                  '<div class="quota-track"><div class="quota-fill ' + fillCls + '" style="width:' + pct + '%"></div></div>' +
+                '</div>';
+            }
+            quotaBody = freshness + '<div class="quota-list">' + rowsHtml + '</div>';
+          } else {
+            quotaBody = freshness + '<div class="account-card-meta">' + escHtml(t('noQuotaSnapshot')) + '</div>';
+          }
+        } else {
+          quotaBody = '<div class="account-card-meta">' + escHtml(t('noQuotaSnapshot')) + '</div>';
+        }
+
+        // Device spend split bar for this account
+        var acctDevices = [];
+        var totalDevCost = 0;
+        for (var bd = 0; bd < byDevice.length; bd++) {
+          var devItem = byDevice[bd];
+          var devAccts = Array.isArray(devItem.accountIds) ? devItem.accountIds : [];
+          if (devAccts.indexOf(acctId) !== -1) {
+            acctDevices.push(devItem);
+            totalDevCost += (Number(devItem.costUsd) || 0);
+          }
+        }
+
+        var devSectionHtml = '';
+        if (acctDevices.length) {
+          var segs = '';
+          var chips = '';
+          for (var di = 0; di < acctDevices.length; di++) {
+            var dv = acctDevices[di];
+            var col = devColors[di % devColors.length];
+            var dCost = Number(dv.costUsd) || 0;
+            var pctWidth = totalDevCost > 0 ? Math.max(4, (dCost / totalDevCost) * 100) : (100 / acctDevices.length);
+            segs += '<div class="device-spend-seg" style="width:' + pctWidth.toFixed(1) + '%;background:' + col + '"></div>';
+            var isChipActive = (state.filter.device === dv.deviceId && (state.filter.account === acctId || state.filter.account === 'all'));
+            var localLbl = dv.isLocal ? (' (' + t('localDevice') + ')') : '';
+            chips += '<button type="button" class="device-chip' + (isChipActive ? ' active' : '') +
+              '" data-acct="' + escHtml(acctId) + '" data-dev="' + escHtml(dv.deviceId) + '">' +
+              '<span class="dot" style="width:7px;height:7px;background:' + col + '"></span>' +
+              '<span>' + escHtml((dv.deviceName || dv.deviceId) + localLbl) + '</span>' +
+              '<span class="mono">' + escHtml(fmtUsd(dCost)) + '</span>' +
+            '</button>';
+          }
+          devSectionHtml =
+            '<div style="display:flex;flex-direction:column;gap:6px;margin-top:auto;padding-top:4px;border-top:1px solid var(--border);">' +
+              '<div class="device-spend-bar">' + segs + '</div>' +
+              '<div class="device-chip-row">' + chips + '</div>' +
+            '</div>';
+        }
+
+        cardsHtml.push(
+          '<div class="account-card">' +
+            '<div class="account-card-header">' +
+              '<button type="button" class="account-card-title" data-acct-filter="' + escHtml(acctId) + '">' +
+                escHtml(formatAccountLabel(acctId)) +
+              '</button>' +
+              planBadge +
+            '</div>' +
+            (costText ? '<div class="account-card-meta">' + costText + '</div>' : '') +
+            quotaBody +
+            devSectionHtml +
+          '</div>'
+        );
+      }
+
+      grid.innerHTML = cardsHtml.join('');
+
+      var acctTitleBtns = grid.querySelectorAll('[data-acct-filter]');
+      for (var at = 0; at < acctTitleBtns.length; at++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            var targetAcct = btn.getAttribute('data-acct-filter') || 'all';
+            state.filter.account = (state.filter.account === targetAcct) ? 'all' : targetAcct;
+            state.filter.device = 'all';
+            fetchOverview();
+          });
+        })(acctTitleBtns[at]);
+      }
+
+      var devChips = grid.querySelectorAll('.device-chip');
+      for (var dc = 0; dc < devChips.length; dc++) {
+        (function (chip) {
+          chip.addEventListener('click', function () {
+            var targetAcct = chip.getAttribute('data-acct') || 'all';
+            var targetDev = chip.getAttribute('data-dev') || 'all';
+            if (state.filter.account === targetAcct && state.filter.device === targetDev) {
+              state.filter.device = 'all';
+            } else {
+              state.filter.account = targetAcct;
+              state.filter.device = targetDev;
+            }
+            fetchOverview();
+          });
+        })(devChips[dc]);
+      }
     }
 
     function renderMetaAndDropdowns(data) {
@@ -1580,6 +2199,9 @@
       var needle = q.toLowerCase();
       var hay = [
         s.source,
+        s.accountId,
+        s.deviceName,
+        s.deviceId,
         s.workspaceLabel,
         s.workspace,
         s.rootConversationId,
@@ -1589,7 +2211,7 @@
       if (hay.indexOf(needle) !== -1) return true;
       var kids = Array.isArray(s.children) ? s.children : [];
       for (var i = 0; i < kids.length; i++) {
-        var khay = [kids[i].source, kids[i].conversationId, (kids[i].models || []).join(' ')].join(' ').toLowerCase();
+        var khay = [kids[i].source, kids[i].deviceId, kids[i].conversationId, (kids[i].models || []).join(' ')].join(' ').toLowerCase();
         if (khay.indexOf(needle) !== -1) return true;
       }
       return false;
@@ -1629,6 +2251,11 @@
         moreWrap.style.display = 'none';
       }
 
+      var meta = (data && data.meta) || {};
+      var localDeviceId = meta.localDeviceId || '';
+      var multiAccounts = Array.isArray(meta.availableAccounts) && meta.availableAccounts.length > 1;
+      var showAcctBadge = state.filter.account === 'all' && multiAccounts;
+
       var rows = [];
       for (var idx = 0; idx < limit; idx++) {
         var s = filtered[idx];
@@ -1645,12 +2272,24 @@
         var branchTag = s.branch ? '<span class="tag mono">' + escHtml(s.branch) + '</span>' : '';
         var srcNorm = String(s.source || 'cli').toLowerCase() === 'ide' ? 'ide' : 'cli';
         var sourceBadge = '<span class="badge ' + (srcNorm === 'ide' ? 'badge-source-ide' : 'badge-source-cli') + '" style="margin-right:6px;">' + (srcNorm === 'ide' ? 'IDE' : 'CLI') + '</span>';
+        var devLabel = (s.deviceName || s.deviceId || '');
+        if (s.deviceId && s.deviceId === localDeviceId) {
+          devLabel = (devLabel && devLabel !== localDeviceId) ? (devLabel + ' · ' + t('localDevice')) : t('localDevice');
+        }
+        var deviceBadge = devLabel
+          ? '<span class="badge badge-device" title="' + escHtml(s.deviceId || '') + '">' + escHtml(devLabel) + '</span>'
+          : '';
+        var accountBadge = showAcctBadge && s.accountId
+          ? '<span class="badge badge-account">' + escHtml(formatAccountLabel(s.accountId)) + '</span>'
+          : '';
 
         rows.push(
           '<tr class="data-row ' + (hasKids ? 'expandable' : '') + '" data-session-id="' + escHtml(s.rootConversationId) + '">' +
             '<td>' +
               (hasKids ? '<span class="expand-btn ' + (isOpen ? 'open' : '') + '">▶</span>' : '<span style="display:inline-block;width:26px;"></span>') +
               sourceBadge +
+              deviceBadge +
+              accountBadge +
               '<span style="font-weight:600;" title="' + escHtml(s.workspace || '') + '">' + escHtml(s.workspaceLabel || s.workspace || '—') + '</span> ' +
               branchTag +
               '<span class="mono" style="color:var(--text-dim);font-size:11.5px;" title="' + escHtml(s.rootConversationId) + '">' + escHtml(shortId) + '</span>' +
@@ -1728,8 +2367,11 @@
     function renderAll() {
       if (!state.data) return;
       assignModelColors(state.data);
+      renderIdentityFilters(state.data);
+      renderSyncStatus();
       renderMetaAndDropdowns(state.data);
       renderSourceSummary(state.data);
+      renderAccountsQuotasPanel(state.data);
       renderKpis(state.data);
       renderCostChart(state.data);
       renderPerfChart(state.data);
@@ -1739,6 +2381,9 @@
     }
 
     var lastOverviewFetchAt = Date.now();
+    var lastRemoteSyncTriggerAt = 0;
+    var remoteSyncInFlight = false;
+    var initialRemoteSyncStarted = false;
 
     async function fetchOverview() {
       updateExportLinks();
@@ -1749,8 +2394,44 @@
         lastOverviewFetchAt = Date.now();
         state.data = json;
         renderAll();
+        if (!initialRemoteSyncStarted && json && json.syncStatus && json.syncStatus.enabled) {
+          initialRemoteSyncStarted = true;
+          triggerRemoteSync(false);
+        }
       } catch (err) {
         showBanner(t('loadFailed') + ': ' + (err && err.message ? err.message : String(err)), 'error');
+      }
+    }
+
+    async function triggerRemoteSync(force) {
+      if (remoteSyncInFlight) return null;
+      remoteSyncInFlight = true;
+      renderSyncStatus();
+      try {
+        var url = '/api/sync-remote' + (force ? '?force=true' : '');
+        var res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: !!force }),
+          cache: 'no-store'
+        });
+        var json = await res.json();
+        lastRemoteSyncTriggerAt = Date.now();
+        if (state.data && json && json.syncStatus) {
+          state.data.syncStatus = json.syncStatus;
+        }
+        if (json && json.changed) {
+          await fetchOverview();
+        }
+        return json;
+      } catch (err) {
+        if (state.data && state.data.syncStatus) {
+          state.data.syncStatus.lastError = (err && err.message) ? err.message : String(err);
+        }
+        return null;
+      } finally {
+        remoteSyncInFlight = false;
+        renderSyncStatus();
       }
     }
 
@@ -1765,14 +2446,20 @@
         if (!res.ok || !json.ok) {
           throw new Error(json.error || ('HTTP ' + res.status));
         }
-        showBanner(
-          t('syncDone') + ': ' +
+        var remoteRes = null;
+        if (state.data && state.data.syncStatus && state.data.syncStatus.enabled) {
+          remoteRes = await triggerRemoteSync(true);
+        }
+        var summaryMsg = t('syncDone') + ': ' +
           fmtInt(json.newlySyncedDbs || 0) + ' DBs / +' +
           fmtInt(json.stepsUpserted || 0) + ' ' + t('stepsUnit') +
-          ' (' + fmtInt(json.durationMs || 0) + 'ms)',
-          'success'
-        );
-        setTimeout(function () { showBanner('', ''); }, 4000);
+          ' (' + fmtInt(json.durationMs || 0) + 'ms)';
+        if (remoteRes && remoteRes.ok === false && remoteRes.error) {
+          showBanner(summaryMsg + ' · ' + t('syncOfflineError') + ': ' + remoteRes.error, 'error');
+        } else {
+          showBanner(summaryMsg, 'success');
+          setTimeout(function () { showBanner('', ''); }, 4000);
+        }
         await fetchOverview();
       } catch (err) {
         showBanner(t('syncFailed') + ': ' + (err && err.message ? err.message : String(err)), 'error');
@@ -1952,7 +2639,11 @@
       if (document.visibilityState === 'visible') {
         sendPing();
         if (Date.now() - lastOverviewFetchAt > 30000) {
-          fetchOverview();
+          fetchOverview().then(function () {
+            if (state.data && state.data.syncStatus && state.data.syncStatus.enabled && Date.now() - lastRemoteSyncTriggerAt > 30000) {
+              triggerRemoteSync(false);
+            }
+          });
         }
       }
     });

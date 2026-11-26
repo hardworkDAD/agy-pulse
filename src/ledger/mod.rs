@@ -18,10 +18,11 @@ use crate::platform;
 use crate::render::resolve_language_from_locale;
 
 pub use query::{
-    CascadeOverview, ChildConversationOverview, CsvExportKind, LedgerExportFormat,
+    AccountBreakdown, AccountOption, AccountQuotaOverview, CascadeOverview,
+    ChildConversationOverview, CsvExportKind, DeviceBreakdown, DeviceOption, LedgerExportFormat,
     LedgerGranularity, LedgerMeta, LedgerOverview, LedgerQueryFilter, LedgerSource,
     LedgerSourceFilter, LedgerSummary, LedgerTimeRange, ModelBreakdown, SourceBreakdown,
-    TimeseriesBucket,
+    SyncStatusOverview, TimeseriesBucket, redact_sync_error_message,
 };
 pub use stats_report::{
     StatsCliArgs, StatsOutputFormat, build_stats_help_text, parse_stats_args, render_stats_text,
@@ -345,6 +346,15 @@ impl LedgerStore {
         query::query_overview(&self.conn, &self.ledger_path, filter, sync::current_epoch_ms())
     }
 
+    /// Build current `SyncStatusOverview` from `ledger_meta` and active `SyncConfig`.
+    pub fn sync_status_overview(
+        &self,
+        cfg: Option<&crate::sync::SyncConfig>,
+        in_progress: bool,
+    ) -> SyncStatusOverview {
+        query::build_sync_status_overview(&self.conn, cfg, in_progress)
+    }
+
     /// Export filtered overview as pretty-printed JSON.
     pub fn export_json(&self, filter: &LedgerQueryFilter) -> Result<String, LedgerError> {
         let overview = self.query_overview(filter)?;
@@ -423,7 +433,7 @@ pub fn run_stats_cli(argv: &[String]) -> i32 {
         model: Some(args.model),
         workspace: Some(args.workspace),
         include_subagents: args.include_subagents,
-        now_ms: None,
+        ..Default::default()
     };
 
     match args.format {
