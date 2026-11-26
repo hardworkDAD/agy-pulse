@@ -293,6 +293,59 @@ pub fn resolve_antigravity_path(relative: &str) -> PathBuf {
     }
 }
 
+/// Resolve the global multi-device sync configuration file path (`agy-pulse-sync.json`).
+/// Honors `AGY_PULSE_SYNC_CONFIG` when set and non-empty; never reads workspace directories.
+pub fn resolve_sync_config_path() -> PathBuf {
+    if let Ok(override_path) = env::var("AGY_PULSE_SYNC_CONFIG") {
+        let trimmed = override_path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    resolve_antigravity_path("agy-pulse-sync.json")
+}
+
+/// Sanitize a custom or host device name by stripping control characters and trimming whitespace.
+pub fn sanitize_device_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Read optional `(defaultAccount, deviceName)` identity hints from `agy-pulse-sync.json`.
+/// Missing files, I/O errors, or malformed JSON silently return `(None, None)`.
+pub fn read_sync_identity_hints() -> (Option<String>, Option<String>) {
+    let path = resolve_sync_config_path();
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return (None, None);
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (None, None);
+    };
+    let Some(obj) = val.as_object() else {
+        return (None, None);
+    };
+
+    let default_account = obj
+        .get("defaultAccount")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .filter(|s| s != "unassigned");
+
+    let device_name = obj
+        .get("deviceName")
+        .and_then(|v| v.as_str())
+        .and_then(sanitize_device_name);
+
+    (default_account, device_name)
+}
+
 /// Resolve the directory containing the global `agy-pulse.config.json`.
 pub fn resolve_global_config_dir() -> PathBuf {
     if let Ok(override_dir) = env::var("AGY_PULSE_GLOBAL_CONFIG_DIR") {
@@ -356,12 +409,8 @@ pub fn current_username() -> Option<String> {
 }
 
 fn sanitize_hostname(raw: &str) -> Option<String> {
-    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let truncated: String = trimmed.chars().take(64).collect();
+    let cleaned = sanitize_device_name(raw)?;
+    let truncated: String = cleaned.chars().take(64).collect();
     let final_trimmed = truncated.trim();
     if final_trimmed.is_empty() {
         None

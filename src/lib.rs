@@ -48,6 +48,7 @@ Usage:\n  \
   agypl config                            Launch interactive configuration wizard (alias: --config)\n  \
   agypl install                           Deploy CLI binaries & register host statusLine (alias: --install)\n  \
   agypl uninstall [--purge-ledger]        Safely remove statusLine & caches (keeps ledger by default)\n  \
+  agypl account assign <email> [options]  Assign local unassigned records to an email\n  \
   agypl update                            Check and install the latest release (alias: --update)\n  \
   agypl help                              Show this help message (alias: --help, -h)\n  \
   agypl --version                         Show version information (alias: -V, -v, version)\n  \
@@ -304,7 +305,13 @@ fn run_sync_ledger_bg_cli(args: &[String]) -> i32 {
     let _guard = BgLedgerSyncLockGuard { token };
     let _ = panic::catch_unwind(|| {
         if let Ok(mut store) = ledger::LedgerStore::open_default() {
-            let _ = store.sync_all_if_stale(60_000, &ledger::LedgerSyncOptions::default());
+            let (default_account_id, device_name) = platform::read_sync_identity_hints();
+            let opts = ledger::LedgerSyncOptions {
+                default_account_id,
+                device_name,
+                ..Default::default()
+            };
+            let _ = store.sync_all_if_stale(60_000, &opts);
         }
     });
     0
@@ -406,11 +413,40 @@ fn run_statusline_enriched(
 
     let show_daily = cfg.display.show_daily_cost.unwrap_or(false);
     let show_weekly = cfg.display.show_weekly_cost.unwrap_or(false);
-    if (ingest.snapshot.has_conversation_identity || show_daily || show_weekly)
+    let active_account = ingest
+        .snapshot
+        .host
+        .email
+        .as_deref()
+        .and_then(domain::normalize_account_id)
+        .filter(|acct| acct != domain::UNASSIGNED_ACCOUNT_ID);
+    let has_valid_quota = ingest
+        .snapshot
+        .quota
+        .as_ref()
+        .is_some_and(|q| domain::has_valid_provider_quota(q, ingest.snapshot.observed_at_ms));
+    if (ingest.snapshot.has_conversation_identity
+        || show_daily
+        || show_weekly
+        || active_account.is_some()
+        || has_valid_quota)
         && Instant::now() < pipeline_deadline
     {
+        let (default_account, device_name_hint) = platform::read_sync_identity_hints();
+        let plan_tier = ingest
+            .snapshot
+            .host
+            .plan_tier
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
         let sync_opts = ledger::LedgerSyncOptions {
             now_ms: Some(ingest.snapshot.observed_at_ms),
+            active_account_id: active_account.clone(),
+            default_account_id: default_account.clone(),
+            device_name: device_name_hint.clone(),
+            plan_tier: plan_tier.clone(),
             ..Default::default()
         };
         profile::set_stage(profile::Stage::LedgerOpen);
@@ -419,6 +455,10 @@ fn run_statusline_enriched(
         l_open_ms = t_l_open.elapsed().as_millis() as u64;
         match opened {
             Ok(mut store) => {
+                if let Some(ref acct) = active_account {
+                    let _ = store.set_last_observed_email(acct);
+                }
+
                 profile::set_stage(profile::Stage::LedgerBgSyncSpawn);
                 let t_l_bg = Instant::now();
                 if (show_daily || show_weekly)
@@ -463,7 +503,9 @@ fn run_statusline_enriched(
                 };
                 profile::set_stage(profile::Stage::LedgerRolling);
                 let t_l_roll = Instant::now();
-                if Instant::now() < pipeline_deadline {
+                if (ingest.snapshot.has_conversation_identity || show_daily || show_weekly)
+                    && Instant::now() < pipeline_deadline
+                {
                     match store.record_rolling_costs(&rolling_input) {
                         Ok(Some(totals)) => {
                             ingest.snapshot.cost.today_usd = Some(totals.today_usd);
@@ -478,6 +520,39 @@ fn run_statusline_enriched(
                     }
                 }
                 l_roll_ms = t_l_roll.elapsed().as_millis() as u64;
+
+                if has_valid_quota
+                    && Instant::now() < pipeline_deadline
+                    && let Some(ref quota) = ingest.snapshot.quota
+                    && let Ok(local_device_id) = store.local_device_id()
+                {
+                    let quota_account_id = active_account
+                        .clone()
+                        .or_else(|| default_account.clone())
+                        .or_else(|| store.last_observed_email().ok().flatten())
+                        .unwrap_or_else(|| domain::UNASSIGNED_ACCOUNT_ID.to_string());
+                    let resolved_device_name = device_name_hint
+                        .clone()
+                        .or_else(platform::current_hostname)
+                        .unwrap_or_else(|| "local".to_string());
+                    let qs = domain::QuotaSnapshot {
+                        account_id: quota_account_id.clone(),
+                        device_id: local_device_id.clone(),
+                        device_name: resolved_device_name.clone(),
+                        plan_tier: plan_tier.clone(),
+                        observed_at_ms: ingest.snapshot.observed_at_ms,
+                        quota: quota.clone(),
+                    };
+                    let _ = store.upsert_quota_snapshot(&qs);
+                    let _ = store.upsert_sync_device(
+                        &quota_account_id,
+                        &local_device_id,
+                        &resolved_device_name,
+                        true,
+                        ingest.snapshot.observed_at_ms,
+                        plan_tier.as_deref(),
+                    );
+                }
             }
             Err(err) => {
                 platform::write_error_log_safely(&format!("Ledger open error: {err}"));
@@ -612,6 +687,10 @@ pub fn run_cli() -> i32 {
 
     if matches!(first, Some("uninstall")) || args.iter().any(|a| a == "--uninstall") {
         return ops::run_uninstall_cli(&args);
+    }
+
+    if matches!(first, Some("account")) {
+        return ops::run_account_cli(&args);
     }
 
     if matches!(first, Some("update")) || args.iter().any(|a| a == "--update") {

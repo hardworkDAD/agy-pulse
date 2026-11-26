@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use crate::config::{self, LanguageSetting};
+use crate::domain::QuotaSnapshot;
 use crate::platform;
 use crate::render::resolve_language_from_locale;
 
@@ -22,8 +23,8 @@ pub use stats_report::{
     StatsCliArgs, StatsOutputFormat, build_stats_help_text, parse_stats_args, render_stats_text,
 };
 pub use sync::{
-    LedgerSyncOptions, LedgerSyncReport, RollingCostInput, RollingCostTotals, SingleSyncReport,
-    SourceRoot,
+    AccountAssignReport, LedgerSyncOptions, LedgerSyncReport, RollingCostInput,
+    RollingCostTotals, SingleSyncReport, SourceRoot, validate_and_normalize_account_email,
 };
 
 /// Errors returned by `LedgerStore` operations.
@@ -35,6 +36,8 @@ pub enum LedgerError {
     Io(#[from] std::io::Error),
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Invalid account email: {0}")]
+    InvalidAccountEmail(String),
 }
 
 /// Deep module owning the unified `agy-pulse-ledger.sqlite` (WAL) connection.
@@ -91,6 +94,43 @@ impl LedgerStore {
     /// Return this machine's immutable local `device_id` stored in `ledger_meta`.
     pub fn local_device_id(&self) -> Result<String, LedgerError> {
         schema::read_local_device_id(&self.conn).map_err(LedgerError::from)
+    }
+
+    /// Return the normalized `last_observed_email` persisted in `ledger_meta`, if any.
+    pub fn last_observed_email(&self) -> Result<Option<String>, LedgerError> {
+        sync::last_observed_email(&self.conn)
+    }
+
+    /// Normalize and persist `last_observed_email` in `ledger_meta`, skipping writes when unchanged.
+    pub fn set_last_observed_email(&self, email: &str) -> Result<(), LedgerError> {
+        sync::set_last_observed_email(&self.conn, email, self.max_retries)
+    }
+
+    /// Persist a device quota observation snapshot into `quota_snapshots`.
+    pub fn upsert_quota_snapshot(&self, snapshot: &QuotaSnapshot) -> Result<(), LedgerError> {
+        sync::upsert_quota_snapshot(&self.conn, snapshot, self.max_retries)
+    }
+
+    /// Return the latest `QuotaSnapshot` per `account_id` (`observed_at_ms` max, tie-broken by `device_id ASC`),
+    /// sorted by `account_id ASC`. Corrupted `quota_json` rows are gracefully skipped.
+    pub fn query_latest_account_quotas(&self) -> Result<Vec<QuotaSnapshot>, LedgerError> {
+        sync::query_latest_account_quotas(&self.conn)
+    }
+
+    /// Reassign local `'unassigned'` conversations and steps to `email`.
+    pub fn assign_unassigned_account(
+        &self,
+        email: &str,
+        workspace_substr: Option<&str>,
+        dry_run: bool,
+    ) -> Result<AccountAssignReport, LedgerError> {
+        sync::assign_unassigned_account(
+            &self.conn,
+            email,
+            workspace_substr,
+            dry_run,
+            self.max_retries,
+        )
     }
 
     /// Atomically purge all remote-device rows and pull chunk states inside a single Immediate transaction,
@@ -227,8 +267,14 @@ pub fn run_stats_cli(argv: &[String]) -> i32 {
         }
     };
 
+    let (default_account_id, device_name) = platform::read_sync_identity_hints();
+    let sync_opts = LedgerSyncOptions {
+        default_account_id,
+        device_name,
+        ..Default::default()
+    };
     if !args.no_sync
-        && let Err(err) = store.sync_all(&LedgerSyncOptions::default())
+        && let Err(err) = store.sync_all(&sync_opts)
     {
         platform::write_error_log_safely(&format!("Ledger sync error in stats: {err}"));
     }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::domain::{
-    TokenUsage, UNASSIGNED_ACCOUNT_ID, calculate_token_cost, normalize_account_id,
+    ProviderQuotaSummary, QuotaSnapshot, TokenUsage, UNASSIGNED_ACCOUNT_ID, calculate_token_cost,
+    normalize_account_id,
 };
 use crate::ingest::HostReader;
 use crate::platform;
@@ -39,6 +40,97 @@ pub struct LedgerSyncOptions {
     pub force: bool,
     pub throttle_ms: Option<i64>,
     pub now_ms: Option<i64>,
+    pub active_account_id: Option<String>,
+    pub default_account_id: Option<String>,
+    pub device_name: Option<String>,
+    pub plan_tier: Option<String>,
+}
+
+/// Result summary returned by `LedgerStore::assign_unassigned_account`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountAssignReport {
+    pub account_id: String,
+    pub conversations_updated: usize,
+    pub steps_updated: usize,
+    pub dry_run: bool,
+}
+
+/// Validate and normalize an account email address (`<non-empty>@<non-empty>`, no whitespace/control chars).
+pub fn validate_and_normalize_account_email(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let (local, domain) = trimmed.split_once('@')?;
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
+fn normalize_non_unassigned_account(raw: Option<&str>) -> Option<String> {
+    raw.and_then(normalize_account_id)
+        .filter(|acct| acct != UNASSIGNED_ACCOUNT_ID)
+}
+
+fn resolve_effective_device_name(hint: Option<&str>) -> String {
+    hint.and_then(platform::sanitize_device_name)
+        .or_else(platform::current_hostname)
+        .unwrap_or_else(|| "local".to_string())
+}
+
+struct BatchSyncPolicy {
+    allow_active_account: bool,
+    active_account_id: Option<String>,
+    default_account_id: Option<String>,
+    device_name: String,
+    plan_tier: Option<String>,
+    now_ms: i64,
+}
+
+impl BatchSyncPolicy {
+    fn from_options(options: &LedgerSyncOptions, allow_active_account: bool, now_ms: i64) -> Self {
+        Self {
+            allow_active_account,
+            active_account_id: if allow_active_account {
+                normalize_non_unassigned_account(options.active_account_id.as_deref())
+            } else {
+                None
+            },
+            default_account_id: normalize_non_unassigned_account(
+                options.default_account_id.as_deref(),
+            ),
+            device_name: resolve_effective_device_name(options.device_name.as_deref()),
+            plan_tier: options
+                .plan_tier
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
+            now_ms,
+        }
+    }
+
+    fn resolve_fallback_account(
+        &self,
+        source: LedgerSource,
+        last_observed_email: Option<&str>,
+    ) -> String {
+        if self.allow_active_account
+            && source == LedgerSource::Cli
+            && let Some(ref active) = self.active_account_id
+        {
+            return active.clone();
+        }
+        if let Some(ref default_acct) = self.default_account_id {
+            return default_acct.clone();
+        }
+        if let Some(last) = last_observed_email {
+            return last.to_string();
+        }
+        UNASSIGNED_ACCOUNT_ID.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -420,16 +512,79 @@ fn build_ingestion_records(target: &IngestionTarget<'_>) -> Option<IngestedConve
     Some(IngestedConversationBatch { db_row, steps })
 }
 
+fn read_last_observed_email_from_conn(conn: &Connection) -> Result<Option<String>, rusqlite::Error> {
+    let raw = conn
+        .query_row(
+            "SELECT value FROM ledger_meta WHERE key = 'last_observed_email'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(normalize_non_unassigned_account(raw.as_deref()))
+}
+
+fn upsert_sync_device_on_conn(
+    conn: &Connection,
+    account_id: &str,
+    device_id: &str,
+    device_name: &str,
+    is_local: bool,
+    last_seen_ms: i64,
+    plan_tier: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    let normalized_account =
+        normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+    let trimmed_device_id = device_id.trim();
+    let sanitized_name = platform::sanitize_device_name(device_name);
+    let effective_device_name = sanitized_name.as_deref().unwrap_or(trimmed_device_id);
+
+    conn.execute(
+        "INSERT INTO sync_devices (account_id, device_id, device_name, is_local, last_seen_ms, plan_tier)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(account_id, device_id) DO UPDATE SET
+           device_name = excluded.device_name,
+           is_local = excluded.is_local,
+           last_seen_ms = MAX(sync_devices.last_seen_ms, excluded.last_seen_ms),
+           plan_tier = COALESCE(excluded.plan_tier, sync_devices.plan_tier)",
+        params![
+            &normalized_account,
+            trimmed_device_id,
+            effective_device_name,
+            i64::from(is_local),
+            last_seen_ms,
+            plan_tier,
+        ],
+    )?;
+    if is_local && normalized_account != UNASSIGNED_ACCOUNT_ID {
+        conn.execute(
+            "DELETE FROM sync_devices
+             WHERE account_id = 'unassigned'
+               AND device_id = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM ingested_dbs WHERE device_id = ?1 AND account_id = 'unassigned'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM quota_snapshots WHERE device_id = ?1 AND account_id = 'unassigned'
+               )",
+            params![trimmed_device_id],
+        )?;
+    }
+    Ok(())
+}
+
 fn upsert_batches(
     conn: &mut Connection,
     batches: &[IngestedConversationBatch],
     full_scan_ts_ms: Option<i64>,
+    policy: &BatchSyncPolicy,
     max_retries: u32,
 ) -> Result<usize, LedgerError> {
     run_with_busy_retry_n(max_retries, || {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let local_device_id = read_local_device_id(&tx)?;
+        let last_observed = read_last_observed_email_from_conn(&tx)?;
         let mut steps_upserted = 0usize;
+        let mut touched_accounts: BTreeSet<String> = BTreeSet::new();
         {
             let mut check_db_stmt = tx.prepare(
                 "SELECT account_id, device_id FROM ingested_dbs WHERE conversation_id = ?1",
@@ -441,6 +596,13 @@ fn upsert_batches(
                    AND account_id != 'unassigned'
                    AND account_id != ''
                  LIMIT 1",
+            )?;
+            let mut upgrade_steps_stmt = tx.prepare(
+                "UPDATE telemetry_steps
+                 SET account_id = ?1
+                 WHERE conversation_id = ?2
+                   AND (device_id = ?3 OR device_id = '')
+                   AND (account_id = 'unassigned' OR account_id = '')",
             )?;
             let mut db_stmt = tx.prepare(
                 "INSERT INTO ingested_dbs (
@@ -523,7 +685,7 @@ fn upsert_batches(
                     .and_then(|(acct, _)| normalize_account_id(acct))
                     .filter(|acct| acct != UNASSIGNED_ACCOUNT_ID);
                 let account_id = match existing_acct {
-                    Some(acct) => acct,
+                    Some(ref acct) => acct.clone(),
                     None => check_step_acct_stmt
                         .query_row(params![d.conversation_id, &local_device_id], |r| {
                             r.get::<_, String>(0)
@@ -531,8 +693,21 @@ fn upsert_batches(
                         .optional()?
                         .and_then(|s| normalize_account_id(&s))
                         .filter(|acct| acct != UNASSIGNED_ACCOUNT_ID)
-                        .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string()),
+                        .unwrap_or_else(|| {
+                            policy.resolve_fallback_account(d.source, last_observed.as_deref())
+                        }),
                 };
+
+                if existing_row.is_some()
+                    && existing_acct.is_none()
+                    && account_id != UNASSIGNED_ACCOUNT_ID
+                {
+                    upgrade_steps_stmt.execute(params![
+                        &account_id,
+                        &d.conversation_id,
+                        &local_device_id,
+                    ])?;
+                }
 
                 db_stmt.execute(params![
                     d.conversation_id,
@@ -581,7 +756,24 @@ fn upsert_batches(
                         steps_upserted += 1;
                     }
                 }
+                touched_accounts.insert(account_id);
             }
+        }
+        for acct in &touched_accounts {
+            let tier = match (&policy.active_account_id, &policy.plan_tier) {
+                (Some(active), Some(t)) if active == acct => Some(t.as_str()),
+                (None, Some(t)) => Some(t.as_str()),
+                _ => None,
+            };
+            upsert_sync_device_on_conn(
+                &tx,
+                acct,
+                &local_device_id,
+                &policy.device_name,
+                true,
+                policy.now_ms,
+                tier,
+            )?;
         }
         if let Some(ts) = full_scan_ts_ms {
             tx.execute(
@@ -603,6 +795,9 @@ pub(super) fn sync_all(
     let started = Instant::now();
     let now_ms = options.now_ms.unwrap_or_else(current_epoch_ms);
     let local_device_id = read_local_device_id(conn)?;
+    let policy = BatchSyncPolicy::from_options(options, false, now_ms);
+    let last_observed = read_last_observed_email_from_conn(conn)?;
+    let can_upgrade_unassigned = policy.default_account_id.is_some() || last_observed.is_some();
     let source_roots = resolve_source_roots(options);
     let discovered = list_all_conversation_dbs(&source_roots);
 
@@ -615,21 +810,23 @@ pub(super) fn sync_all(
         }
     }
 
-    let mut existing: HashMap<String, (String, LedgerSource)> = HashMap::new();
+    let mut existing: HashMap<String, (String, LedgerSource, String)> = HashMap::new();
     let mut remote_owned_ids: HashSet<String> = HashSet::new();
     {
-        let mut stmt =
-            conn.prepare("SELECT conversation_id, sig, source, device_id FROM ingested_dbs")?;
+        let mut stmt = conn.prepare(
+            "SELECT conversation_id, sig, source, device_id, account_id FROM ingested_dbs",
+        )?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let cid: String = row.get(0)?;
             let sig: String = row.get(1)?;
             let src_raw: String = row.get(2)?;
             let dev: String = row.get(3)?;
+            let acct: String = row.get(4)?;
             if !dev.is_empty() && dev != local_device_id {
                 remote_owned_ids.insert(cid);
             } else {
-                existing.insert(cid, (sig, LedgerSource::from_raw(&src_raw)));
+                existing.insert(cid, (sig, LedgerSource::from_raw(&src_raw), acct));
             }
         }
     }
@@ -643,11 +840,14 @@ pub(super) fn sync_all(
             continue;
         };
         if !options.force
-            && let Some((prev_sig, prev_src)) = existing.get(&item.conversation_id)
+            && let Some((prev_sig, prev_src, prev_acct)) = existing.get(&item.conversation_id)
             && *prev_sig == sig
             && *prev_src == item.source
         {
-            continue;
+            let prev_is_unassigned = normalize_non_unassigned_account(Some(prev_acct)).is_none();
+            if !(prev_is_unassigned && can_upgrade_unassigned) {
+                continue;
+            }
         }
         if let Some(batch) = build_ingestion_records(&IngestionTarget {
             conversation_id: &item.conversation_id,
@@ -673,7 +873,7 @@ pub(super) fn sync_all(
         })?;
         0
     } else {
-        upsert_batches(conn, &batches, Some(now_ms), DEFAULT_BUSY_RETRIES)?
+        upsert_batches(conn, &batches, Some(now_ms), &policy, DEFAULT_BUSY_RETRIES)?
     };
 
     Ok(LedgerSyncReport {
@@ -744,6 +944,8 @@ pub(super) fn sync_conversation(
     let now_ms = options.now_ms.unwrap_or_else(current_epoch_ms);
     let throttle_ms = options.throttle_ms.unwrap_or(SYNC_THROTTLE_MS).max(0);
     let local_device_id = read_local_device_id(conn)?;
+    let policy = BatchSyncPolicy::from_options(options, true, now_ms);
+    let last_observed = read_last_observed_email_from_conn(conn)?;
     let source_roots = resolve_source_roots(options);
 
     let mut targets: Vec<(&str, bool)> = vec![(conversation_id, false)];
@@ -765,25 +967,29 @@ pub(super) fn sync_conversation(
             continue;
         };
 
-        let existing: Option<(String, LedgerSource, i64, String)> = conn
+        let existing: Option<(String, LedgerSource, i64, String, String)> = conn
             .query_row(
-                "SELECT sig, source, last_synced_ms, device_id FROM ingested_dbs WHERE conversation_id = ?1",
+                "SELECT sig, source, last_synced_ms, device_id, account_id FROM ingested_dbs WHERE conversation_id = ?1",
                 params![cid],
                 |r| {
                     let s: String = r.get(0)?;
                     let src: String = r.get(1)?;
                     let last_synced_ms: i64 = r.get(2)?;
                     let dev: String = r.get(3)?;
-                    Ok((s, LedgerSource::from_raw(&src), last_synced_ms, dev))
+                    let acct: String = r.get(4)?;
+                    Ok((s, LedgerSource::from_raw(&src), last_synced_ms, dev, acct))
                 },
             )
             .optional()?;
 
-        if let Some((prev_sig, prev_src, prev_last_synced_ms, prev_dev)) = existing {
+        if let Some((prev_sig, prev_src, prev_last_synced_ms, prev_dev, prev_acct)) = existing {
             if !prev_dev.is_empty() && prev_dev != local_device_id {
                 continue;
             }
-            if !options.force {
+            let prev_is_unassigned = normalize_non_unassigned_account(Some(&prev_acct)).is_none();
+            let resolved_acct = policy.resolve_fallback_account(source, last_observed.as_deref());
+            let needs_account_upgrade = prev_is_unassigned && resolved_acct != UNASSIGNED_ACCOUNT_ID;
+            if !options.force && !needs_account_upgrade {
                 if prev_sig == sig && prev_src == source {
                     continue;
                 }
@@ -823,7 +1029,7 @@ pub(super) fn sync_conversation(
     }
 
     let synced_dbs = batches.len();
-    let steps_upserted = upsert_batches(conn, &batches, None, max_retries)?;
+    let steps_upserted = upsert_batches(conn, &batches, None, &policy, max_retries)?;
     Ok(SingleSyncReport {
         ok: true,
         skipped: false,
@@ -1334,35 +1540,252 @@ pub(super) fn upsert_sync_device(
     plan_tier: Option<&str>,
     max_retries: u32,
 ) -> Result<(), LedgerError> {
-    let normalized_account = normalize_account_id(account_id)
-        .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
-    let trimmed_device_id = device_id.trim();
-    let trimmed_device_name = device_name.trim();
-    let effective_device_name = if trimmed_device_name.is_empty() {
-        trimmed_device_id
-    } else {
-        trimmed_device_name
+    run_with_busy_retry_n(max_retries, || {
+        upsert_sync_device_on_conn(
+            conn,
+            account_id,
+            device_id,
+            device_name,
+            is_local,
+            last_seen_ms,
+            plan_tier,
+        )
+    })
+    .map_err(LedgerError::from)
+}
+
+pub(super) fn last_observed_email(conn: &Connection) -> Result<Option<String>, LedgerError> {
+    read_last_observed_email_from_conn(conn).map_err(LedgerError::from)
+}
+
+pub(super) fn set_last_observed_email(
+    conn: &Connection,
+    email: &str,
+    max_retries: u32,
+) -> Result<(), LedgerError> {
+    let Some(normalized) = normalize_non_unassigned_account(Some(email)) else {
+        return Ok(());
     };
+    if let Ok(Some(current)) = read_last_observed_email_from_conn(conn)
+        && current == normalized
+    {
+        return Ok(());
+    }
+    run_with_busy_retry_n(max_retries, || {
+        conn.execute(
+            "INSERT OR REPLACE INTO ledger_meta (key, value) VALUES ('last_observed_email', ?1)",
+            params![&normalized],
+        )?;
+        Ok(())
+    })
+    .map_err(LedgerError::from)
+}
+
+pub(super) fn upsert_quota_snapshot(
+    conn: &Connection,
+    snapshot: &QuotaSnapshot,
+    max_retries: u32,
+) -> Result<(), LedgerError> {
+    let account_id = normalize_account_id(&snapshot.account_id)
+        .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+    let local_device_id = if snapshot.device_id.trim().is_empty() {
+        Some(read_local_device_id(conn)?)
+    } else {
+        None
+    };
+    let device_id = local_device_id
+        .as_deref()
+        .unwrap_or_else(|| snapshot.device_id.trim());
+    let sanitized_name = platform::sanitize_device_name(&snapshot.device_name);
+    let device_name = sanitized_name.as_deref().unwrap_or(device_id);
+    let plan_tier = snapshot
+        .plan_tier
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let quota_json = serde_json::to_string(&snapshot.quota)?;
 
     run_with_busy_retry_n(max_retries, || {
         conn.execute(
-            "INSERT INTO sync_devices (account_id, device_id, device_name, is_local, last_seen_ms, plan_tier)
+            "INSERT INTO quota_snapshots (account_id, device_id, device_name, plan_tier, observed_at_ms, quota_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(account_id, device_id) DO UPDATE SET
                device_name = excluded.device_name,
-               is_local = excluded.is_local,
-               last_seen_ms = excluded.last_seen_ms,
-               plan_tier = excluded.plan_tier",
+               plan_tier = COALESCE(excluded.plan_tier, quota_snapshots.plan_tier),
+               observed_at_ms = excluded.observed_at_ms,
+               quota_json = excluded.quota_json
+             WHERE excluded.observed_at_ms >= quota_snapshots.observed_at_ms",
             params![
-                &normalized_account,
-                trimmed_device_id,
-                effective_device_name,
-                i64::from(is_local),
-                last_seen_ms,
+                &account_id,
+                device_id,
+                device_name,
                 plan_tier,
+                snapshot.observed_at_ms,
+                &quota_json,
             ],
         )?;
         Ok(())
+    })
+    .map_err(LedgerError::from)
+}
+
+pub(super) fn query_latest_account_quotas(
+    conn: &Connection,
+) -> Result<Vec<QuotaSnapshot>, LedgerError> {
+    let mut stmt = conn.prepare(
+        "SELECT account_id, device_id, device_name, plan_tier, observed_at_ms, quota_json
+         FROM quota_snapshots
+         ORDER BY account_id ASC, observed_at_ms DESC, device_id ASC",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut best_by_account: HashMap<String, QuotaSnapshot> = HashMap::new();
+
+    while let Some(row) = rows.next()? {
+        let raw_account: String = row.get(0)?;
+        let device_id: String = row.get(1)?;
+        let device_name: String = row.get(2)?;
+        let plan_tier: Option<String> = row.get(3)?;
+        let observed_at_ms: i64 = row.get(4)?;
+        let quota_json: String = row.get(5)?;
+
+        let Ok(quota) = serde_json::from_str::<ProviderQuotaSummary>(&quota_json) else {
+            continue;
+        };
+        let account_id =
+            normalize_account_id(&raw_account).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+        let candidate = QuotaSnapshot {
+            account_id: account_id.clone(),
+            device_id,
+            device_name,
+            plan_tier,
+            observed_at_ms,
+            quota,
+        };
+
+        let replace = match best_by_account.get(&account_id) {
+            None => true,
+            Some(best) => {
+                candidate.observed_at_ms > best.observed_at_ms
+                    || (candidate.observed_at_ms == best.observed_at_ms
+                        && candidate.device_id < best.device_id)
+            }
+        };
+        if replace {
+            best_by_account.insert(account_id, candidate);
+        }
+    }
+
+    let mut result: Vec<QuotaSnapshot> = best_by_account.into_values().collect();
+    result.sort_by(|a, b| a.account_id.cmp(&b.account_id));
+    Ok(result)
+}
+
+fn find_matching_unassigned_conversations(
+    conn: &Connection,
+    local_device_id: &str,
+    workspace_filter: Option<&str>,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT conversation_id, workspace
+         FROM ingested_dbs
+         WHERE device_id = ?1 AND account_id = 'unassigned'",
+    )?;
+    let mut rows = stmt.query(params![local_device_id])?;
+    let mut matched = Vec::new();
+    while let Some(row) = rows.next()? {
+        let cid: String = row.get(0)?;
+        let ws: Option<String> = row.get(1)?;
+        let is_match = match workspace_filter {
+            Some(sub) => ws.as_deref().is_some_and(|w| w.contains(sub)),
+            None => true,
+        };
+        if is_match {
+            matched.push(cid);
+        }
+    }
+    Ok(matched)
+}
+
+pub(super) fn assign_unassigned_account(
+    conn: &Connection,
+    email: &str,
+    workspace_substr: Option<&str>,
+    dry_run: bool,
+    max_retries: u32,
+) -> Result<AccountAssignReport, LedgerError> {
+    let normalized_email = validate_and_normalize_account_email(email)
+        .ok_or_else(|| LedgerError::InvalidAccountEmail(email.trim().to_string()))?;
+    let ws_filter = workspace_substr.filter(|s| !s.trim().is_empty());
+
+    if dry_run {
+        let local_device_id = read_local_device_id(conn)?;
+        let matched = find_matching_unassigned_conversations(conn, &local_device_id, ws_filter)?;
+        let mut steps_updated = 0usize;
+        let mut count_stmt = conn.prepare(
+            "SELECT COUNT(*) FROM telemetry_steps
+             WHERE conversation_id = ?1 AND device_id = ?2 AND account_id = 'unassigned'",
+        )?;
+        for cid in &matched {
+            let count: i64 = count_stmt.query_row(params![cid, &local_device_id], |r| r.get(0))?;
+            steps_updated += usize::try_from(count.max(0)).unwrap_or(0);
+        }
+        return Ok(AccountAssignReport {
+            account_id: normalized_email,
+            conversations_updated: matched.len(),
+            steps_updated,
+            dry_run: true,
+        });
+    }
+
+    let now_ms = current_epoch_ms();
+    let (_, device_name_hint) = platform::read_sync_identity_hints();
+    let device_name = resolve_effective_device_name(device_name_hint.as_deref());
+
+    run_with_busy_retry_n(max_retries, || {
+        let tx = ImmediateTxGuard::begin(conn)?;
+        let local_device_id = read_local_device_id(conn)?;
+        let matched = find_matching_unassigned_conversations(conn, &local_device_id, ws_filter)?;
+
+        let mut conversations_updated = 0usize;
+        let mut steps_updated = 0usize;
+        {
+            let mut upd_db = conn.prepare(
+                "UPDATE ingested_dbs
+                 SET account_id = ?1
+                 WHERE conversation_id = ?2 AND device_id = ?3 AND account_id = 'unassigned'",
+            )?;
+            let mut upd_steps = conn.prepare(
+                "UPDATE telemetry_steps
+                 SET account_id = ?1
+                 WHERE conversation_id = ?2 AND device_id = ?3 AND account_id = 'unassigned'",
+            )?;
+            for cid in &matched {
+                conversations_updated +=
+                    upd_db.execute(params![&normalized_email, cid, &local_device_id])?;
+                steps_updated +=
+                    upd_steps.execute(params![&normalized_email, cid, &local_device_id])?;
+            }
+        }
+
+        if conversations_updated > 0 || steps_updated > 0 {
+            upsert_sync_device_on_conn(
+                conn,
+                &normalized_email,
+                &local_device_id,
+                &device_name,
+                true,
+                now_ms,
+                None,
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(AccountAssignReport {
+            account_id: normalized_email.clone(),
+            conversations_updated,
+            steps_updated,
+            dry_run: false,
+        })
     })
     .map_err(LedgerError::from)
 }

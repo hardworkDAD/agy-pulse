@@ -1,3 +1,4 @@
+mod account;
 mod installer;
 mod uninstall;
 mod updater;
@@ -6,6 +7,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+pub use account::run_account_cli;
 pub use updater::{
     UpdateStatusRecord, maybe_spawn_background_update_check, read_available_update_version,
     validate_redirect_url, validate_release_url,
