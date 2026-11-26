@@ -137,21 +137,20 @@ fn generate_csrf_token() -> String {
     hex::encode(hasher.finalize())
 }
 
-struct ServerSharedState {
-    port: u16,
+pub(super) struct ServerSharedState {
+    pub(super) port: u16,
     default_lang: LanguageSetting,
     no_sync: bool,
-    idle_timeout_ms: u64,
+    pub(super) idle_timeout_ms: u64,
     auto_sync_interval_ms: u64,
     sse_ping_interval: Duration,
     started_at: String,
     ledger_path: PathBuf,
     pub(super) csrf_token: String,
-    #[allow(dead_code)]
     pub(super) pulse_config_lock: Mutex<()>,
     #[allow(dead_code)]
     pub(super) sync_config_lock: Mutex<()>,
-    keepalive: Arc<KeepaliveState>,
+    pub(super) keepalive: Arc<KeepaliveState>,
     shutdown: AtomicBool,
     sync_remote_in_progress: Arc<AtomicBool>,
     last_remote_sync_instant: Mutex<Option<Instant>>,
@@ -497,7 +496,7 @@ struct WebManifest<'a> {
     icons: [ManifestIcon<'a>; 1],
 }
 
-fn send_json_value<T: Serialize>(
+pub(super) fn send_json_value<T: Serialize>(
     stream: &mut TcpStream,
     status: u16,
     payload: &T,
@@ -885,6 +884,12 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
     let params = parse_query_params(&req.query);
 
     match req.pathname.as_str() {
+        "/api/config/pulse" => {
+            super::config_api::handle_pulse_config_route(stream, req, shared);
+        }
+        "/api/config/pulse/preview" => {
+            super::config_api::handle_pulse_preview_route(stream, req, shared);
+        }
         "/api/health" => {
             if method != "GET" {
                 send_error_json(stream, 405, "Method Not Allowed");

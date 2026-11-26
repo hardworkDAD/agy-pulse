@@ -252,7 +252,6 @@ pub(super) fn is_allowed_origin(origin_header: Option<&str>, actual_port: u16) -
 }
 
 /// Enforce strict same-origin constraints for browser-initiated mutating/config requests.
-#[allow(dead_code)]
 pub(super) fn is_strict_same_origin(req: &HttpRequest, actual_port: u16) -> bool {
     if let Some(sec_fetch_site) = req.header("sec-fetch-site")
         && !sec_fetch_site.trim().eq_ignore_ascii_case("same-origin")
@@ -269,7 +268,6 @@ pub(super) fn is_strict_same_origin(req: &HttpRequest, actual_port: u16) -> bool
 }
 
 /// Constant-time byte slice comparison (returns `false` immediately on length mismatch).
-#[allow(dead_code)]
 pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -282,7 +280,6 @@ pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Check that the `Content-Type` header media type (before `;`) equals `application/json`.
-#[allow(dead_code)]
 pub(super) fn is_json_content_type(req: &HttpRequest) -> bool {
     let Some(ct) = req.header("content-type") else {
         return false;
