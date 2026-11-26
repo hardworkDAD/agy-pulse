@@ -1001,3 +1001,70 @@ fn t12_config_0600_env_overrides_redaction_and_security_boundaries() {
     assert!(!lock_path.exists());
     assert_eq!(UNASSIGNED_ACCOUNT_ID, "unassigned");
 }
+
+#[test]
+fn t12_sync_config_raw_load_env_metadata_and_delete() {
+    use agy_pulse::sync::{
+        active_sync_env_overrides, delete_sync_config_at, load_sync_config_raw_from,
+    };
+    use sha2::{Digest, Sha256};
+
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let cfg_path = temp.path().join("agy-pulse-sync.json");
+
+    // Absent raw load & delete
+    assert!(load_sync_config_raw_from(&cfg_path).unwrap().is_none());
+    assert!(!delete_sync_config_at(&cfg_path).unwrap());
+
+    let disk_cfg = SyncConfig {
+        enabled: true,
+        device_id: Some("dev_raw1".to_string()),
+        device_name: Some("raw-box".to_string()),
+        default_account: Some("raw@example.com".to_string()),
+        push_interval_sec: 120,
+        prefix: "raw-prefix".to_string(),
+        remote: RemoteConfig::WebDav {
+            url: "https://dav.example.com/root".to_string(),
+            username: Some("alice".to_string()),
+            password: Some("disk-pw-only".to_string()),
+            token: Some("disk-tok-only".to_string()),
+            allow_insecure_http: false,
+        },
+    };
+    save_sync_config_to(&cfg_path, &disk_cfg).unwrap();
+
+    let mut env_guard = EnvGuard::new();
+    env_guard.set("AGY_PULSE_SYNC_PASSWORD", "env-pw-secret");
+    env_guard.set("AGY_PULSE_SYNC_TOKEN", "env-tok-secret");
+    env_guard.set("AGY_PULSE_S3_ACCESS_KEY", "env-ak-secret");
+    env_guard.set("AGY_PULSE_S3_SECRET_KEY", "env-sk-secret");
+
+    // Env overrides metadata exposes only env var names
+    let env_meta = active_sync_env_overrides();
+    assert_eq!(env_meta.password, Some("AGY_PULSE_SYNC_PASSWORD"));
+    assert_eq!(env_meta.token, Some("AGY_PULSE_SYNC_TOKEN"));
+    assert_eq!(env_meta.access_key, Some("AGY_PULSE_S3_ACCESS_KEY"));
+    assert_eq!(env_meta.secret_key, Some("AGY_PULSE_S3_SECRET_KEY"));
+
+    // Raw loader returns disk credentials untouched and exact SHA-256 hex digest
+    let (raw_cfg, raw_ver) = load_sync_config_raw_from(&cfg_path)
+        .unwrap()
+        .expect("raw sync config should exist");
+    let expected_ver = hex::encode(Sha256::digest(fs::read(&cfg_path).unwrap()));
+    assert_eq!(raw_ver, expected_ver);
+    match raw_cfg.remote {
+        RemoteConfig::WebDav {
+            password, token, ..
+        } => {
+            assert_eq!(password.as_deref(), Some("disk-pw-only"));
+            assert_eq!(token.as_deref(), Some("disk-tok-only"));
+        }
+        other => panic!("unexpected remote variant: {other:?}"),
+    }
+
+    // Delete removes only the config file and is idempotent
+    assert!(delete_sync_config_at(&cfg_path).unwrap());
+    assert!(!cfg_path.exists());
+    assert!(!delete_sync_config_at(&cfg_path).unwrap());
+}

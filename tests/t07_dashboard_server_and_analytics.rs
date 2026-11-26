@@ -1756,3 +1756,188 @@ fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
     let last_err = bad_ov["syncStatus"]["lastError"].as_str().unwrap();
     assert!(!last_err.contains("super-secret-token-xyz"));
 }
+
+#[test]
+fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
+    use agy_pulse::sync::{RemoteConfig, SyncConfig, save_sync_config_to};
+
+    let env = IsolatedEnv::new();
+    let remote_dir = env._temp.path().join("remote-hints");
+    fs::create_dir_all(&remote_dir).unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let step_ts = now - 60_000;
+
+    let conv1_db = env.cli_data_dir.join("conversations").join("hint-conv-1.db");
+    let step1 = pb_timestamp_ms(1, step_ts);
+    let gen1 = build_gen_blob(
+        &[0],
+        &[GenStepSpec {
+            display_name: "Gemini 3 Flash",
+            input_tokens: 1200,
+            output_tokens: 300,
+            cache_read_tokens: 0,
+            ttft_sec: None,
+            stream_sec: None,
+            parent_cascade_id: None,
+            root_cascade_id: None,
+        }],
+    );
+    write_conv_db(
+        &conv1_db,
+        Some(&build_trajectory_blob("ws-hint", "main", step_ts, None)),
+        &[(0, step1)],
+        &[(0, gen1)],
+    );
+
+    let sync_cfg_path = env._temp.path().join("sync-hints.json");
+    let cfg_v1 = SyncConfig {
+        enabled: false,
+        device_id: None,
+        device_name: Some("studio-alpha".to_string()),
+        default_account: Some("alpha@example.com".to_string()),
+        push_interval_sec: 300,
+        prefix: "agy-pulse-sync".to_string(),
+        remote: RemoteConfig::LocalDir {
+            path: remote_dir.to_string_lossy().into_owned(),
+        },
+    };
+    save_sync_config_to(&sync_cfg_path, &cfg_v1).unwrap();
+
+    let (_guard, port) = spawn_isolated_dashboard(&env, &sync_cfg_path, &[]);
+
+    // 1. Served HTML injects 64-char hex CSRF token and leaves no raw placeholder
+    let html_res = send_raw_http(port, "GET", "/", &[]);
+    assert_eq!(html_res.status, 200);
+    assert!(!html_res.body.contains("__AGY_PULSE_CSRF_TOKEN__"));
+    let marker = "var CSRF_TOKEN = '";
+    let start = html_res
+        .body
+        .find(marker)
+        .expect("dashboard HTML must contain CSRF_TOKEN declaration")
+        + marker.len();
+    let rest = &html_res.body[start..];
+    let end = rest.find('\'').expect("closing quote for CSRF_TOKEN");
+    let token = &rest[..end];
+    assert_eq!(token.len(), 64, "CSRF token must be 64 hex chars: {token}");
+    assert!(
+        token
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "CSRF token must be lowercase hex: {token}"
+    );
+
+    // 2. Oversized request body (> 64 KiB) returns 413 Payload Too Large
+    let oversized_body = "x".repeat(65 * 1024);
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let req_head = format!(
+        "POST /api/sync-remote HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        oversized_body.len()
+    );
+    let _ = stream.write_all(req_head.as_bytes());
+    let _ = stream.write_all(oversized_body.as_bytes());
+    let _ = stream.flush();
+    let mut raw_413 = Vec::new();
+    let mut buf_413 = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf_413) {
+            Ok(0) => break,
+            Ok(n) => raw_413.extend_from_slice(&buf_413[..n]),
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset && !raw_413.is_empty() => {
+                break;
+            }
+            Err(err) => panic!("unexpected read error for 413 response: {err}"),
+        }
+    }
+    let text_413 = String::from_utf8_lossy(&raw_413);
+    let (head_413, body_413) = text_413
+        .split_once("\r\n\r\n")
+        .expect("413 HTTP response header/body separator");
+    let status_413: u16 = head_413
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(status_413, 413);
+    let err_json: Value = serde_json::from_str(body_413).unwrap();
+    assert_eq!(err_json["error"], "request body too large");
+
+    // 2b. POST /api/sync-remote parses JSON body > 4 KiB cleanly (no peek limit)
+    let padded_force_body = format!("{}{{\"force\":true}}", " ".repeat(5 * 1024));
+    let padded_res = send_raw_http_with_body(
+        port,
+        "POST",
+        "/api/sync-remote",
+        &[("Content-Type", "application/json")],
+        &padded_force_body,
+    );
+    assert_eq!(padded_res.status, 200);
+    let padded_json: Value = serde_json::from_str(&padded_res.body).unwrap();
+    assert_eq!(padded_json["ok"], true);
+    assert_eq!(padded_json["throttled"], false);
+
+    // 3. Initial ledger scan picked up defaultAccount + deviceName from agy-pulse-sync.json
+    let ov1: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=all", &[]).body,
+    )
+    .unwrap();
+    assert_eq!(ov1["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(ov1["sessions"][0]["accountId"], "alpha@example.com");
+    assert_eq!(ov1["sessions"][0]["deviceName"], "studio-alpha");
+
+    // 4. Update agy-pulse-sync.json identity hints, seed a new conversation, and POST /api/sync
+    let cfg_v2 = SyncConfig {
+        device_name: Some("studio-beta".to_string()),
+        default_account: Some("beta@example.com".to_string()),
+        ..cfg_v1
+    };
+    save_sync_config_to(&sync_cfg_path, &cfg_v2).unwrap();
+
+    let conv2_db = env.cli_data_dir.join("conversations").join("hint-conv-2.db");
+    let step2 = pb_timestamp_ms(1, step_ts + 5_000);
+    let gen2 = build_gen_blob(
+        &[0],
+        &[GenStepSpec {
+            display_name: "Gemini 3 Flash",
+            input_tokens: 900,
+            output_tokens: 200,
+            cache_read_tokens: 0,
+            ttft_sec: None,
+            stream_sec: None,
+            parent_cascade_id: None,
+            root_cascade_id: None,
+        }],
+    );
+    write_conv_db(
+        &conv2_db,
+        Some(&build_trajectory_blob("ws-hint-2", "main", step_ts + 5_000, None)),
+        &[(0, step2)],
+        &[(0, gen2)],
+    );
+
+    let sync_res = send_raw_http(port, "POST", "/api/sync", &[]);
+    assert_eq!(sync_res.status, 200);
+
+    let ov2: Value = serde_json::from_str(
+        &send_raw_http(port, "GET", "/api/overview?range=all", &[]).body,
+    )
+    .unwrap();
+    let sessions = ov2["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+    let conv2_session = sessions
+        .iter()
+        .find(|s| s["rootConversationId"] == "hint-conv-2")
+        .expect("hint-conv-2 session present");
+    assert_eq!(conv2_session["accountId"], "beta@example.com");
+    assert_eq!(conv2_session["deviceName"], "studio-beta");
+}

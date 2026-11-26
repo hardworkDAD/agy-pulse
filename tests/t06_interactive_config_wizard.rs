@@ -450,3 +450,295 @@ fn t06_wizard_scope_toggle_saves_local_when_selected() {
     let global_val: Value = serde_json::from_str(&fs::read_to_string(&global_cfg).unwrap()).unwrap();
     assert_eq!(global_val["language"], "en");
 }
+
+struct MultiEnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl MultiEnvGuard {
+    fn new() -> Self {
+        Self { saved: Vec::new() }
+    }
+
+    fn set(&mut self, key: &'static str, val: &str) {
+        if !self.saved.iter().any(|(k, _)| *k == key) {
+            self.saved.push((key, std::env::var_os(key)));
+        }
+        // SAFETY: guarded by `ENV_MUTEX` in integration tests.
+        unsafe { std::env::set_var(key, val) };
+    }
+
+    fn remove(&mut self, key: &'static str) {
+        if !self.saved.iter().any(|(k, _)| *k == key) {
+            self.saved.push((key, std::env::var_os(key)));
+        }
+        // SAFETY: guarded by `ENV_MUTEX` in integration tests.
+        unsafe { std::env::remove_var(key) };
+    }
+}
+
+impl Drop for MultiEnvGuard {
+    fn drop(&mut self) {
+        for (key, prev) in self.saved.iter().rev() {
+            match prev {
+                // SAFETY: guarded by `ENV_MUTEX` in integration tests.
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+}
+
+#[test]
+fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
+    use agy_pulse::config::{
+        ABSENT_CONFIG_VERSION, CacheHitThresholdsConfig, IconsConfig, LanguageSetting, PulseConfig,
+        THEME_PRESETS, ThemeColors, ThemeConfig, read_global_config_snapshot,
+        read_global_config_snapshot_at, read_pulse_env_overrides, render_statusline_preview,
+        save_global_pulse_config_preserving_unknown, validate_pulse_config,
+    };
+    use sha2::{Digest, Sha256};
+
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let mut env_guard = MultiEnvGuard::new();
+    env_guard.set(
+        "AGY_PULSE_GLOBAL_CONFIG_DIR",
+        &env.global_cfg_dir.to_string_lossy(),
+    );
+    env_guard.set("AGY_PULSE_LANGUAGE", "zh");
+    env_guard.set("AGY_PULSE_DASHBOARD_PORT", "4999");
+    env_guard.set("AGY_PULSE_DASHBOARD_IDLE_SEC", "900");
+    env_guard.set("AGY_PULSE_FORCE_ASCII", "1");
+    env_guard.set("AGY_PULSE_FORCE_UNICODE", "1");
+
+    // 1. Absent file snapshot
+    let absent_snap = read_global_config_snapshot().unwrap();
+    assert!(!absent_snap.exists);
+    assert_eq!(absent_snap.version, ABSENT_CONFIG_VERSION);
+    assert!(absent_snap.raw_object.is_none());
+    assert!(absent_snap.parse_error.is_none());
+    assert_eq!(absent_snap.config.language, LanguageSetting::Auto);
+
+    // 2. Env overrides metadata (FORCE_ASCII wins over FORCE_UNICODE)
+    let overrides = read_pulse_env_overrides();
+    assert_eq!(
+        overrides.language.as_ref().map(|o| (o.env_var, o.value.as_str())),
+        Some(("AGY_PULSE_LANGUAGE", "zh"))
+    );
+    assert_eq!(
+        overrides
+            .dashboard_port
+            .as_ref()
+            .map(|o| (o.env_var, o.value.as_str())),
+        Some(("AGY_PULSE_DASHBOARD_PORT", "4999"))
+    );
+    assert_eq!(
+        overrides
+            .dashboard_idle_timeout_sec
+            .as_ref()
+            .map(|o| (o.env_var, o.value.as_str())),
+        Some(("AGY_PULSE_DASHBOARD_IDLE_SEC", "900"))
+    );
+    assert_eq!(
+        overrides.unicode.as_ref().map(|o| (o.env_var, o.value.as_str())),
+        Some(("AGY_PULSE_FORCE_ASCII", "false"))
+    );
+    env_guard.remove("AGY_PULSE_FORCE_ASCII");
+    let overrides_unicode = read_pulse_env_overrides();
+    assert_eq!(
+        overrides_unicode
+            .unicode
+            .as_ref()
+            .map(|o| (o.env_var, o.value.as_str())),
+        Some(("AGY_PULSE_FORCE_UNICODE", "true"))
+    );
+
+    // 3. Snapshot ignores AGY_PULSE_LANGUAGE and records parse_error for invalid JSON
+    let global_cfg_path = env.global_cfg_dir.join("agy-pulse.config.json");
+    fs::write(&global_cfg_path, "{broken json").unwrap();
+    let bad_snap = read_global_config_snapshot_at(&global_cfg_path).unwrap();
+    assert!(bad_snap.exists);
+    assert!(bad_snap.parse_error.is_some());
+    assert!(bad_snap.raw_object.is_none());
+
+    // 4. Preserving unknown fields (columnWidth, custom top/nested keys, unmanaged icons.*) & clearing optional fields
+    let initial_json = serde_json::json!({
+        "language": "en",
+        "customTop": { "keep": true },
+        "display": {
+            "columnWidth": 24,
+            "customDisplay": "stay",
+            "dashboardPort": 3888,
+            "dashboardIdleTimeoutSec": 120,
+            "unicode": true,
+            "terminalWidth": 110,
+            "username": "old-user",
+            "cacheHitThresholds": { "excellent": 80.0, "partial": 40.0 },
+            "modelSpeedExpireTurns": 3,
+            "modelSpeedExpireMinutes": 5.0
+        },
+        "icons": {
+            "branch": "B",
+            "plan": "P",
+            "customIcon": "X"
+        }
+    });
+    fs::write(&global_cfg_path, initial_json.to_string()).unwrap();
+
+    let snap = read_global_config_snapshot_at(&global_cfg_path).unwrap();
+    assert!(snap.exists);
+    assert!(snap.parse_error.is_none());
+    assert_eq!(snap.config.language, LanguageSetting::En); // NOT overridden by AGY_PULSE_LANGUAGE=zh
+    assert_eq!(snap.config.display.dashboard_port, Some(3888));
+
+    let mut updated = snap.config.clone();
+    updated.language = LanguageSetting::Zh;
+    updated.display.dashboard_port = None;
+    updated.display.dashboard_idle_timeout_sec = None;
+    updated.display.unicode = None;
+    updated.display.terminal_width = None;
+    updated.display.username = Some("   ".to_string());
+    updated.display.cache_hit_thresholds = None;
+    updated.display.model_speed_expire_turns = None;
+    updated.display.model_speed_expire_minutes = None;
+    updated.icons = Some(IconsConfig {
+        branch: None,
+        token: Some("T".to_string()),
+        ctx: None,
+        ..Default::default()
+    });
+    assert!(validate_pulse_config(&updated).is_ok());
+
+    let new_ver = save_global_pulse_config_preserving_unknown(
+        &global_cfg_path,
+        snap.raw_object.as_ref(),
+        &updated,
+    )
+    .unwrap();
+    let saved_bytes = fs::read(&global_cfg_path).unwrap();
+    assert_eq!(new_ver, hex::encode(Sha256::digest(&saved_bytes)));
+    let saved_val: Value = serde_json::from_slice(&saved_bytes).unwrap();
+    assert_eq!(saved_val["customTop"]["keep"], true);
+    assert_eq!(saved_val["display"]["columnWidth"], 24);
+    assert_eq!(saved_val["display"]["customDisplay"], "stay");
+    for removed in [
+        "dashboardPort",
+        "dashboardIdleTimeoutSec",
+        "unicode",
+        "terminalWidth",
+        "username",
+        "cacheHitThresholds",
+        "modelSpeedExpireTurns",
+        "modelSpeedExpireMinutes",
+    ] {
+        assert!(
+            saved_val["display"].get(removed).is_none(),
+            "cleared optional key {removed} must be removed"
+        );
+    }
+    assert!(saved_val["icons"].get("branch").is_none());
+    assert_eq!(saved_val["icons"]["token"], "T");
+    assert_eq!(saved_val["icons"]["plan"], "P");
+    assert_eq!(saved_val["icons"]["customIcon"], "X");
+
+    // When all managed + unmanaged icons are cleared, "icons" object itself is removed
+    updated.icons = None;
+    let empty_raw = serde_json::Map::new();
+    save_global_pulse_config_preserving_unknown(&global_cfg_path, Some(&empty_raw), &updated)
+        .unwrap();
+    let saved_no_icons: Value =
+        serde_json::from_str(&fs::read_to_string(&global_cfg_path).unwrap()).unwrap();
+    assert!(saved_no_icons.get("icons").is_none());
+
+    // 5. Validation failures
+    let mut bad = PulseConfig::default();
+    bad.thresholds.warning = 0.95;
+    bad.thresholds.critical = 0.8;
+    assert_eq!(validate_pulse_config(&bad).unwrap_err().0, "thresholds.warning");
+
+    let bad_theme = PulseConfig {
+        theme: ThemeConfig::Colors(ThemeColors {
+            primary: "neon-pink".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(validate_pulse_config(&bad_theme).unwrap_err().0, "theme.primary");
+
+    let ok_preset = PulseConfig {
+        theme: ThemeConfig::Preset(THEME_PRESETS[1].name.to_string()),
+        ..Default::default()
+    };
+    assert!(validate_pulse_config(&ok_preset).is_ok());
+
+    let mut bad_port = PulseConfig::default();
+    bad_port.display.dashboard_port = Some(0);
+    assert_eq!(
+        validate_pulse_config(&bad_port).unwrap_err().0,
+        "display.dashboardPort"
+    );
+
+    let mut bad_width = PulseConfig::default();
+    bad_width.display.terminal_width = Some(19);
+    assert_eq!(
+        validate_pulse_config(&bad_width).unwrap_err().0,
+        "display.terminalWidth"
+    );
+
+    let mut bad_cht = PulseConfig::default();
+    bad_cht.display.cache_hit_thresholds = Some(CacheHitThresholdsConfig {
+        excellent: Some(40.0),
+        partial: Some(60.0),
+    });
+    assert_eq!(
+        validate_pulse_config(&bad_cht).unwrap_err().0,
+        "display.cacheHitThresholds.partial"
+    );
+
+    let bad_icon = PulseConfig {
+        icons: Some(IconsConfig {
+            ctx: Some("123456789".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(validate_pulse_config(&bad_icon).unwrap_err().0, "icons.ctx");
+
+    // 6. Preview helper consistency (disabled, empty, active)
+    let disabled_cfg = PulseConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    assert!(render_statusline_preview(&disabled_cfg, true, Some(100), Some("en_US.UTF-8"))
+        .contains("disabled"));
+
+    let mut empty_cfg = PulseConfig::default();
+    empty_cfg.display.show_context_monitor = Some(false);
+    empty_cfg.display.show_model_cache = Some(false);
+    empty_cfg.display.show_current_dir = Some(false);
+    empty_cfg.display.show_cycle_mode = Some(false);
+    empty_cfg.display.show_speed = Some(false);
+    empty_cfg.display.show_dashboard_url = Some(false);
+    empty_cfg.display.quota_style = agy_pulse::config::QuotaStyle::None;
+    let all_off_rendered = strip_ansi(&render_statusline_preview(
+        &empty_cfg,
+        true,
+        Some(100),
+        Some("en_US.UTF-8"),
+    ));
+    assert!(all_off_rendered.contains("Pro"));
+    assert!(!all_off_rendered.contains("Context"));
+    assert!(!all_off_rendered.contains("agy-pulse"));
+    assert!(!all_off_rendered.contains("Google"));
+
+    let zh_cfg = PulseConfig {
+        language: LanguageSetting::Zh,
+        theme: ThemeConfig::Preset("Ocean Blue".to_string()),
+        ..Default::default()
+    };
+    let rendered = render_statusline_preview(&zh_cfg, true, Some(120), Some("en_US.UTF-8"));
+    let plain = strip_ansi(&rendered);
+    assert!(rendered.contains("\x1b[34m"));
+    assert!(plain.contains("上下文"));
+}

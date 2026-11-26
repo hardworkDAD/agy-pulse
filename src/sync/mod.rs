@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 pub use cf_worker::CfWorkerRemote;
 pub use cli::{run_sync_bg, run_sync_cli};
 pub use config::{
-    RemoteConfig, SyncConfig, load_sync_config, load_sync_config_from, save_sync_config,
-    save_sync_config_to,
+    RemoteConfig, SyncConfig, SyncEnvOverrides, active_sync_env_overrides, delete_sync_config,
+    delete_sync_config_at, load_sync_config, load_sync_config_from, load_sync_config_raw,
+    load_sync_config_raw_from, save_sync_config, save_sync_config_to,
 };
 pub use engine::{
     PruneOutcome, SyncOutcome, SyncOutcomeKind, prune_device, pull, push, sync_both,

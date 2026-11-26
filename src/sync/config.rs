@@ -396,16 +396,69 @@ impl SyncConfig {
     }
 }
 
-/// Load the private sync configuration from `path`, normalizing fields and applying env overrides.
-/// Returns `Ok(None)` when the file does not exist.
-pub fn load_sync_config_from(path: &Path) -> Result<Option<SyncConfig>, SyncError> {
-    let raw = match fs::read_to_string(path) {
-        Ok(content) => content,
+/// Names of credential environment variables currently overriding sync configuration.
+/// Never contains secret values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncEnvOverrides {
+    pub password: Option<&'static str>,
+    pub token: Option<&'static str>,
+    pub access_key: Option<&'static str>,
+    pub secret_key: Option<&'static str>,
+}
+
+/// Detect which sync credential environment variables are currently active (names only).
+pub fn active_sync_env_overrides() -> SyncEnvOverrides {
+    SyncEnvOverrides {
+        password: non_empty_env("AGY_PULSE_SYNC_PASSWORD").map(|_| "AGY_PULSE_SYNC_PASSWORD"),
+        token: non_empty_env("AGY_PULSE_SYNC_TOKEN").map(|_| "AGY_PULSE_SYNC_TOKEN"),
+        access_key: non_empty_env("AGY_PULSE_S3_ACCESS_KEY").map(|_| "AGY_PULSE_S3_ACCESS_KEY"),
+        secret_key: non_empty_env("AGY_PULSE_S3_SECRET_KEY").map(|_| "AGY_PULSE_S3_SECRET_KEY"),
+    }
+}
+
+/// Load the raw private sync configuration from `path` without applying environment overrides.
+/// Returns `Ok(Some((config, sha256_hex)))` when present, or `Ok(None)` when missing.
+pub fn load_sync_config_raw_from(path: &Path) -> Result<Option<(SyncConfig, String)>, SyncError> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(SyncError::Io(err)),
     };
-    let mut cfg: SyncConfig = serde_json::from_str(&raw)?;
+    let version = hex::encode(Sha256::digest(&bytes));
+    let mut cfg: SyncConfig = serde_json::from_slice(&bytes)?;
     cfg.normalize();
+    Ok(Some((cfg, version)))
+}
+
+/// Load the raw global private sync configuration without applying environment overrides.
+pub fn load_sync_config_raw() -> Result<Option<(SyncConfig, String)>, SyncError> {
+    let path = platform::resolve_sync_config_path();
+    load_sync_config_raw_from(&path)
+}
+
+/// Delete the sync configuration file at `path`.
+/// Returns `Ok(true)` if removed, `Ok(false)` if already absent.
+pub fn delete_sync_config_at(path: &Path) -> Result<bool, SyncError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(SyncError::Io(err)),
+    }
+}
+
+/// Delete the global sync configuration file (`platform::resolve_sync_config_path()`).
+pub fn delete_sync_config() -> Result<bool, SyncError> {
+    let path = platform::resolve_sync_config_path();
+    delete_sync_config_at(&path)
+}
+
+/// Load the private sync configuration from `path`, normalizing fields and applying env overrides.
+/// Returns `Ok(None)` when the file does not exist.
+pub fn load_sync_config_from(path: &Path) -> Result<Option<SyncConfig>, SyncError> {
+    let Some((mut cfg, _version)) = load_sync_config_raw_from(path)? else {
+        return Ok(None);
+    };
     cfg.apply_env_overrides();
     Ok(Some(cfg))
 }

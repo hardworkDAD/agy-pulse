@@ -237,6 +237,14 @@ pub fn parse_dashboard_args(argv: &[String], env_idle_sec: Option<&str>) -> Dash
 
 /// Render the zero-CDN embedded HTML dashboard page with sanitized initial language and version.
 pub fn render_dashboard_html(initial_lang: LanguageSetting) -> String {
+    render_dashboard_html_with_token(initial_lang, "")
+}
+
+/// Render the zero-CDN embedded HTML dashboard page with sanitized language, version, and CSRF token.
+pub fn render_dashboard_html_with_token(
+    initial_lang: LanguageSetting,
+    csrf_token: &str,
+) -> String {
     let (html_lang, js_lang) = match initial_lang {
         LanguageSetting::Zh => ("zh-CN", "zh"),
         LanguageSetting::En | LanguageSetting::Auto => ("en", "en"),
@@ -245,6 +253,7 @@ pub fn render_dashboard_html(initial_lang: LanguageSetting) -> String {
         .replace("__AGY_PULSE_HTML_LANG__", html_lang)
         .replace("__AGY_PULSE_INITIAL_LANG__", js_lang)
         .replace("__AGY_PULSE_VERSION__", VERSION)
+        .replace("__AGY_PULSE_CSRF_TOKEN__", csrf_token)
 }
 
 /// Localized help text for `agypl dashboard --help`.

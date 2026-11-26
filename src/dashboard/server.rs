@@ -1,13 +1,14 @@
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::LanguageSetting;
 use crate::ledger::{
@@ -26,7 +27,10 @@ use super::http_wire::{
 use super::keepalive::{
     KeepaliveState, resolve_close_grace_ms, resolve_ping_lease_ms, resolve_sse_ping_interval_ms,
 };
-use super::{DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_DASHBOARD_PORT, LOOPBACK_HOST, render_dashboard_html};
+use super::{
+    DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_DASHBOARD_PORT, LOOPBACK_HOST,
+    render_dashboard_html_with_token,
+};
 
 const DEFAULT_AUTO_SYNC_INTERVAL_MS: u64 = 10_000;
 const REMOTE_SYNC_THROTTLE_MS: u64 = 30_000;
@@ -94,6 +98,45 @@ struct LedgerRuntime {
     sync_options: LedgerSyncOptions,
 }
 
+pub(super) fn refresh_sync_identity_hints(sync_options: &mut LedgerSyncOptions) {
+    let (default_account_id, device_name) = platform::read_sync_identity_hints();
+    sync_options.default_account_id = default_account_id;
+    sync_options.device_name = device_name;
+}
+
+fn generate_csrf_token() -> String {
+    #[cfg(unix)]
+    {
+        if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
+            let mut buf = [0u8; 32];
+            if file.read_exact(&mut buf).is_ok() {
+                return hex::encode(buf);
+            }
+        }
+    }
+
+    static CSRF_COUNTER: AtomicU64 = AtomicU64::new(1);
+    let mut hasher = Sha256::new();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(CSRF_COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    let stack_marker = 0u64;
+    let stack_addr = (&stack_marker as *const u64) as usize;
+    hasher.update(stack_addr.to_le_bytes());
+    let heap_marker = Box::new(nanos ^ (stack_addr as u128));
+    let heap_addr = (&*heap_marker as *const u128) as usize;
+    hasher.update(heap_addr.to_le_bytes());
+    hasher.update(format!("{:?}", thread::current().id()).as_bytes());
+    if let Some(host) = platform::current_hostname() {
+        hasher.update(host.as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
 struct ServerSharedState {
     port: u16,
     default_lang: LanguageSetting,
@@ -103,6 +146,11 @@ struct ServerSharedState {
     sse_ping_interval: Duration,
     started_at: String,
     ledger_path: PathBuf,
+    pub(super) csrf_token: String,
+    #[allow(dead_code)]
+    pub(super) pulse_config_lock: Mutex<()>,
+    #[allow(dead_code)]
+    pub(super) sync_config_lock: Mutex<()>,
     keepalive: Arc<KeepaliveState>,
     shutdown: AtomicBool,
     sync_remote_in_progress: Arc<AtomicBool>,
@@ -120,6 +168,7 @@ impl ServerSharedState {
         {
             return;
         }
+        refresh_sync_identity_hints(&mut guard.sync_options);
         match guard.store.sync_all(&guard.sync_options) {
             Ok(_) => {
                 guard.last_sync_instant = Some(Instant::now());
@@ -151,10 +200,11 @@ impl DashboardServer {
             .ledger_path
             .unwrap_or_else(LedgerStore::default_ledger_path);
         let mut store = LedgerStore::open_at(&ledger_path)?;
-        let sync_options = LedgerSyncOptions {
+        let mut sync_options = LedgerSyncOptions {
             source_roots: config.source_roots,
             ..Default::default()
         };
+        refresh_sync_identity_hints(&mut sync_options);
 
         let mut last_sync_instant = None;
         let mut sync_report = None;
@@ -196,6 +246,8 @@ impl DashboardServer {
             started_instant,
         ));
 
+        let csrf_token = generate_csrf_token();
+
         let shared = Arc::new(ServerSharedState {
             port: actual_port,
             default_lang,
@@ -205,6 +257,9 @@ impl DashboardServer {
             sse_ping_interval,
             started_at: started_at.clone(),
             ledger_path,
+            csrf_token,
+            pulse_config_lock: Mutex::new(()),
+            sync_config_lock: Mutex::new(()),
             keepalive,
             shutdown: AtomicBool::new(false),
             sync_remote_in_progress: Arc::new(AtomicBool::new(false)),
@@ -239,6 +294,11 @@ impl DashboardServer {
     /// Metadata about the running server (bound port, loopback URL, initial sync report).
     pub fn info(&self) -> &DashboardServerInfo {
         &self.info
+    }
+
+    /// Process-level CSRF token injected into served dashboard HTML pages.
+    pub fn csrf_token(&self) -> &str {
+        self.shared.csrf_token.as_str()
     }
 
     /// Block until the server stops (e.g. via idle timeout or `shutdown()`).
@@ -538,81 +598,17 @@ fn current_epoch_ms_u64() -> u64 {
         .unwrap_or(0)
 }
 
-fn find_header_end_bytes(buf: &[u8]) -> Option<(usize, usize)> {
-    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-        return Some((pos, 4));
-    }
-    if let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
-        return Some((pos, 2));
-    }
-    None
-}
-
-fn peek_sync_remote_force(stream: &TcpStream) -> io::Result<bool> {
-    let mut buf = [0u8; 4096];
-    let mut n = stream.peek(&mut buf)?;
-    if n == 0 {
-        return Ok(false);
-    }
-    let head_preview = String::from_utf8_lossy(&buf[..n]);
-    let first_line = head_preview.lines().next().unwrap_or("");
-    let is_sync_remote_post = {
-        let mut parts = first_line.split_whitespace();
-        let method = parts.next().unwrap_or("");
-        let target = parts.next().unwrap_or("");
-        let path = target.split('?').next().unwrap_or(target);
-        method.eq_ignore_ascii_case("POST") && path == "/api/sync-remote"
-    };
-    if !is_sync_remote_post {
-        return Ok(false);
-    }
-
-    let Some((header_end, sep_len)) = find_header_end_bytes(&buf[..n]) else {
-        return Ok(false);
-    };
-    let head_str = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
-    let content_length = head_str
-        .lines()
-        .skip(1)
-        .filter_map(|l| l.split_once(':'))
-        .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    if content_length == 0 || header_end + sep_len + content_length > buf.len() {
-        return Ok(false);
-    }
-
-    for _ in 0..8 {
-        if n >= header_end + sep_len + content_length {
-            break;
-        }
-        thread::sleep(Duration::from_millis(5));
-        n = stream.peek(&mut buf)?;
-    }
-
-    let body_start = header_end + sep_len;
-    let body_end = (body_start + content_length).min(n);
-    if body_end <= body_start {
-        return Ok(false);
-    }
-    Ok(
-        serde_json::from_slice::<SyncRemoteBody>(&buf[body_start..body_end])
-            .is_ok_and(|b| b.force),
-    )
-}
-
 fn handle_connection(stream: &mut TcpStream, shared: &ServerSharedState) {
     let _ = stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT));
 
-    let peeked_force = match peek_sync_remote_force(stream) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
     let req = match read_http_request(stream) {
         Ok(r) => r,
         Err(HttpParseError::EmptyOrEof) => return,
+        Err(HttpParseError::PayloadTooLarge) => {
+            send_error_json(stream, 413, "request body too large");
+            return;
+        }
         Err(HttpParseError::InvalidRequest(msg)) => {
             send_error_json(stream, 400, msg);
             return;
@@ -625,7 +621,7 @@ fn handle_connection(stream: &mut TcpStream, shared: &ServerSharedState) {
         return;
     }
 
-    dispatch_request(stream, &req, shared, peeked_force);
+    dispatch_request(stream, &req, shared);
 }
 
 fn read_sync_status_standalone(
@@ -646,11 +642,12 @@ fn read_sync_status_standalone(
 
 fn handle_sync_remote(
     stream: &mut TcpStream,
+    req: &HttpRequest,
     params: &[(String, String)],
     shared: &ServerSharedState,
-    peeked_force: bool,
 ) {
-    let force = peeked_force
+    let body_force = serde_json::from_slice::<SyncRemoteBody>(&req.body).is_ok_and(|b| b.force);
+    let force = body_force
         || matches!(
             query_param(params, "force").map(str::trim),
             Some(v) if v == "1" || v.eq_ignore_ascii_case("true")
@@ -883,12 +880,7 @@ fn handle_sync_remote(
     }
 }
 
-fn dispatch_request(
-    stream: &mut TcpStream,
-    req: &HttpRequest,
-    shared: &ServerSharedState,
-    peeked_force: bool,
-) {
+fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSharedState) {
     let method = req.method.as_str();
     let params = parse_query_params(&req.query);
 
@@ -1023,7 +1015,7 @@ fn dispatch_request(
                 Some("en") => LanguageSetting::En,
                 _ => shared.default_lang,
             };
-            let html = render_dashboard_html(initial_lang);
+            let html = render_dashboard_html_with_token(initial_lang, &shared.csrf_token);
             let _ = write_http_response(
                 stream,
                 200,
@@ -1068,6 +1060,7 @@ fn dispatch_request(
                 send_error_json(stream, 500, "Ledger lock poisoned");
                 return;
             };
+            refresh_sync_identity_hints(&mut guard.sync_options);
             let sync_opts = guard.sync_options.clone();
             match guard.store.sync_all(&sync_opts) {
                 Ok(report) => {
@@ -1087,7 +1080,7 @@ fn dispatch_request(
                 return;
             }
             shared.keepalive.touch_activity();
-            handle_sync_remote(stream, &params, shared, peeked_force);
+            handle_sync_remote(stream, req, &params, shared);
         }
         "/api/export.csv" => {
             if method != "GET" {

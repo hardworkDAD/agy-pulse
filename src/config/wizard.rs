@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value};
 
 use crate::config::{
-    LanguageSetting, PulseConfig, QuotaStyle, ThemeColors, ThemeConfig, deep_merge_value,
-    load_config, read_json_object,
+    LanguageSetting, PulseConfig, QuotaStyle, THEME_PRESETS, ThemeColors, ThemeConfig,
+    ThemePresetDef, deep_merge_value, load_config, read_json_object,
 };
 use crate::domain::{
     ChildModelSpeed, ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity,
@@ -22,68 +22,14 @@ const BREADCRUMB_COUNTS: &[u32] = &[0, 1, 2, 3, 5];
 const WARNING_THRESHOLDS: &[f64] = &[0.5, 0.6, 0.7, 0.75];
 const CRITICAL_THRESHOLDS: &[f64] = &[0.8, 0.85, 0.9, 0.95];
 
-struct ThemePreset {
-    name: &'static str,
-    colors: ThemeColorsSpec,
-}
-
-#[derive(Clone, Copy)]
-struct ThemeColorsSpec {
-    primary: &'static str,
-    secondary: &'static str,
-    warning: &'static str,
-    critical: &'static str,
-}
-
-impl ThemeColorsSpec {
-    fn to_colors(self) -> ThemeColors {
-        ThemeColors {
-            primary: self.primary.to_string(),
-            secondary: self.secondary.to_string(),
-            warning: self.warning.to_string(),
-            critical: self.critical.to_string(),
-        }
+fn preset_to_theme_colors(preset: &ThemePresetDef) -> ThemeColors {
+    ThemeColors {
+        primary: preset.primary.to_string(),
+        secondary: preset.secondary.to_string(),
+        warning: preset.warning.to_string(),
+        critical: preset.critical.to_string(),
     }
 }
-
-const THEME_PRESETS: &[ThemePreset] = &[
-    ThemePreset {
-        name: "Emerald Green",
-        colors: ThemeColorsSpec {
-            primary: "green",
-            secondary: "gray",
-            warning: "yellow",
-            critical: "red",
-        },
-    },
-    ThemePreset {
-        name: "Ocean Blue",
-        colors: ThemeColorsSpec {
-            primary: "blue",
-            secondary: "gray",
-            warning: "yellow",
-            critical: "red",
-        },
-    },
-    ThemePreset {
-        name: "Cyberpunk Magenta",
-        colors: ThemeColorsSpec {
-            primary: "magenta",
-            secondary: "gray",
-            warning: "yellow",
-            critical: "red",
-        },
-    },
-    ThemePreset {
-        name: "Amber Gold",
-        colors: ThemeColorsSpec {
-            primary: "yellow",
-            secondary: "gray",
-            warning: "cyan",
-            critical: "red",
-        },
-    },
-];
 
 /// Configuration options for running the interactive wizard loop over arbitrary I/O streams.
 #[derive(Debug, Clone)]
@@ -353,7 +299,7 @@ fn normalize_theme_colors(theme: &ThemeConfig) -> ThemeColors {
                 .iter()
                 .find(|p| p.name.eq_ignore_ascii_case(trimmed))
             {
-                return preset.colors.to_colors();
+                return preset_to_theme_colors(preset);
             }
             let mut base = ThemeColors::default();
             if !trimmed.is_empty() {
@@ -366,10 +312,10 @@ fn normalize_theme_colors(theme: &ThemeConfig) -> ThemeColors {
 
 fn detect_theme_preset_name(colors: &ThemeColors) -> String {
     for preset in THEME_PRESETS {
-        if colors.primary == preset.colors.primary
-            && colors.secondary == preset.colors.secondary
-            && colors.warning == preset.colors.warning
-            && colors.critical == preset.colors.critical
+        if colors.primary == preset.primary
+            && colors.secondary == preset.secondary
+            && colors.warning == preset.warning
+            && colors.critical == preset.critical
         {
             return preset.name.to_string();
         }
@@ -570,7 +516,7 @@ impl WizardState {
                 let next_colors = THEME_PRESETS
                     .iter()
                     .find(|p| p.name == next_name)
-                    .map(|p| p.colors.to_colors())
+                    .map(preset_to_theme_colors)
                     .unwrap_or_else(|| self.original_theme.clone());
                 self.config.theme = ThemeConfig::Colors(next_colors.clone());
                 self.changes.theme = Some(next_colors);
@@ -683,7 +629,7 @@ fn compute_menu_viewport(
     }
 }
 
-fn build_sample_pulse_snapshot(observed_at_ms: i64) -> PulseSnapshot {
+pub(crate) fn build_sample_pulse_snapshot(observed_at_ms: i64) -> PulseSnapshot {
     let five_hour_reset = Some(observed_at_ms + 4 * 3_600_000);
     let weekly_reset = Some(observed_at_ms + 5 * 86_400_000);
     let sample_usage = TokenUsage {
@@ -823,29 +769,52 @@ fn build_sample_pulse_snapshot(observed_at_ms: i64) -> PulseSnapshot {
     }
 }
 
-fn render_wizard_preview(
-    state: &WizardState,
+fn render_statusline_preview_with_snapshot(
+    cfg: &PulseConfig,
     snapshot: &PulseSnapshot,
-    options: &WizardRunOptions,
+    unicode_fallback: bool,
+    terminal_cols: Option<u16>,
+    locale: Option<&str>,
 ) -> String {
-    if !state.config.enabled {
+    if !cfg.enabled {
         return "\x1b[90m(agy-pulse status line is disabled)\x1b[0m".to_string();
     }
     let preview_term = TerminalCaps {
-        unicode: state.config.display.unicode.unwrap_or(options.unicode),
-        columns: state
-            .config
-            .display
-            .terminal_width
-            .or(options.terminal_cols),
+        unicode: cfg.display.unicode.unwrap_or(unicode_fallback),
+        columns: cfg.display.terminal_width.or(terminal_cols),
     };
-    let lang = resolve_language_from_locale(state.config.language, options.locale.as_deref());
-    let rendered = render_statusline(snapshot, &state.config, &preview_term, lang);
+    let lang = resolve_language_from_locale(cfg.language, locale);
+    let rendered = render_statusline(snapshot, cfg, &preview_term, lang);
     if rendered.is_empty() {
         "\x1b[90m(no visible statusline elements selected)\x1b[0m".to_string()
     } else {
         rendered
     }
+}
+
+/// Render a live statusline preview using the shared sample snapshot and `render_statusline`.
+pub fn render_statusline_preview(
+    cfg: &PulseConfig,
+    unicode_fallback: bool,
+    terminal_cols: Option<u16>,
+    locale: Option<&str>,
+) -> String {
+    let snapshot = build_sample_pulse_snapshot(current_epoch_ms());
+    render_statusline_preview_with_snapshot(cfg, &snapshot, unicode_fallback, terminal_cols, locale)
+}
+
+fn render_wizard_preview(
+    state: &WizardState,
+    snapshot: &PulseSnapshot,
+    options: &WizardRunOptions,
+) -> String {
+    render_statusline_preview_with_snapshot(
+        &state.config,
+        snapshot,
+        options.unicode,
+        options.terminal_cols,
+        options.locale.as_deref(),
+    )
 }
 
 fn render_wizard_frame<W: Write>(
