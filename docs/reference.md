@@ -14,14 +14,20 @@ Complete technical reference for `agy-pulse` v2.0.0 CLI commands, flags, unified
   - [Primary Commands](#primary-commands)
   - [`agypl stats` Options](#agypl-stats-options)
   - [`agypl dashboard` Actions & Options](#agypl-dashboard-actions--options)
+  - [`agypl sync` Subcommands & Options](#agypl-sync-subcommands--options)
+  - [`agypl account` Subcommands & Options](#agypl-account-subcommands--options)
   - [`agypl install` / `uninstall` / `update` Options](#agypl-install--uninstall--update-options)
 - [Permanent Telemetry Ledger & Web Dashboard (`stats` / `dashboard`)](#permanent-telemetry-ledger--web-dashboard-stats--dashboard)
+  - [Dashboard HTTP API](#dashboard-http-api)
 - [Uninstall Details](#uninstall-details)
 - [Configuration Reference](#configuration-reference)
   - [Config Paths & Merge Precedence](#config-paths--merge-precedence)
   - [Full Default Configuration Example](#full-default-configuration-example)
   - [Top-Level Configuration Fields](#top-level-configuration-fields)
   - [`display.*` Configuration Fields](#display-configuration-fields)
+- [Multi-Device Sync Configuration (`agy-pulse-sync.json`)](#multi-device-sync-configuration-agy-pulse-syncjson)
+  - [Top-Level Sync Fields](#top-level-sync-fields)
+  - [Sync Remote Backends & Examples](#sync-remote-backends--examples)
 - [Environment Variables](#environment-variables)
 - [Development & Legacy v1 Migration](#development--legacy-v1-migration)
 - [File Structure](#file-structure)
@@ -98,6 +104,8 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags.
 |---|---|---|
 | `agypl stats [range] [options]` | `report`, `--stats` | Print CLI & Antigravity IDE telemetry summary in terminal |
 | `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | Start or manage offline local Web **Dashboard** (`127.0.0.1:3789`, standalone app window & desktop icon) |
+| `agypl sync [subcommand] [options]` | — | Synchronize **Ledger** chunks and **Quota Snapshots** with the active **Sync Remote** |
+| `agypl account assign <email> [options]` | — | Reassign local `unassigned` **Conversations** and steps to `<email>` |
 | `agypl config` | `--config` | Launch interactive terminal configuration wizard with live **Statusline** preview |
 | `agypl install [--bin-dir <dir>]` | `--install` | Deploy `agy-pulse` & `agypl` binaries and register `statusLine` in host `settings.json` |
 | `agypl uninstall [--purge-ledger]` | `--uninstall` | Safely remove `statusLine`, binaries, shortcuts & caches (preserves **Ledger** by default) |
@@ -145,6 +153,49 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags.
 | `--lang <val>`, `--zh`, `--en` | `auto \| en \| zh` | `auto` | Initial **Dashboard** UI language |
 | `--no-sync` | flag | `false` | Skip startup DB backfill and serve existing **Ledger** immediately |
 
+### `agypl sync` Subcommands & Options
+
+| Invocation / Option | Values / Format | Default | Description |
+|---|---|---|---|
+| `agypl sync` | bidirectional sync | pull then push | Pull remote **Device** chunks/manifests then push local changes |
+| `agypl sync --push` | flag | `false` | Push local data to **Sync Remote** only (cannot combine with `--pull`) |
+| `agypl sync --pull` | flag | `false` | Pull remote **Device** data into local **Ledger** only (cannot combine with `--push`) |
+| `agypl sync --dry-run` | flag | `false` | Preview chunks and manifests without modifying remote or local **Ledger** |
+| `agypl sync --no-local-scan` | flag | `false` | Skip scanning local `conversations/*.db` before syncing |
+| `agypl sync status` | subcommand | — | Display local `device_id`, `device_name`, last observed email, redacted remote target, push/pull timestamps, errors, and known **Devices** |
+| `agypl sync init [options]` | subcommand | interactive | Configure `~/.gemini/antigravity-cli/agy-pulse-sync.json` (`0600`) and run `probe()` unless `--skip-probe` is passed |
+| `--type <backend>` | `local-dir \| webdav \| s3 \| cf-worker` | *prompted* | Select **Sync Remote** backend type (`init`) |
+| `--path <dir>` | directory path | *prompted* | Local directory path for `local-dir` (`init`) |
+| `--url <url>` | HTTPS URL (or loopback HTTP) | *prompted* | Remote endpoint URL for `webdav` or `cf-worker` (`init`) |
+| `--endpoint <url>` | HTTPS URL | *prompted* | S3-compatible endpoint URL for `s3` (`init`) |
+| `--bucket <name>` | string | *prompted* | S3 bucket name for `s3` (`init`) |
+| `--region <region>` | string | `auto` | S3 signing region (`init`) |
+| `--username <user>` | string | *unset* | WebDAV Basic Auth username (`init`) |
+| `--password <pass>` | string | *unset* | WebDAV Basic Auth password (`init`) |
+| `--token <token>` | string | *unset* | Bearer token for `webdav` or `cf-worker` (`init`) |
+| `--access-key <ak>` | string | *unset* | S3 access key ID (`init`) |
+| `--secret-key <sk>` | string | *unset* | S3 secret access key (`init`) |
+| `--path-style <true\|false>` | boolean | `true` | Use path-style S3 URLs (`init`) |
+| `--allow-insecure-http` | flag (or `=true\|false`) | `false` | Permit non-loopback `http://` URLs (`init`) |
+| `--device-name <name>` | string | OS hostname | Custom display name for this **Device** (`init`) |
+| `--default-account <email>` | normalized email | *unset* | Fallback **Account** email for IDE or historical records (`init`) |
+| `--prefix <prefix>` | key prefix | `agy-pulse-sync` | Remote object key prefix (`init`) |
+| `--push-interval <sec>` | integer `>= 1` | `300` | Background push throttle interval in seconds (`init`) |
+| `--skip-probe` | flag | `false` | Save config without running a live `probe()` connectivity check (`init`) |
+| `agypl sync prune-device <device_id>` | subcommand | — | Delete remote objects and local cached rows for `<device_id>` |
+| `--force` | flag | `false` | Allow pruning the current local **Device** (`prune-device`) |
+| `--dry-run` | flag | `false` | List objects that would be deleted without modifying remote or local **Ledger** (`prune-device`) |
+
+### `agypl account` Subcommands & Options
+
+| Invocation / Option | Values / Format | Default | Description |
+|---|---|---|---|
+| `agypl account assign <email>` | subcommand | — | Reassign local `unassigned` **Conversations** and steps to normalized `<email>` (never modifies already-assigned or remote records) |
+| `--all-unassigned` | flag | default | Assign all local `unassigned` **Conversations** (cannot combine with `--workspace`) |
+| `--workspace <substr>` | substring | *unset* | Only assign local `unassigned` **Conversations** whose `workspace` contains `<substr>` |
+| `--dry-run` | flag | `false` | Preview matching **Conversation** and step counts without modifying SQLite |
+| `-h`, `--help` | flag | — | Show `account` or `assign` usage help |
+
 ### `agypl install` / `uninstall` / `update` Options
 
 | Command | Flag | Description |
@@ -162,6 +213,17 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags.
 - **Unified SQLite WAL Ledger (`agy-pulse-ledger.sqlite`)**: Built-in `rusqlite` (`bundled` SQLite with WAL mode and `busy_timeout`) stores all CLI and IDE **Conversation** steps, **Cascade** lineage, and monotonic rolling daily/7-day cost state (`0600` file permissions).
 - **Lock-free dual-source scanning**: `agy-pulse` incrementally syncs the active CLI **Conversation** during **Statusline** runs and scans both `~/.gemini/antigravity-cli/conversations/*.db` and `~/.gemini/antigravity/conversations/*.db` read-only (`?immutable=1` or temp-copied active WAL) during `stats` and `dashboard`.
 - **Persistent Keepalive Dashboard**: Binds strictly to `127.0.0.1`, validates `Host`/`Origin` + CSP headers, and uses `/api/keepalive` SSE streams + `/api/ping` + `pagehide` `/api/disconnect` beacons so minimized or backgrounded browser tabs stay connected indefinitely and exit only after all pages close.
+
+### Dashboard HTTP API
+
+All endpoints validate `Host` (and `Origin` on `POST` routes) to restrict access to loopback browser clients:
+
+- `GET /api/overview`: Query **Ledger** overview JSON. Supports `range`, `from`, `to`, `granularity`, `source`, `model`, `workspace`, `includeSubagents`, plus multi-device parameters:
+  - `account`: `all` (default) | `<email>` | `unassigned`
+  - `device`: `all` (default) | `<device_id>` | `local`
+  - Response includes `meta.account`, `meta.device`, `meta.localDeviceId`, `meta.availableAccounts`, `meta.availableDevices`, `byAccount`, `byDevice`, `accountQuotas`, `syncStatus`, and `sessions[].accountId` / `deviceId` / `deviceName`.
+- `GET /api/export.json` & `GET /api/export.csv`: Accept the same `account` and `device` filter parameters alongside existing range/source/model/workspace filters (`export.csv` also accepts `kind=timeseries|models|sessions`).
+- `POST /api/sync-remote`: Non-blocking remote synchronization trigger (runs `pull` + `push` against the configured **Sync Remote** with a 30 s server-side throttle). Pass `?force=1` (or `?force=true`) or JSON body `{"force": true}` to bypass the throttle. Returns `{ ok, enabled, changed, throttled, inProgress, pulledChunks, pushedChunks, stepsImported, error?, syncStatus }`.
 
 ---
 
@@ -278,6 +340,101 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 
 ---
 
+## Multi-Device Sync Configuration (`agy-pulse-sync.json`)
+
+Multi-device sync configuration is stored exclusively in the global private file `~/.gemini/antigravity-cli/agy-pulse-sync.json` (or `$AGY_PULSE_SYNC_CONFIG`), created atomically with `0700` parent directory and `0600` file permissions on Unix. **It is never read from or written to workspace `agy-pulse.config.json`**, preventing credentials from being committed to Git repositories.
+
+### Top-Level Sync Fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | `boolean` | `false` | Enable automatic background `--sync-bg` push and **Dashboard** `/api/sync-remote` sync |
+| `deviceId` | `string` (optional) | *auto-managed* | Immutable local **Device** ID synchronized with `ledger_meta.local_device_id` |
+| `deviceName` | `string` (optional) | OS hostname | Display name shown in `sync status` and **Dashboard** (mutable without splitting history) |
+| `defaultAccount` | `string` (optional) | *unset* | Normalized fallback **Account** email when host `stdin.email` is unavailable (e.g. IDE or historical records) |
+| `pushIntervalSec` | `number` | `300` | Minimum interval in seconds (`>= 1`) between automatic Statusline `--sync-bg` pushes |
+| `prefix` | `string` | `"agy-pulse-sync"` | Remote object key root prefix (`/` trimmed) |
+| `remote` | `object` | `{ "type": "local-dir", "path": "" }` | Single active **Sync Remote** backend configuration (see below) |
+
+### Sync Remote Backends & Examples
+
+1. **Local Sync Directory (`local-dir`)** — Syncthing, iCloud Drive, Dropbox, OneDrive:
+   - Fields: `type` (`"local-dir"`), `path` (`string`).
+   ```json
+   {
+     "enabled": true,
+     "deviceName": "lab-ubuntu",
+     "defaultAccount": "alice@example.com",
+     "pushIntervalSec": 300,
+     "prefix": "agy-pulse-sync",
+     "remote": {
+       "type": "local-dir",
+       "path": "/home/alice/Sync/agy-pulse"
+     }
+   }
+   ```
+
+2. **WebDAV (`webdav`, alias `web-dav`)** — Nextcloud, Jianguoyun, Alist, Caddy/Nginx WebDAV:
+   - Fields: `type` (`"webdav"`), `url` (`string`), `username` (`string?`), `password` (`string?`, overridden by `AGY_PULSE_SYNC_PASSWORD`), `token` (`string?`, overridden by `AGY_PULSE_SYNC_TOKEN`), `allow_insecure_http` (`boolean`, default `false`).
+   ```json
+   {
+     "enabled": true,
+     "deviceName": "macbook-pro",
+     "defaultAccount": "alice@example.com",
+     "pushIntervalSec": 300,
+     "prefix": "agy-pulse-sync",
+     "remote": {
+       "type": "webdav",
+       "url": "https://dav.example.com/remote.php/dav/files/alice/agy-pulse",
+       "username": "alice",
+       "password": "",
+       "allow_insecure_http": false
+     }
+   }
+   ```
+
+3. **S3-Compatible Object Storage (`s3`)** — Cloudflare R2, AWS S3, Backblaze B2, MinIO, Aliyun OSS:
+   - Fields: `type` (`"s3"`), `endpoint` (`string`), `region` (`string`, default `"auto"`), `bucket` (`string`), `access_key` (`string?`, overridden by `AGY_PULSE_S3_ACCESS_KEY`), `secret_key` (`string?`, overridden by `AGY_PULSE_S3_SECRET_KEY`), `path_style` (`boolean`, default `true`), `allow_insecure_http` (`boolean`, default `false`).
+   ```json
+   {
+     "enabled": true,
+     "deviceName": "workstation",
+     "defaultAccount": "alice@example.com",
+     "pushIntervalSec": 300,
+     "prefix": "agy-pulse-sync",
+     "remote": {
+       "type": "s3",
+       "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+       "region": "auto",
+       "bucket": "agy-pulse-sync",
+       "access_key": "",
+       "secret_key": "",
+       "path_style": true,
+       "allow_insecure_http": false
+     }
+   }
+   ```
+
+4. **Cloudflare Worker (`cf-worker`)** — R2-first with free-tier KV fallback (see [`deploy/cloudflare-worker/README.md`](../deploy/cloudflare-worker/README.md)):
+   - Fields: `type` (`"cf-worker"`), `url` (`string`), `token` (`string?`, overridden by `AGY_PULSE_SYNC_TOKEN`), `allow_insecure_http` (`boolean`, default `false`).
+   ```json
+   {
+     "enabled": true,
+     "deviceName": "laptop",
+     "defaultAccount": "alice@example.com",
+     "pushIntervalSec": 300,
+     "prefix": "agy-pulse-sync",
+     "remote": {
+       "type": "cf-worker",
+       "url": "https://agy-pulse-sync.example.workers.dev",
+       "token": "",
+       "allow_insecure_http": false
+     }
+   }
+   ```
+
+---
+
 ## Environment Variables
 
 | Variable | Purpose |
@@ -299,6 +456,12 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 | `AGY_PULSE_DASHBOARD_PORT` | Override preferred loopback port for status-line dashboard auto-start (default `3789`) |
 | `AGY_PULSE_DASHBOARD_IDLE_SEC` | Override idle auto-exit timeout in seconds for `agypl dashboard open` / `--background` (default `600`) and status-line auto-start (default `1800`; `0` disables idle exit) |
 | `AGY_PULSE_DASHBOARD_CLOSE_GRACE_MS` | Override close-grace window in milliseconds after the last page disconnects |
+| `AGY_PULSE_SYNC_CONFIG` | Override path to private `agy-pulse-sync.json` (never reads workspace directories) |
+| `AGY_PULSE_SYNC_TOKEN` | Override Bearer token for `webdav` / `cf-worker` sync remotes without storing in JSON |
+| `AGY_PULSE_SYNC_PASSWORD` | Override Basic Auth password for `webdav` sync remotes without storing in JSON |
+| `AGY_PULSE_S3_ACCESS_KEY` | Override `s3` access key ID without storing in JSON |
+| `AGY_PULSE_S3_SECRET_KEY` | Override `s3` secret access key without storing in JSON |
+| `AGY_PULSE_NO_SYNC_AUTOSTART` | Set `1` / `true` / `yes` to disable automatic background `--sync-bg` push from Statusline runs |
 | `AGY_PULSE_PROFILE_PATH` | Override PowerShell profile path for `scripts/configure-utf8.ps1` |
 | `COLUMNS` | Fallback terminal column width |
 | `NO_COLOR` | Disable ANSI colors in `agypl stats` output |
@@ -344,8 +507,11 @@ agy-pulse/
 │   ├── render/                        # Pure in-memory layout, context bar, quota table, width, i18n
 │   ├── config/                        # Deep-merge config loader & interactive raw-TTY wizard
 │   ├── dashboard/                     # 127.0.0.1 HTTP server, SSE keepalive, launcher & embedded SPA
-│   ├── ops/                           # Native installer, safe uninstaller & SHA-256 self-updater
+│   ├── sync/                          # Multi-device object sync engine, 4 remotes & `sync` CLI
+│   ├── ops/                           # Native installer, uninstaller, `account assign` & updater
 │   └── platform/                      # Unix / Windows OS abstraction boundary
+├── deploy/
+│   └── cloudflare-worker/             # Zero-dependency Cloudflare Worker (R2 / KV) sync template
 ├── scripts/
 │   ├── install.sh / install.ps1       # Prebuilt release archive installers with SHA-256 check
 │   ├── deploy-local.sh                # Local Cargo release build + deploy + smoke check
@@ -353,5 +519,5 @@ agy-pulse/
 ├── skills/pulse-config/SKILL.md       # Agent config skill
 ├── docs/                              # Architecture, ADRs, module & reference docs (en / zh)
 └── tests/
-    └── t01..t11_*.rs                  # Black-box integration, parity & packaging test suites
+    └── t01..t14_*.rs                  # Black-box integration, parity, sync & packaging test suites
 ```

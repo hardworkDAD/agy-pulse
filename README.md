@@ -28,6 +28,24 @@ Includes a built-in local Web Dashboard (`agypl dashboard`) and 3 provider quota
 - **Context & Server Compaction Monitor**: Lock-free read-only SQLite + Protobuf decoding of server **Compaction** ceilings (`?immutable=1` / WAL temp-copy), `CHECKPOINT` peak retention, per-model cumulative cache hit breakdowns, and `Compaction imminent` alerts at 85%+.
 - **Unified Pricing & Cascade Accounting**: Single authoritative billing formula (including system prompt `f4.f1` tokens, cache tiers, and >200k long-context rates) shared identically across the **Statusline** and **Dashboard**, aggregating full **Cascade** trees (main **Conversation** + subagent descendants).
 - **Unified SQLite WAL Ledger & Persistent Keepalive Web Dashboard**: Bundled SQLite WAL **Ledger** (`agy-pulse-ledger.sqlite`) merges Antigravity CLI and IDE telemetry; `agypl dashboard open` launches a standalone `127.0.0.1` Web **Dashboard** that stays online across browser tab hiding/minimization and exits cleanly only after all open pages close.
+- **Multi-Device Object Sync (Zero Conflict, Privacy-First)**: Aggregates telemetry across machines by **`Account` → `Device` → `Source` (`cli` / `ide`) → `Cascade`** and shares each **Account**'s latest **Quota Snapshot** across devices. Uploads only sanitized metadata and monthly compressed chunks — **zero conversation text, zero local `workspace` paths, and zero Git branch names**. The **Statusline** hot path stays strictly local-only and triggers throttled background pushes (`--sync-bg`), while the **Dashboard** refreshes asynchronously in the background.
+
+## Multi-Device Sync Remotes
+
+Supported **Sync Remote** backends (one active at a time, configured in global `0600` `~/.gemini/antigravity-cli/agy-pulse-sync.json`):
+
+- **WebDAV** (`webdav`) — Nextcloud, Jianguoyun, Alist, Nginx/Caddy WebDAV
+- **S3-Compatible Object Storage** (`s3`) — Cloudflare R2, AWS S3, Backblaze B2, MinIO, Aliyun OSS (pure-Rust SigV4, zero OpenSSL)
+- **Cloudflare Worker** (`cf-worker`) — R2-first with free-tier KV fallback; see [`deploy/cloudflare-worker/README.md`](./deploy/cloudflare-worker/README.md)
+- **Local Sync Directory** (`local-dir`) — Syncthing, iCloud Drive, Dropbox, OneDrive
+
+Quick start:
+
+```bash
+agy-pulse sync init                   # interactive setup & connectivity probe
+agy-pulse sync                        # manual pull + push
+agy-pulse account assign alice@example.com   # assign local unassigned records
+```
 
 ## Quick Start
 
@@ -66,6 +84,8 @@ Both `agypl` and `agy-pulse` expose identical subcommands:
 |---|---|---|
 | `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | Manage offline local Web Dashboard (`127.0.0.1:3789`, standalone window & shortcut) |
 | `agypl stats [range] [options]` | `report`, `--stats` | Print CLI & Antigravity IDE telemetry summary in terminal |
+| `agypl sync [init\|status\|prune-device]` | — | Synchronize multi-device **Ledger** chunks and **Quota Snapshots** with active **Sync Remote** |
+| `agypl account assign <email> [options]` | — | Reassign local `unassigned` **Conversations** and steps to `<email>` |
 | `agypl config` | `--config` | Launch interactive terminal configuration wizard with live Statusline preview |
 | `agypl install [--bin-dir <dir>]` | `--install` | Deploy `agy-pulse` & `agypl` binaries and register `statusLine` in host `settings.json` |
 | `agypl uninstall [--purge-ledger]` | `--uninstall` | Safely remove `statusLine`, binaries, shortcuts & caches (preserves Ledger by default) |

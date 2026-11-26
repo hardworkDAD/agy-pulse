@@ -14,14 +14,20 @@
   - [主命令速查](#主命令速查)
   - [`agypl stats` 参数全表](#agypl-stats-参数全表)
   - [`agypl dashboard` 子命令与参数全表](#agypl-dashboard-子命令与参数全表)
+  - [`agypl sync` 子命令与参数全表](#agypl-sync-子命令与参数全表)
+  - [`agypl account` 子命令与参数全表](#agypl-account-子命令与参数全表)
   - [`agypl install` / `uninstall` / `update` 参数](#agypl-install--uninstall--update-参数)
 - [永久遥测账本与本地网页看板（`stats` / `dashboard`）](#永久遥测账本与本地网页看板stats--dashboard)
+  - [网页看板 HTTP API](#网页看板-http-api)
 - [卸载机制说明](#卸载机制说明)
 - [完整配置项参考](#完整配置项参考)
   - [配置文件路径与合并优先级](#配置文件路径与合并优先级)
   - [完整默认配置示例](#完整默认配置示例)
   - [顶层配置参数表](#顶层配置参数表)
   - [`display.*` 全量参数表](#display-全量参数表)
+- [多机同步私有配置（`agy-pulse-sync.json`）](#多机同步私有配置agy-pulse-syncjson)
+  - [顶层同步配置字段表](#顶层同步配置字段表)
+  - [4 种同步远端配置说明与示例](#4-种同步远端配置说明与示例)
 - [环境变量全表](#环境变量全表)
 - [本地开发与 v1 平滑升级](#本地开发与-v1-平滑升级)
 - [完整目录结构](#完整目录结构)
@@ -100,6 +106,8 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
 |---|---|---|
 | `agypl stats [range] [options]` | `report`, `--stats` | 输出 CLI 与 Antigravity IDE 终端遥测速查报表 |
 | `agypl dashboard [action] [options]` | `dash`, `ui`, `--dashboard` | 启动或管理本地离线**网页看板**（默认 `127.0.0.1:3789`，支持桌面图标与长效保活） |
+| `agypl sync [subcommand] [options]` | — | 与已激活的**同步远端**同步**账本**分片与**配额快照** |
+| `agypl account assign <email> [options]` | — | 将本机 `unassigned` 存量**单窗对话**与步骤归属到指定邮箱 |
 | `agypl config` | `--config` | 打开交互式终端配置向导（支持实时**状态栏**预览与原子写盘） |
 | `agypl install [--bin-dir <dir>]` | `--install` | 部署原生 `agy-pulse` / `agypl` 二进制并向宿主 `settings.json` 注册 `statusLine` |
 | `agypl uninstall [--purge-ledger]` | `--uninstall` | 安全移除 `statusLine`、二进制、快捷方式与缓存（默认保留**账本**） |
@@ -147,6 +155,49 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
 | `--lang <val>`, `--zh`, `--en` | `auto \| en \| zh` | `auto` | 指定**网页看板**初始语言 |
 | `--no-sync` | 开关标志 | `false` | 跳过启动时 DB 补扫，直接展示现有**账本** |
 
+### `agypl sync` 子命令与参数全表
+
+| 命令 / 参数 | 可选值 / 格式 | 默认值 | 说明 |
+|---|---|---|---|
+| `agypl sync` | 双向同步 | 先 Pull 后 Push | 拉取远端其他**设备**分片与**配额快照**，再推送本机增量变更 |
+| `agypl sync --push` | 开关标志 | `false` | 仅推送本机数据至**同步远端**（不可与 `--pull` 同用） |
+| `agypl sync --pull` | 开关标志 | `false` | 仅拉取远端**设备**数据至本机**账本**（不可与 `--push` 同用） |
+| `agypl sync --dry-run` | 开关标志 | `false` | 仅预览待上传/下载分片与清单，不实际修改远端或本机**账本** |
+| `agypl sync --no-local-scan` | 开关标志 | `false` | 同步前跳过扫描本机 `conversations/*.db` |
+| `agypl sync status` | 子命令 | — | 输出本机 `device_id`、`device_name`、最近观测邮箱、脱敏远端目标、Push/Pull 时间、错误及已知**设备** |
+| `agypl sync init [options]` | 子命令 | 交互引导 | 初始化 `~/.gemini/antigravity-cli/agy-pulse-sync.json`（`0600`）并执行 `probe()` 自检（传 `--skip-probe` 可跳过） |
+| `--type <backend>` | `local-dir \| webdav \| s3 \| cf-worker` | *交互选择* | 指定**同步远端**后端类型（`init`） |
+| `--path <dir>` | 目录路径 | *交互输入* | `local-dir` 本地同步目录路径（`init`） |
+| `--url <url>` | HTTPS URL（或回环 HTTP） | *交互输入* | `webdav` 或 `cf-worker` 远端 URL（`init`） |
+| `--endpoint <url>` | HTTPS URL | *交互输入* | `s3` 兼容对象存储 Endpoint URL（`init`） |
+| `--bucket <name>` | 字符串 | *交互输入* | `s3` 存储桶名称（`init`） |
+| `--region <region>` | 字符串 | `auto` | `s3` 签名区域（`init`） |
+| `--username <user>` | 字符串 | *未设置* | WebDAV Basic Auth 用户名（`init`） |
+| `--password <pass>` | 字符串 | *未设置* | WebDAV Basic Auth 密码（`init`） |
+| `--token <token>` | 字符串 | *未设置* | `webdav` 或 `cf-worker` Bearer 令牌（`init`） |
+| `--access-key <ak>` | 字符串 | *未设置* | `s3` Access Key ID（`init`） |
+| `--secret-key <sk>` | 字符串 | *未设置* | `s3` Secret Access Key（`init`） |
+| `--path-style <true\|false>` | 布尔值 | `true` | `s3` 是否使用 Path-Style 寻址（`init`） |
+| `--allow-insecure-http` | 开关标志（或 `=true\|false`） | `false` | 允许非回环 `http://` 地址（用于内网 WebDAV/MinIO，`init`） |
+| `--device-name <name>` | 字符串 | 操作系统主机名 | 自定义本机展示名称（`init`） |
+| `--default-account <email>` | 规范化邮箱 | *未设置* | 当 IDE 或历史记录无邮箱时的默认回退**账号**（`init`） |
+| `--prefix <prefix>` | 对象前缀 | `agy-pulse-sync` | 远端对象键根前缀（`init`） |
+| `--push-interval <sec>` | 整数 `>= 1` | `300` | 状态栏后台自动 Push 最小节流间隔秒数（`init`） |
+| `--skip-probe` | 开关标志 | `false` | 保存配置前跳过 `probe()` 连通性检测（`init`） |
+| `agypl sync prune-device <device_id>` | 子命令 | — | 删除指定 `<device_id>` 的远端对象与本机 SQLite 缓存行 |
+| `--force` | 开关标志 | `false` | 允许清理当前本机**设备**在远端的数据（`prune-device`） |
+| `--dry-run` | 开关标志 | `false` | 仅预览将被删除的对象清单而不实际删除（`prune-device`） |
+
+### `agypl account` 子命令与参数全表
+
+| 命令 / 参数 | 可选值 / 格式 | 默认值 | 说明 |
+|---|---|---|---|
+| `agypl account assign <email>` | 子命令 | — | 将本机 `unassigned` **单窗对话**与步骤重新归属到规范化 `<email>`（不改动已归属或远端**设备**记录） |
+| `--all-unassigned` | 开关标志 | 默认行为 | 归属本机全部 `unassigned` **单窗对话**（不可与 `--workspace` 联用） |
+| `--workspace <substr>` | 子串 | *未设置* | 仅归属 `workspace` 包含 `<substr>` 的本机 `unassigned` **单窗对话** |
+| `--dry-run` | 开关标志 | `false` | 仅预览匹配的**单窗对话**与步骤数量，不写入数据库 |
+| `-h`, `--help` | 开关标志 | — | 显示 `account` 或 `assign` 帮助说明 |
+
 ### `agypl install` / `uninstall` / `update` 参数
 
 | 命令 | 参数 | 说明 |
@@ -164,6 +215,17 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
 - **统一 SQLite WAL 账本（`agy-pulse-ledger.sqlite`）**：内嵌静态编译 `rusqlite`（启用 WAL 模式与忙等待超时），集中保存 CLI 与 IDE 双源**单窗对话**步级遥测、**任务树（Cascade）**父子血缘以及防**上下文压缩**倒扣的今日/7日滚动花费（文件权限 `0600`）。
 - **无锁双源采集**：**状态栏**热路径增量同步当前活跃**单窗对话**；执行 `stats` 或 `dashboard` 时自动以只读模式（`?immutable=1` 或活跃 WAL 临时副本）扫描 `~/.gemini/antigravity-cli/conversations/*.db` 与 `~/.gemini/antigravity/conversations/*.db`。
 - **长效在线网页看板**：严格绑定 `127.0.0.1` 并校验 `Host` / `Origin` 与 CSP 头；前端页面通过 `/api/keepalive` SSE 长连接 + `/api/ping` 租约 + `pagehide` `sendBeacon` `/api/disconnect` 维持在线状态，窗口最小化或切至后台标签页永不断连，仅在所有打开页面真正关闭并度过刷新宽限窗口后优雅退出。
+
+### 网页看板 HTTP API
+
+所有接口均校验 `Host`（`POST` 路由同时校验 `Origin`），仅允许本机回环浏览器访问：
+
+- `GET /api/overview`：查询**账本**聚合概览 JSON。支持 `range`、`from`、`to`、`granularity`、`source`、`model`、`workspace`、`includeSubagents` 及以下多机筛选参数：
+  - `account`：`all`（默认）| `<email>` | `unassigned`
+  - `device`：`all`（默认）| `<device_id>` | `local`
+  - 返回结构包含 `meta.account`、`meta.device`、`meta.localDeviceId`、`meta.availableAccounts`、`meta.availableDevices`、`byAccount`、`byDevice`、`accountQuotas`、`syncStatus` 以及 `sessions[].accountId` / `deviceId` / `deviceName`。
+- `GET /api/export.json` 与 `GET /api/export.csv`：同样支持 `account` 与 `device` 过滤参数（`export.csv` 另支持 `kind=timeseries|models|sessions`）。
+- `POST /api/sync-remote`：非阻塞按需触发远端双向同步（执行 `pull` + `push`），服务端默认带 30 秒防连点节流。传入查询参数 `?force=1`（或 `?force=true`）或 JSON 请求体 `{"force": true}` 可绕过节流立即执行；返回 `{ ok, enabled, changed, throttled, inProgress, pulledChunks, pushedChunks, stepsImported, error?, syncStatus }`。
 
 ---
 
@@ -280,6 +342,101 @@ bash uninstall.sh        # macOS / Linux
 
 ---
 
+## 多机同步私有配置（`agy-pulse-sync.json`）
+
+多机同步配置专门存放在用户全局私有文件 `~/.gemini/antigravity-cli/agy-pulse-sync.json`（或 `$AGY_PULSE_SYNC_CONFIG`），在 Unix 下强制以目录 `0700`、文件 `0600` 权限原子落盘。**严禁放入工作区 `agy-pulse.config.json`**（程序也绝不会从任何工作区目录读取同步配置），以防密钥随项目提交至 Git 仓库。
+
+### 顶层同步配置字段表
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | `boolean` | `false` | 是否启用状态栏后台 `--sync-bg` 推送与**网页看板** `/api/sync-remote` 同步 |
+| `deviceId` | `string`（可选） | *自动管理* | 不可变的本机**设备**唯一标识，与 `ledger_meta.local_device_id` 保持一致 |
+| `deviceName` | `string`（可选） | 操作系统主机名 | 展示在 `sync status` 与**网页看板**中的**设备**名称（可随时修改而不分裂历史记录） |
+| `defaultAccount` | `string`（可选） | *未设置* | 当无法从宿主 `stdin.email` 获取邮箱时（如 IDE 或历史记录）的回退默认**账号** |
+| `pushIntervalSec` | `number` | `300` | 状态栏自动拉起后台 `--sync-bg` 推送的最小间隔秒数（`>= 1`） |
+| `prefix` | `string` | `"agy-pulse-sync"` | 远端对象存储根前缀（自动去除首尾 `/`） |
+| `remote` | `object` | `{ "type": "local-dir", "path": "" }` | 当前唯一激活的**同步远端**配置（见下方 4 种后端） |
+
+### 4 种同步远端配置说明与示例
+
+1. **本地同步目录（`local-dir`）** —— Syncthing、iCloud Drive、Dropbox、OneDrive：
+   - 字段：`type`（`"local-dir"`）、`path`（`string`）。
+   ```json
+   {
+     "enabled": true,
+     "deviceName": "lab-ubuntu",
+     "defaultAccount": "alice@example.com",
+     "pushIntervalSec": 300,
+     "prefix": "agy-pulse-sync",
+     "remote": {
+       "type": "local-dir",
+       "path": "/home/alice/Sync/agy-pulse"
+     }
+   }
+   ```
+
+2. **WebDAV（`webdav`，兼容别名 `web-dav`）** —— 坚果云、Nextcloud、Alist、Caddy/Nginx WebDAV：
+   - 字段：`type`（`"webdav"`）、`url`（`string`）、`username`（`string?`）、`password`（`string?`，可被 `AGY_PULSE_SYNC_PASSWORD` 覆盖）、`token`（`string?`，可被 `AGY_PULSE_SYNC_TOKEN` 覆盖）、`allow_insecure_http`（`boolean`，默认 `false`）。
+   ```json
+   {
+     "enabled": true,
+     "deviceName": "macbook-pro",
+     "defaultAccount": "alice@example.com",
+     "pushIntervalSec": 300,
+     "prefix": "agy-pulse-sync",
+     "remote": {
+       "type": "webdav",
+       "url": "https://dav.example.com/remote.php/dav/files/alice/agy-pulse",
+       "username": "alice",
+       "password": "",
+       "allow_insecure_http": false
+     }
+   }
+   ```
+
+3. **S3 兼容对象存储（`s3`）** —— Cloudflare R2、AWS S3、Backblaze B2、MinIO、阿里云 OSS：
+   - 字段：`type`（`"s3"`）、`endpoint`（`string`）、`region`（`string`，默认 `"auto"`）、`bucket`（`string`）、`access_key`（`string?`，可被 `AGY_PULSE_S3_ACCESS_KEY` 覆盖）、`secret_key`（`string?`，可被 `AGY_PULSE_S3_SECRET_KEY` 覆盖）、`path_style`（`boolean`，默认 `true`）、`allow_insecure_http`（`boolean`，默认 `false`）。
+   ```json
+   {
+     "enabled": true,
+     "deviceName": "workstation",
+     "defaultAccount": "alice@example.com",
+     "pushIntervalSec": 300,
+     "prefix": "agy-pulse-sync",
+     "remote": {
+       "type": "s3",
+       "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+       "region": "auto",
+       "bucket": "agy-pulse-sync",
+       "access_key": "",
+       "secret_key": "",
+       "path_style": true,
+       "allow_insecure_http": false
+     }
+   }
+   ```
+
+4. **Cloudflare Worker（`cf-worker`）** —— R2 优先 + 免费 KV 自动回退（部署见 [`deploy/cloudflare-worker/README.md`](../deploy/cloudflare-worker/README.md)）：
+   - 字段：`type`（`"cf-worker"`）、`url`（`string`）、`token`（`string?`，可被 `AGY_PULSE_SYNC_TOKEN` 覆盖）、`allow_insecure_http`（`boolean`，默认 `false`）。
+   ```json
+   {
+     "enabled": true,
+     "deviceName": "laptop",
+     "defaultAccount": "alice@example.com",
+     "pushIntervalSec": 300,
+     "prefix": "agy-pulse-sync",
+     "remote": {
+       "type": "cf-worker",
+       "url": "https://agy-pulse-sync.example.workers.dev",
+       "token": "",
+       "allow_insecure_http": false
+     }
+   }
+   ```
+
+---
+
 ## 环境变量全表
 
 | 环境变量 | 用途 |
@@ -301,6 +458,12 @@ bash uninstall.sh        # macOS / Linux
 | `AGY_PULSE_DASHBOARD_PORT` | 覆盖状态栏自动拉起网页看板时的首选监听端口（默认 `3789`） |
 | `AGY_PULSE_DASHBOARD_IDLE_SEC` | 覆盖 `agypl dashboard open` / `--background`（默认 `600`）及状态栏自动拉起（默认 `1800`）的空闲自动退出秒数（`0` 表示不自动退出） |
 | `AGY_PULSE_DASHBOARD_CLOSE_GRACE_MS` | 覆盖最后一个页面关闭后的优雅退出宽限毫秒数 |
+| `AGY_PULSE_SYNC_CONFIG` | 自定义私有同步配置文件 `agy-pulse-sync.json` 路径（绝不读取工作区目录） |
+| `AGY_PULSE_SYNC_TOKEN` | 覆盖 `webdav` / `cf-worker` 的 Bearer 令牌（避免明文落盘） |
+| `AGY_PULSE_SYNC_PASSWORD` | 覆盖 `webdav` 的 Basic Auth 密码（避免明文落盘） |
+| `AGY_PULSE_S3_ACCESS_KEY` | 覆盖 `s3` Access Key ID（避免明文落盘） |
+| `AGY_PULSE_S3_SECRET_KEY` | 覆盖 `s3` Secret Access Key（避免明文落盘） |
+| `AGY_PULSE_NO_SYNC_AUTOSTART` | 设为 `1` / `true` / `yes` 时禁止状态栏自动拉起后台 `--sync-bg` 推送 |
 | `AGY_PULSE_PROFILE_PATH` | 覆盖 `scripts/configure-utf8.ps1` 的 PowerShell Profile 路径 |
 | `COLUMNS` | 终端列宽兜底值 |
 | `NO_COLOR` | 禁用 `agypl stats` ANSI 彩色输出 |
@@ -346,8 +509,11 @@ agy-pulse/
 │   ├── render/                        # 纯内存状态栏排版、进度条、配额表、宽字符截断与双语
 │   ├── config/                        # 深度合并配置加载器与原始终端交互式向导
 │   ├── dashboard/                     # 127.0.0.1 本地看板服务、SSE 页面保活、启动器与内嵌前端
-│   ├── ops/                           # 原生安装器、安全卸载器与 SHA-256 自更新器
+│   ├── sync/                          # 多机对象同步引擎、4 种同步远端与 `sync` CLI 子命令
+│   ├── ops/                           # 原生安装器、安全卸载器、`account assign` 与自更新器
 │   └── platform/                      # Unix / Windows 系统底层差异封装
+├── deploy/
+│   └── cloudflare-worker/             # 零构建依赖 Cloudflare Worker（R2 / KV）同步模板
 ├── scripts/
 │   ├── install.sh / install.ps1       # 预编译包一键下载与 SHA-256 校验安装脚本
 │   ├── deploy-local.sh                # 本地 Cargo Release 编译部署与冒烟自检
@@ -355,5 +521,5 @@ agy-pulse/
 ├── skills/pulse-config/SKILL.md       # Agent 交互式配置技能
 ├── docs/                              # 中英文架构、ADR、模块与参考文档
 └── tests/
-    └── t01..t11_*.rs                  # 黑盒集成测试、双端黄金对拍与打包 E2E 套件
+    └── t01..t14_*.rs                  # 黑盒集成测试、双端黄金对拍、多机同步与打包 E2E 套件
 ```

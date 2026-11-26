@@ -120,8 +120,28 @@ Alternatively, the user can run the native `agypl` (or `agy-pulse`) command dire
 agypl config                              # or --config
 agypl stats [today|24h|7d|30d|month|all]  # or report / --stats
 agypl dashboard                           # or dash / ui / --dashboard
+agypl sync [init|status|prune-device]     # multi-device object sync / 多机同步
+agypl account assign <email> [options]    # assign local unassigned records / 存量记录账号归属
 agypl install                             # or --install
 agypl uninstall [--purge-ledger]          # or --uninstall
 agypl update                              # or --update
 agypl help                                # or --help / -h
 ```
+
+## 4. Multi-Device Sync & Account Assignment Guide / 多机同步与账号归属配置引导
+
+When the user asks to set up multi-device sync, connect a **Sync Remote** (`local-dir`, `webdav`, `s3`, or `cf-worker`), inspect sync state, or assign historical `unassigned` records to an **Account**, guide them through the dedicated CLI commands instead of editing `agy-pulse.config.json`:
+
+当用户需要配置多机同步、连接**同步远端**（`local-dir`、`webdav`、`s3`、`cf-worker`）、查看同步状态或将本机历史未归属（`unassigned`）记录归入指定**账号**时，请引导使用以下 CLI 命令：
+
+```bash
+agy-pulse sync init                        # interactive setup & probe / 交互式配置远端并执行连通性自检
+agy-pulse sync status                      # show device ID, redacted remote & devices / 查看本机标识、脱敏远端与已知设备
+agy-pulse sync                             # manual pull + push / 手动执行双向同步
+agy-pulse account assign alice@example.com # assign local unassigned records / 收编本机未归属记录（支持 --workspace / --dry-run）
+```
+
+> **CRITICAL Security Boundary / 安全红线**：
+> - Multi-device sync configuration and credentials (`token`, `password`, `access_key`, `secret_key`) MUST ONLY reside in the global `0600` private file `~/.gemini/antigravity-cli/agy-pulse-sync.json` (or `$AGY_PULSE_SYNC_CONFIG`), or be injected via environment variables (`AGY_PULSE_SYNC_TOKEN`, `AGY_PULSE_SYNC_PASSWORD`, `AGY_PULSE_S3_ACCESS_KEY`, `AGY_PULSE_S3_SECRET_KEY`).
+> - **NEVER** write sync configuration, remote URLs, or credentials into workspace `./agy-pulse.config.json` (or global `agy-pulse.config.json`), so secrets can never be accidentally committed to Git.
+> - 多机同步配置与密钥（`token`、`password`、`access_key`、`secret_key`）**只能**保存在全局 `0600` 私有文件 `~/.gemini/antigravity-cli/agy-pulse-sync.json`（或 `$AGY_PULSE_SYNC_CONFIG`），或通过环境变量注入；**绝不允许**写入工作区 `./agy-pulse.config.json`（或全局 `agy-pulse.config.json`），防止密钥随项目提交进 Git 仓库。
