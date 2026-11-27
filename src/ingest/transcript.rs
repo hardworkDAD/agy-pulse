@@ -2195,39 +2195,253 @@ fn resolve_child_model_speeds(
     }
 }
 
-fn can_fast_skip_transcript_line(trimmed: &str) -> bool {
-    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-        return false;
+#[inline]
+fn find_byte(needle: u8, haystack: &[u8]) -> Option<usize> {
+    #[cfg(unix)]
+    {
+        if haystack.is_empty() {
+            return None;
+        }
+        // SAFETY: `haystack.as_ptr()` is valid for `haystack.len()` bytes.
+        let ptr = unsafe {
+            libc::memchr(
+                haystack.as_ptr().cast::<libc::c_void>(),
+                needle as libc::c_int,
+                haystack.len(),
+            )
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some((ptr as usize) - (haystack.as_ptr() as usize))
+        }
     }
-    if trimmed.contains("\\u") {
-        return false;
+    #[cfg(not(unix))]
+    {
+        haystack.iter().position(|&b| b == needle)
     }
-    const SIGNALS: &[&str] = &[
-        "truncated_fields",
-        "CHECKPOINT",
-        "USER_INPUT",
-        "SYSTEM_MESSAGE",
-        "PLANNER_RESPONSE",
-        "SYSTEM",
-        "content",
-        "context_window",
-        "total_input_tokens",
-        "total_output_tokens",
-        "context_window_size",
-        "used_percentage",
-        "current_usage",
-        "ERROR",
-        "error",
-    ];
-    !SIGNALS.iter().any(|sig| trimmed.contains(sig))
 }
 
-fn fast_extract_step_index(line: &str) -> Option<u64> {
-    if !line.contains("\"step_index\"") {
+#[inline]
+fn contains_truncated_fields_key_bytes(haystack: &[u8]) -> bool {
+    const NEEDLE: &[u8] = b"\"truncated_fields\"";
+    let mut p = 0usize;
+    while let Some(rel) = find_byte(b'f', &haystack[p..]) {
+        let idx = p + rel;
+        if idx >= 11 && haystack[idx - 11..].starts_with(NEEDLE) {
+            return true;
+        }
+        p = idx + 1;
+    }
+    false
+}
+
+const SIGNAL_MIN_LEN: usize = 5;
+const TRANSCRIPT_SIGNALS_LEN5: &[&[u8]] = &[
+    b"ERROR",
+    b"error",
+    b"SYSTEM",
+    b"content",
+    b"CHECKPOINT",
+    b"USER_INPUT",
+    b"current_usage",
+    b"context_window",
+    b"used_percentage",
+    b"PLANNER_RESPONSE",
+    b"truncated_fields",
+    b"total_input_tokens",
+    b"total_output_tokens",
+];
+
+const fn build_signal_shift_table() -> [u8; 256] {
+    let mut table = [SIGNAL_MIN_LEN as u8; 256];
+    let mut s_idx = 0usize;
+    while s_idx < TRANSCRIPT_SIGNALS_LEN5.len() {
+        let sig = TRANSCRIPT_SIGNALS_LEN5[s_idx];
+        let mut pos = 0usize;
+        while pos < SIGNAL_MIN_LEN {
+            let dist = (SIGNAL_MIN_LEN - 1 - pos) as u8;
+            let b = sig[pos] as usize;
+            if dist < table[b] {
+                table[b] = dist;
+            }
+            pos += 1;
+        }
+        s_idx += 1;
+    }
+    table
+}
+
+static SIGNAL_SHIFT_TABLE: [u8; 256] = build_signal_shift_table();
+
+#[inline]
+fn matches_signal_len5_at(tail: &[u8], b4: u8) -> bool {
+    match b4 {
+        b'R' => tail.starts_with(b"ERROR"),
+        b'r' => tail.starts_with(b"error"),
+        b'E' => tail.starts_with(b"SYSTEM"),
+        b'e' => {
+            tail.starts_with(b"content")
+                || tail.starts_with(b"context_window")
+                || tail.starts_with(b"current_usage")
+        }
+        b'K' => tail.starts_with(b"CHECKPOINT"),
+        b'_' => tail.starts_with(b"USER_INPUT") || tail.starts_with(b"used_percentage"),
+        b'N' => tail.starts_with(b"PLANNER_RESPONSE"),
+        b'c' => tail.starts_with(b"truncated_fields"),
+        b'l' => {
+            tail.starts_with(b"total_input_tokens") || tail.starts_with(b"total_output_tokens")
+        }
+        _ => false,
+    }
+}
+
+fn find_first_transcript_signal_bytes(haystack: &[u8]) -> Option<usize> {
+    let mut first_u = None;
+    let mut p = 0usize;
+    while let Some(rel) = find_byte(b'\\', &haystack[p..]) {
+        let idx = p + rel;
+        if haystack.get(idx + 1) == Some(&b'u') {
+            first_u = Some(idx);
+            break;
+        }
+        p = idx + 1;
+    }
+
+    let search_end = first_u.unwrap_or(haystack.len());
+    if search_end >= SIGNAL_MIN_LEN {
+        let end_limit = search_end - SIGNAL_MIN_LEN;
+        let mut i = 0usize;
+        while i <= end_limit {
+            let b4 = haystack[i + 4];
+            let sh = SIGNAL_SHIFT_TABLE[b4 as usize] as usize;
+            if sh == 0 {
+                if matches_signal_len5_at(&haystack[i..], b4) {
+                    return Some(i);
+                }
+                i += 1;
+            } else {
+                i += sh;
+            }
+        }
+    }
+
+    first_u
+}
+
+#[inline]
+fn is_json_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+#[inline]
+fn parse_ascii_u64(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() {
         return None;
     }
-    let bytes = line.as_bytes();
-    let needle = b"\"step_index\"";
+    let mut val = 0u64;
+    for &d in digits {
+        val = val.checked_mul(10)?.checked_add((d - b'0') as u64)?;
+    }
+    Some(val)
+}
+
+fn parse_transcript_json_object(line_bytes: &[u8]) -> Option<Map<String, Value>> {
+    let trimmed = line_bytes.trim_ascii();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match serde_json::from_slice::<Value>(trimmed) {
+        Ok(Value::Object(obj)) => Some(obj),
+        Ok(_) => None,
+        Err(_) => {
+            let lossy = String::from_utf8_lossy(line_bytes);
+            let trimmed_str = lossy.trim();
+            if trimmed_str.is_empty() {
+                return None;
+            }
+            match serde_json::from_str::<Value>(trimmed_str) {
+                Ok(Value::Object(obj)) => Some(obj),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn collect_truncated_step_bytes(line_bytes: &[u8], needed_full_steps: &mut HashSet<u64>) {
+    if !contains_truncated_fields_key_bytes(line_bytes) {
+        return;
+    }
+    if let Some(obj) = parse_transcript_json_object(line_bytes)
+        && obj
+            .get("truncated_fields")
+            .and_then(Value::as_array)
+            .is_some_and(|arr| !arr.is_empty())
+        && let Some(step) = as_u64_val(obj.get("step_index"))
+    {
+        needed_full_steps.insert(step);
+    }
+}
+
+fn can_fast_skip_transcript_line_bytes(trimmed: &[u8]) -> bool {
+    trimmed.first() == Some(&b'{')
+        && trimmed.last() == Some(&b'}')
+        && find_first_transcript_signal_bytes(trimmed).is_none()
+}
+
+#[cfg(test)]
+fn can_fast_skip_transcript_line(trimmed: &str) -> bool {
+    can_fast_skip_transcript_line_bytes(trimmed.as_bytes())
+}
+
+fn fast_extract_step_index_bytes(bytes: &[u8]) -> Option<u64> {
+    const NEEDLE: &[u8] = b"\"step_index\"";
+
+    // O(1) fast path: most lines start directly with `{"step_index":<uint>,...`.
+    if bytes.first() == Some(&b'{') {
+        let mut j = 1usize;
+        while j < bytes.len() && is_json_ws(bytes[j]) {
+            j += 1;
+        }
+        if bytes[j..].starts_with(NEEDLE) {
+            j += NEEDLE.len();
+            while j < bytes.len() && is_json_ws(bytes[j]) {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b':' {
+                j += 1;
+                while j < bytes.len() && is_json_ws(bytes[j]) {
+                    j += 1;
+                }
+                let val_start = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > val_start
+                    && j < bytes.len()
+                    && (matches!(bytes[j], b',' | b'}') || is_json_ws(bytes[j]))
+                    && let Some(u) = parse_ascii_u64(&bytes[val_start..j])
+                {
+                    return Some(u);
+                }
+            }
+        }
+    }
+
+    let mut has_step_index_key = false;
+    let mut p = 0usize;
+    while let Some(rel) = find_byte(b'_', &bytes[p..]) {
+        let idx = p + rel;
+        if idx >= 5 && bytes[idx - 5..].starts_with(NEEDLE) {
+            has_step_index_key = true;
+            break;
+        }
+        p = idx + 1;
+    }
+    if !has_step_index_key {
+        return None;
+    }
+
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escape = false;
@@ -2249,14 +2463,14 @@ fn fast_extract_step_index(line: &str) -> Option<u64> {
 
         match b {
             b'"' => {
-                if depth == 1 && bytes[i..].starts_with(needle) {
-                    let mut j = i + needle.len();
-                    while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                if depth == 1 && bytes[i..].starts_with(NEEDLE) {
+                    let mut j = i + NEEDLE.len();
+                    while j < bytes.len() && is_json_ws(bytes[j]) {
                         j += 1;
                     }
                     if j < bytes.len() && bytes[j] == b':' {
                         j += 1;
-                        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                        while j < bytes.len() && is_json_ws(bytes[j]) {
                             j += 1;
                         }
                         let val_start = j;
@@ -2265,16 +2479,17 @@ fn fast_extract_step_index(line: &str) -> Option<u64> {
                         {
                             j += 1;
                         }
-                        let val_str = std::str::from_utf8(&bytes[val_start..j]).ok()?;
-                        if val_str.is_empty() {
+                        let val_bytes = &bytes[val_start..j];
+                        if val_bytes.is_empty() {
                             return None;
                         }
-                        if val_str.bytes().all(|c| c.is_ascii_digit())
-                            && let Ok(u) = val_str.parse::<u64>()
+                        if val_bytes.iter().all(u8::is_ascii_digit)
+                            && let Some(u) = parse_ascii_u64(val_bytes)
                         {
                             return Some(u);
                         }
-                        if let Ok(f) = val_str.parse::<f64>()
+                        if let Ok(val_str) = std::str::from_utf8(val_bytes)
+                            && let Ok(f) = val_str.parse::<f64>()
                             && f.is_finite()
                             && f >= 0.0
                         {
@@ -2296,6 +2511,381 @@ fn fast_extract_step_index(line: &str) -> Option<u64> {
         i += 1;
     }
     None
+}
+
+#[cfg(test)]
+fn fast_extract_step_index(line: &str) -> Option<u64> {
+    fast_extract_step_index_bytes(line.as_bytes())
+}
+
+fn process_clean_zone_bytes(
+    clean_bytes: &[u8],
+    state: &mut TranscriptAccState,
+    pass2_lines: &mut usize,
+    deadline: Option<Instant>,
+) -> (bool, u64) {
+    let mut pos = 0usize;
+    while pos < clean_bytes.len() {
+        let Some(rel_nl) = find_byte(b'\n', &clean_bytes[pos..]) else {
+            break;
+        };
+        *pass2_lines += 1;
+        if (*pass2_lines).is_multiple_of(1024)
+            && deadline.is_some_and(|d| Instant::now() >= d)
+        {
+            return (false, pos as u64);
+        }
+        let end = pos + rel_nl;
+        let trimmed = clean_bytes[pos..end].trim_ascii();
+        if trimmed.first() == Some(&b'{')
+            && trimmed.last() == Some(&b'}')
+            && let Some(step) = fast_extract_step_index_bytes(trimmed)
+            && step > state.steps
+        {
+            state.steps = step;
+        }
+        pos = end + 1;
+    }
+    (true, pos as u64)
+}
+
+struct TwoPassContext<'a> {
+    transcript_path: &'a Path,
+    start_offset: u64,
+    capped_delta: u64,
+    now_ms: i64,
+    deadline: Option<Instant>,
+}
+
+fn scan_transcript_two_pass(
+    file: &mut File,
+    ctx: TwoPassContext<'_>,
+    state: &mut TranscriptAccState,
+    offset: &mut u64,
+    cache_dirty: &mut bool,
+) {
+    let mut buf = vec![0u8; FULL_CHUNK_BYTES];
+    let mut carry: Vec<u8> = Vec::new();
+    let mut oversized = false;
+    let mut bytes_read_total = 0u64;
+    let mut consumed_bytes = 0u64;
+    let mut pending_len = 0u64;
+    let mut needed_full_steps: HashSet<u64> = HashSet::new();
+    let mut pass1_timed_out = false;
+
+    while bytes_read_total < ctx.capped_delta {
+        if ctx.deadline.is_some_and(|d| Instant::now() >= d) {
+            pass1_timed_out = true;
+            break;
+        }
+        let to_read = (ctx.capped_delta - bytes_read_total).min(FULL_CHUNK_BYTES as u64) as usize;
+        let Ok(n) = file.read(&mut buf[..to_read]) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        bytes_read_total += n as u64;
+        let slice = &buf[..n];
+        let mut start = 0usize;
+
+        if !carry.is_empty() || oversized {
+            if let Some(rel_nl) = find_byte(b'\n', slice) {
+                let seg_len = (rel_nl + 1) as u64;
+                consumed_bytes += pending_len + seg_len;
+                pending_len = 0;
+                if oversized {
+                    oversized = false;
+                    carry.clear();
+                } else {
+                    carry.extend_from_slice(&slice[..rel_nl]);
+                    collect_truncated_step_bytes(&carry, &mut needed_full_steps);
+                    carry.clear();
+                }
+                start = rel_nl + 1;
+            } else {
+                pending_len += slice.len() as u64;
+                if !oversized {
+                    if carry.len() + slice.len() > MAX_FULL_LINE_BYTES {
+                        oversized = true;
+                        carry.clear();
+                    } else {
+                        carry.extend_from_slice(slice);
+                    }
+                }
+                continue;
+            }
+        }
+
+        let rest = &slice[start..];
+        if rest.is_empty() {
+            continue;
+        }
+        if !contains_truncated_fields_key_bytes(rest) {
+            if let Some(last_nl) = rest.iter().rposition(|&b| b == b'\n') {
+                consumed_bytes += pending_len + (last_nl + 1) as u64;
+                pending_len = 0;
+                let tail = &rest[last_nl + 1..];
+                if !tail.is_empty() {
+                    pending_len += tail.len() as u64;
+                    if tail.len() > MAX_FULL_LINE_BYTES {
+                        oversized = true;
+                    } else {
+                        carry.extend_from_slice(tail);
+                    }
+                }
+            } else {
+                pending_len += rest.len() as u64;
+                if rest.len() > MAX_FULL_LINE_BYTES {
+                    oversized = true;
+                } else {
+                    carry.extend_from_slice(rest);
+                }
+            }
+        } else {
+            let mut pos = 0usize;
+            while pos < rest.len() {
+                if let Some(rel_nl) = find_byte(b'\n', &rest[pos..]) {
+                    let end = pos + rel_nl;
+                    consumed_bytes += pending_len + (end - pos + 1) as u64;
+                    pending_len = 0;
+                    collect_truncated_step_bytes(&rest[pos..end], &mut needed_full_steps);
+                    pos = end + 1;
+                } else {
+                    let tail = &rest[pos..];
+                    pending_len += tail.len() as u64;
+                    if tail.len() > MAX_FULL_LINE_BYTES {
+                        oversized = true;
+                    } else {
+                        carry.extend_from_slice(tail);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    let pass1_end_offset = ctx.start_offset + consumed_bytes;
+    if pass1_timed_out
+        || pass1_end_offset <= ctx.start_offset
+        || ctx.deadline.is_some_and(|d| Instant::now() >= d)
+    {
+        return;
+    }
+
+    let full_map = if needed_full_steps.is_empty() {
+        None
+    } else {
+        Some(load_full_entries_map(ctx.transcript_path, &needed_full_steps))
+    };
+
+    if ctx.deadline.is_some_and(|d| Instant::now() >= d)
+        || file.seek(SeekFrom::Start(ctx.start_offset)).is_err()
+    {
+        return;
+    }
+
+    let (_, main_conv_id) = resolve_brain_context(ctx.transcript_path);
+    let pass2_limit = pass1_end_offset - ctx.start_offset;
+    let mut pass2_read = 0u64;
+    let mut pass2_consumed = 0u64;
+    let mut pass2_pending = 0u64;
+    let mut pass2_lines = 0usize;
+    carry.clear();
+    oversized = false;
+
+    'pass2: while pass2_read < pass2_limit {
+        if ctx.deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
+        let to_read = (pass2_limit - pass2_read).min(FULL_CHUNK_BYTES as u64) as usize;
+        let Ok(n) = file.read(&mut buf[..to_read]) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        pass2_read += n as u64;
+        let slice = &buf[..n];
+        let mut start = 0usize;
+
+        if !carry.is_empty() || oversized {
+            if let Some(rel_nl) = find_byte(b'\n', slice) {
+                pass2_lines += 1;
+                if pass2_lines.is_multiple_of(256)
+                    && ctx.deadline.is_some_and(|d| Instant::now() >= d)
+                {
+                    break 'pass2;
+                }
+                pass2_consumed += pass2_pending + (rel_nl + 1) as u64;
+                pass2_pending = 0;
+                if oversized {
+                    oversized = false;
+                    carry.clear();
+                } else {
+                    carry.extend_from_slice(&slice[..rel_nl]);
+                    let trimmed = carry.trim_ascii();
+                    if !trimmed.is_empty() {
+                        if state.pending_planner_start_ms.is_none()
+                            && can_fast_skip_transcript_line_bytes(trimmed)
+                        {
+                            if let Some(step) = fast_extract_step_index_bytes(trimmed)
+                                && step > state.steps
+                            {
+                                state.steps = step;
+                            }
+                        } else if let Some(obj) = parse_transcript_json_object(&carry) {
+                            process_transcript_entry(
+                                obj,
+                                state,
+                                main_conv_id.as_deref(),
+                                full_map.as_ref(),
+                                ctx.now_ms,
+                            );
+                        }
+                    }
+                    carry.clear();
+                }
+                *offset = ctx.start_offset + pass2_consumed;
+                *cache_dirty = true;
+                start = rel_nl + 1;
+            } else {
+                pass2_pending += slice.len() as u64;
+                if !oversized {
+                    if carry.len() + slice.len() > MAX_FULL_LINE_BYTES {
+                        oversized = true;
+                        carry.clear();
+                    } else {
+                        carry.extend_from_slice(slice);
+                    }
+                }
+                continue;
+            }
+        }
+
+        while start < slice.len() {
+            if state.pending_planner_start_ms.is_some() {
+                if let Some(rel_nl) = find_byte(b'\n', &slice[start..]) {
+                    pass2_lines += 1;
+                    if pass2_lines.is_multiple_of(256)
+                        && ctx.deadline.is_some_and(|d| Instant::now() >= d)
+                    {
+                        break 'pass2;
+                    }
+                    let end = start + rel_nl;
+                    pass2_consumed += (end - start + 1) as u64;
+                    if let Some(obj) = parse_transcript_json_object(&slice[start..end]) {
+                        process_transcript_entry(
+                            obj,
+                            state,
+                            main_conv_id.as_deref(),
+                            full_map.as_ref(),
+                            ctx.now_ms,
+                        );
+                    }
+                    *offset = ctx.start_offset + pass2_consumed;
+                    *cache_dirty = true;
+                    start = end + 1;
+                } else {
+                    let tail = &slice[start..];
+                    pass2_pending += tail.len() as u64;
+                    if tail.len() > MAX_FULL_LINE_BYTES {
+                        oversized = true;
+                    } else {
+                        carry.extend_from_slice(tail);
+                    }
+                    break;
+                }
+                continue;
+            }
+
+            let rest = &slice[start..];
+            let next_sig_pos = find_first_transcript_signal_bytes(rest);
+            match next_sig_pos {
+                None => {
+                    if let Some(last_nl) = rest.iter().rposition(|&b| b == b'\n') {
+                        let clean_end = start + last_nl + 1;
+                        let (completed, clean_consumed) = process_clean_zone_bytes(
+                            &slice[start..clean_end],
+                            state,
+                            &mut pass2_lines,
+                            ctx.deadline,
+                        );
+                        if clean_consumed > 0 {
+                            pass2_consumed += clean_consumed;
+                            *offset = ctx.start_offset + pass2_consumed;
+                            *cache_dirty = true;
+                        }
+                        if !completed {
+                            break 'pass2;
+                        }
+                        start = clean_end;
+                    }
+                    let tail = &slice[start..];
+                    if !tail.is_empty() {
+                        pass2_pending += tail.len() as u64;
+                        if tail.len() > MAX_FULL_LINE_BYTES {
+                            oversized = true;
+                        } else {
+                            carry.extend_from_slice(tail);
+                        }
+                    }
+                    break;
+                }
+                Some(sig_rel) => {
+                    if let Some(last_clean_nl) = rest[..sig_rel].iter().rposition(|&b| b == b'\n') {
+                        let clean_end = start + last_clean_nl + 1;
+                        let (completed, clean_consumed) = process_clean_zone_bytes(
+                            &slice[start..clean_end],
+                            state,
+                            &mut pass2_lines,
+                            ctx.deadline,
+                        );
+                        if clean_consumed > 0 {
+                            pass2_consumed += clean_consumed;
+                            *offset = ctx.start_offset + pass2_consumed;
+                            *cache_dirty = true;
+                        }
+                        if !completed {
+                            break 'pass2;
+                        }
+                        start = clean_end;
+                    }
+                    if let Some(rel_nl) = find_byte(b'\n', &slice[start..]) {
+                        pass2_lines += 1;
+                        if pass2_lines.is_multiple_of(256)
+                            && ctx.deadline.is_some_and(|d| Instant::now() >= d)
+                        {
+                            break 'pass2;
+                        }
+                        let end = start + rel_nl;
+                        pass2_consumed += (end - start + 1) as u64;
+                        if let Some(obj) = parse_transcript_json_object(&slice[start..end]) {
+                            process_transcript_entry(
+                                obj,
+                                state,
+                                main_conv_id.as_deref(),
+                                full_map.as_ref(),
+                                ctx.now_ms,
+                            );
+                        }
+                        *offset = ctx.start_offset + pass2_consumed;
+                        *cache_dirty = true;
+                        start = end + 1;
+                    } else {
+                        let tail = &slice[start..];
+                        pass2_pending += tail.len() as u64;
+                        if tail.len() > MAX_FULL_LINE_BYTES {
+                            oversized = true;
+                        } else {
+                            carry.extend_from_slice(tail);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Incrementally scan a host `transcript.jsonl` file using inode + 256-byte head SHA-256 caching,
@@ -2362,30 +2952,29 @@ pub(super) fn scan_transcript_incremental(
                 let mut saw_skipped_line = false;
 
                 while line_start <= last_nl {
-                    let Some(rel_nl) = view[line_start..=last_nl].iter().position(|&b| b == b'\n')
-                    else {
+                    let Some(rel_nl) = find_byte(b'\n', &view[line_start..=last_nl]) else {
                         break;
                     };
                     let line_end = line_start + rel_nl;
                     let next_off = start_offset + (line_end + 1) as u64;
-                    let line_str = String::from_utf8_lossy(&view[line_start..line_end]);
                     let cur_start = line_start;
                     line_start = line_end + 1;
-                    let trimmed = line_str.trim();
+                    let trimmed = view[cur_start..line_end].trim_ascii();
                     if trimmed.is_empty() {
                         saw_skipped_line = true;
                         continue;
                     }
-                    if can_fast_skip_transcript_line(trimmed) {
+                    if can_fast_skip_transcript_line_bytes(trimmed) {
                         chunk_entries.push((
                             ChunkEntry::FastSkipCandidate {
                                 start: cur_start,
                                 end: line_end,
-                                step: fast_extract_step_index(trimmed),
+                                step: fast_extract_step_index_bytes(trimmed),
                             },
                             next_off,
                         ));
-                    } else if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+                    } else if let Some(obj) = parse_transcript_json_object(&view[cur_start..line_end])
+                    {
                         if obj
                             .get("truncated_fields")
                             .and_then(Value::as_array)
@@ -2440,24 +3029,20 @@ pub(super) fn scan_transcript_incremental(
                                     }
                                     offset = next_off;
                                     cache_dirty = true;
+                                } else if let Some(obj) =
+                                    parse_transcript_json_object(&view[start..end])
+                                {
+                                    process_transcript_entry(
+                                        obj,
+                                        &mut state,
+                                        main_conv_id.as_deref(),
+                                        full_map.as_ref(),
+                                        now_ms,
+                                    );
+                                    offset = next_off;
+                                    cache_dirty = true;
                                 } else {
-                                    let line_str = String::from_utf8_lossy(&view[start..end]);
-                                    let trimmed = line_str.trim();
-                                    if let Ok(Value::Object(obj)) =
-                                        serde_json::from_str::<Value>(trimmed)
-                                    {
-                                        process_transcript_entry(
-                                            obj,
-                                            &mut state,
-                                            main_conv_id.as_deref(),
-                                            full_map.as_ref(),
-                                            now_ms,
-                                        );
-                                        offset = next_off;
-                                        cache_dirty = true;
-                                    } else {
-                                        saw_skipped_line = true;
-                                    }
+                                    saw_skipped_line = true;
                                 }
                             }
                         }
@@ -2473,188 +3058,19 @@ pub(super) fn scan_transcript_incremental(
             }
         } else {
             // Two-pass 64KB O(1)-memory streaming scan for huge deltas (>8MB, capped at 64MB per call).
-            let mut buf = vec![0u8; FULL_CHUNK_BYTES];
-            let mut carry: Vec<u8> = Vec::new();
-            let mut oversized = false;
-            let mut bytes_read_total = 0u64;
-            let mut consumed_bytes = 0u64;
-            let mut pending_len = 0u64;
-            let mut needed_full_steps: HashSet<u64> = HashSet::new();
-            let mut pass1_timed_out = false;
-
-            while bytes_read_total < capped_delta {
-                if deadline.is_some_and(|d| Instant::now() >= d) {
-                    pass1_timed_out = true;
-                    break;
-                }
-                let to_read =
-                    (capped_delta - bytes_read_total).min(FULL_CHUNK_BYTES as u64) as usize;
-                let Ok(n) = file.read(&mut buf[..to_read]) else {
-                    break;
-                };
-                if n == 0 {
-                    break;
-                }
-                bytes_read_total += n as u64;
-                let slice = &buf[..n];
-                let mut start = 0usize;
-                while start < slice.len() {
-                    if let Some(rel_nl) = slice[start..].iter().position(|&b| b == b'\n') {
-                        let end = start + rel_nl;
-                        let seg_len = (end - start + 1) as u64;
-                        consumed_bytes += pending_len + seg_len;
-                        pending_len = 0;
-
-                        if oversized {
-                            oversized = false;
-                            carry.clear();
-                        } else {
-                            let line_bytes: &[u8] = if carry.is_empty() {
-                                &slice[start..end]
-                            } else {
-                                carry.extend_from_slice(&slice[start..end]);
-                                &carry
-                            };
-                            let line_str = String::from_utf8_lossy(line_bytes);
-                            if line_str.contains("\"truncated_fields\"") {
-                                let trimmed = line_str.trim();
-                                if !trimmed.is_empty()
-                                    && let Ok(Value::Object(obj)) =
-                                        serde_json::from_str::<Value>(trimmed)
-                                    && obj
-                                        .get("truncated_fields")
-                                        .and_then(Value::as_array)
-                                        .is_some_and(|arr| !arr.is_empty())
-                                    && let Some(step) = as_u64_val(obj.get("step_index"))
-                                {
-                                    needed_full_steps.insert(step);
-                                }
-                            }
-                            carry.clear();
-                        }
-                        start = end + 1;
-                    } else {
-                        let tail = &slice[start..];
-                        pending_len += tail.len() as u64;
-                        if !oversized {
-                            if carry.len() + tail.len() > MAX_FULL_LINE_BYTES {
-                                oversized = true;
-                                carry.clear();
-                            } else {
-                                carry.extend_from_slice(tail);
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-
-            let pass1_end_offset = start_offset + consumed_bytes;
-            if !pass1_timed_out
-                && pass1_end_offset > start_offset
-                && !deadline.is_some_and(|d| Instant::now() >= d)
-            {
-                let full_map = if needed_full_steps.is_empty() {
-                    None
-                } else {
-                    Some(load_full_entries_map(transcript_path, &needed_full_steps))
-                };
-
-                if !deadline.is_some_and(|d| Instant::now() >= d)
-                    && file.seek(SeekFrom::Start(start_offset)).is_ok()
-                {
-                    let (_, main_conv_id) = resolve_brain_context(transcript_path);
-                    let pass2_limit = pass1_end_offset - start_offset;
-                    let mut pass2_read = 0u64;
-                    let mut pass2_consumed = 0u64;
-                    let mut pass2_pending = 0u64;
-                    let mut pass2_lines = 0usize;
-                    carry.clear();
-                    oversized = false;
-
-                    'pass2: while pass2_read < pass2_limit {
-                        if deadline.is_some_and(|d| Instant::now() >= d) {
-                            break;
-                        }
-                        let to_read =
-                            (pass2_limit - pass2_read).min(FULL_CHUNK_BYTES as u64) as usize;
-                        let Ok(n) = file.read(&mut buf[..to_read]) else {
-                            break;
-                        };
-                        if n == 0 {
-                            break;
-                        }
-                        pass2_read += n as u64;
-                        let slice = &buf[..n];
-                        let mut start = 0usize;
-                        while start < slice.len() {
-                            if let Some(rel_nl) = slice[start..].iter().position(|&b| b == b'\n') {
-                                pass2_lines += 1;
-                                if pass2_lines.is_multiple_of(256)
-                                    && deadline.is_some_and(|d| Instant::now() >= d)
-                                {
-                                    break 'pass2;
-                                }
-                                let end = start + rel_nl;
-                                let seg_len = (end - start + 1) as u64;
-                                pass2_consumed += pass2_pending + seg_len;
-                                pass2_pending = 0;
-
-                                if oversized {
-                                    oversized = false;
-                                    carry.clear();
-                                } else {
-                                    let line_bytes: &[u8] = if carry.is_empty() {
-                                        &slice[start..end]
-                                    } else {
-                                        carry.extend_from_slice(&slice[start..end]);
-                                        &carry
-                                    };
-                                    let line_str = String::from_utf8_lossy(line_bytes);
-                                    let trimmed = line_str.trim();
-                                    if !trimmed.is_empty() {
-                                        if state.pending_planner_start_ms.is_none()
-                                            && can_fast_skip_transcript_line(trimmed)
-                                        {
-                                            if let Some(step) = fast_extract_step_index(trimmed)
-                                                && step > state.steps
-                                            {
-                                                state.steps = step;
-                                            }
-                                        } else if let Ok(Value::Object(obj)) =
-                                            serde_json::from_str::<Value>(trimmed)
-                                        {
-                                            process_transcript_entry(
-                                                obj,
-                                                &mut state,
-                                                main_conv_id.as_deref(),
-                                                full_map.as_ref(),
-                                                now_ms,
-                                            );
-                                        }
-                                    }
-                                    carry.clear();
-                                }
-                                offset = start_offset + pass2_consumed;
-                                cache_dirty = true;
-                                start = end + 1;
-                            } else {
-                                let tail = &slice[start..];
-                                pass2_pending += tail.len() as u64;
-                                if !oversized {
-                                    if carry.len() + tail.len() > MAX_FULL_LINE_BYTES {
-                                        oversized = true;
-                                        carry.clear();
-                                    } else {
-                                        carry.extend_from_slice(tail);
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+            scan_transcript_two_pass(
+                &mut file,
+                TwoPassContext {
+                    transcript_path,
+                    start_offset,
+                    capped_delta,
+                    now_ms,
+                    deadline,
+                },
+                &mut state,
+                &mut offset,
+                &mut cache_dirty,
+            );
         }
     } else if f_size == 0 && cache_path.exists() {
         cache_dirty = true;
@@ -2906,6 +3322,204 @@ mod tests {
             assert_eq!(
                 find_context_window_in_map(map, 0),
                 find_context_window(sample, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn two_pass_streaming_matches_full_serde_across_64kb_boundaries() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let main_id = "44440000-0000-0000-0000-000000000064";
+        let logs_dir = dir
+            .path()
+            .join("brain")
+            .join(main_id)
+            .join(".system_generated")
+            .join("logs");
+        fs::create_dir_all(&logs_dir).unwrap();
+        let transcript_path = logs_dir.join("transcript.jsonl");
+        let full_path = logs_dir.join("transcript_full.jsonl");
+
+        let now_ms = 1_760_000_000_000i64;
+        let full_error_line = serde_json::json!({
+            "step_index": 500,
+            "status": "ERROR",
+            "created_at": "2026-10-01T00:00:02.000Z",
+            "content": "HTTP 429 RESOURCE_EXHAUSTED",
+            "error": {
+                "code": 429,
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [{ "quotaResetTimeStamp": "2026-10-01T02:00:00.000Z" }]
+            }
+        })
+        .to_string();
+        fs::write(&full_path, format!("{full_error_line}\n")).unwrap();
+
+        let mut raw = String::new();
+        raw.push_str(
+            r#"{"step_index":1,"type":"USER_INPUT","created_at":"2026-10-01T00:00:00.000Z"}"#,
+        );
+        raw.push('\n');
+
+        let mut step = 2u64;
+        let push_clean_until = |buf: &mut String, step: &mut u64, target_offset: usize| {
+            let pad = "x".repeat(160);
+            while buf.len() + 260 < target_offset {
+                buf.push_str(&format!(
+                    "{{\"step_index\":{},\"type\":\"GENERIC\",\"pad\":\"{pad}\"}}\n",
+                    *step
+                ));
+                *step += 1;
+            }
+            if buf.len() < target_offset {
+                let rem = target_offset - buf.len();
+                let prefix = format!("{{\"step_index\":{},\"type\":\"GENERIC\",\"pad\":\"", *step);
+                let fill_len = rem.saturating_sub(prefix.len() + 3);
+                let fill = "y".repeat(fill_len);
+                buf.push_str(&format!("{prefix}{fill}\"}}\n"));
+                *step += 1;
+            }
+        };
+
+        // 1. Place truncated_fields entry straddling the 1st 64KB chunk boundary.
+        let trunc_line = r#"{"step_index":500,"status":"ERROR","created_at":"2026-10-01T00:00:02.000Z","content":"...truncated...","truncated_fields":["content"]}"#;
+        let trunc_key_offset = trunc_line.find("truncated_fields").unwrap();
+        push_clean_until(&mut raw, &mut step, FULL_CHUNK_BYTES - trunc_key_offset - 6);
+        assert!(raw.len() < FULL_CHUNK_BYTES);
+        assert!(raw.len() + trunc_line.len() > FULL_CHUNK_BYTES);
+        raw.push_str(trunc_line);
+        raw.push('\n');
+        step = 501;
+
+        // 2. Place PLANNER_RESPONSE straddling the 2nd 64KB chunk boundary.
+        let planner_line = r#"{"step_index":1000,"type":"PLANNER_RESPONSE","created_at":"2026-10-01T00:00:03.000Z","model":"gemini-4-carbon-high","output_tokens":77,"input_tokens":500}"#;
+        let planner_key_offset = planner_line.find("PLANNER_RESPONSE").unwrap();
+        push_clean_until(&mut raw, &mut step, 2 * FULL_CHUNK_BYTES - planner_key_offset - 8);
+        assert!(raw.len() < 2 * FULL_CHUNK_BYTES);
+        assert!(raw.len() + planner_line.len() > 2 * FULL_CHUNK_BYTES);
+        raw.push_str(planner_line);
+        raw.push('\n');
+        // Next line settles pending_planner_start_ms
+        raw.push_str(
+            r#"{"step_index":1001,"type":"GENERIC","created_at":"2026-10-01T00:00:05.500Z","pad":"settle-1"}"#,
+        );
+        raw.push('\n');
+        step = 1002;
+
+        // 3. Place another PLANNER_RESPONSE right before 3rd 64KB boundary so its settlement line straddles 3 * 64KB.
+        let settle_line = r#"{"step_index":1501,"type":"GENERIC","created_at":"2026-10-01T00:00:09.000Z","pad":"settle-across-boundary"}"#;
+        let planner_line_2 = r#"{"step_index":1500,"type":"PLANNER_RESPONSE","created_at":"2026-10-01T00:00:07.000Z","model":"gemini-4-carbon-high","output_tokens":23,"input_tokens":200}"#;
+        push_clean_until(
+            &mut raw,
+            &mut step,
+            3 * FULL_CHUNK_BYTES - planner_line_2.len() - 1 - settle_line.len() / 2,
+        );
+        raw.push_str(planner_line_2);
+        raw.push('\n');
+        assert!(raw.len() < 3 * FULL_CHUNK_BYTES);
+        assert!(raw.len() + settle_line.len() > 3 * FULL_CHUNK_BYTES);
+        raw.push_str(settle_line);
+        raw.push('\n');
+        step = 1502;
+
+        // 4. Clean GENERIC line straddling the 4th 64KB chunk boundary.
+        push_clean_until(&mut raw, &mut step, 4 * FULL_CHUNK_BYTES - 12);
+        let clean_boundary_line = format!(
+            "{{\"step_index\":{step},\"type\":\"GENERIC\",\"pad\":\"clean-across-boundary\"}}"
+        );
+        assert!(raw.len() < 4 * FULL_CHUNK_BYTES);
+        assert!(raw.len() + clean_boundary_line.len() > 4 * FULL_CHUNK_BYTES);
+        raw.push_str(&clean_boundary_line);
+        raw.push('\n');
+
+        {
+            let mut f = std::io::BufWriter::new(File::create(&transcript_path).unwrap());
+            f.write_all(raw.as_bytes()).unwrap();
+            f.flush().unwrap();
+        }
+
+        let file_len = fs::metadata(&transcript_path).unwrap().len();
+        let mut needed_steps = HashSet::new();
+        needed_steps.insert(500);
+        let full_map = load_full_entries_map(&transcript_path, &needed_steps);
+
+        let mut full_state = TranscriptAccState::default();
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+                process_transcript_entry(obj, &mut full_state, Some(main_id), Some(&full_map), now_ms);
+            }
+        }
+
+        let mut file = File::open(&transcript_path).unwrap();
+        let mut two_pass_state = TranscriptAccState::default();
+        let mut offset = 0u64;
+        let mut cache_dirty = false;
+        scan_transcript_two_pass(
+            &mut file,
+            TwoPassContext {
+                transcript_path: &transcript_path,
+                start_offset: 0,
+                capped_delta: file_len,
+                now_ms,
+                deadline: None,
+            },
+            &mut two_pass_state,
+            &mut offset,
+            &mut cache_dirty,
+        );
+
+        assert!(cache_dirty);
+        assert_eq!(offset, file_len);
+        assert_eq!(two_pass_state.steps, step);
+        assert_eq!(two_pass_state.total_output_tokens, 100);
+        assert_eq!(two_pass_state.total_api_duration_ms, 4_500);
+        assert!(two_pass_state.image_exhausted_reset_ms.is_some());
+        assert_eq!(
+            serde_json::to_value(&two_pass_state).unwrap(),
+            serde_json::to_value(&full_state).unwrap()
+        );
+    }
+
+    #[test]
+    fn signal_matcher_matches_reference_signals_at_all_offsets() {
+        let ref_re = regex::bytes::Regex::new(
+            r"\\u|truncated_fields|CHECKPOINT|USER_INPUT|PLANNER_RESPONSE|SYSTEM|content|context_window|total_input_tokens|total_output_tokens|used_percentage|current_usage|ERROR|error",
+        )
+        .unwrap();
+
+        let samples: &[&[u8]] = &[
+            b"",
+            b"abc",
+            b"{\"step_index\":1,\"type\":\"GENERIC\",\"pad\":\"xxxxxxxx\"}",
+            b"\\u0045RROR",
+            b"xx\\n\\t\\u1234yy",
+            b"ERROR",
+            b"xERROR",
+            b"error",
+            b"SYSTEM_MESSAGE",
+            b"context_window_size",
+            b"prefix truncated_fields suffix",
+            b"prefix \\u middle error",
+            b"prefix error middle \\u",
+            b"CHECKPOINT",
+            b"USER_INPUT",
+            b"PLANNER_RESPONSE",
+            b"content",
+            b"total_input_tokens",
+            b"total_output_tokens",
+            b"used_percentage",
+            b"current_usage",
+        ];
+
+        for &sample in samples {
+            assert_eq!(
+                find_first_transcript_signal_bytes(sample),
+                ref_re.find(sample).map(|m| m.start()),
+                "mismatch for {:?}",
+                String::from_utf8_lossy(sample)
             );
         }
     }
