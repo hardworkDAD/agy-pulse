@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
+use std::time::{Duration, Instant};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -329,11 +330,39 @@ pub(super) fn write_http_response(
     }
     head.push_str("\r\n");
 
-    stream.write_all(head.as_bytes())?;
-    if send_body && !body.is_empty() {
-        stream.write_all(body)?;
+    if send_body && !body.is_empty() && body.len() <= MAX_BODY_BYTES {
+        let mut frame = Vec::with_capacity(head.len() + body.len());
+        frame.extend_from_slice(head.as_bytes());
+        frame.extend_from_slice(body);
+        stream.write_all(&frame)?;
+    } else {
+        stream.write_all(head.as_bytes())?;
+        if send_body && !body.is_empty() {
+            stream.write_all(body)?;
+        }
     }
     stream.flush()
+}
+
+/// Gracefully half-close and boundedly drain an early-rejected HTTP connection
+/// (RFC 9112 §9.6) so closing the socket does not send a TCP RST that truncates
+/// the client's unread error response.
+pub(super) fn finish_early_error_response(stream: &mut TcpStream) {
+    const MAX_DRAIN_BYTES: usize = 256 * 1024;
+
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+
+    let deadline = Instant::now() + Duration::from_millis(150);
+    let mut discard = [0u8; 4096];
+    let mut drained = 0usize;
+
+    while drained < MAX_DRAIN_BYTES && Instant::now() < deadline {
+        match stream.read(&mut discard) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained = drained.saturating_add(n),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -434,5 +463,84 @@ mod tests {
         assert_eq!(reason_phrase(413), "Payload Too Large");
         assert_eq!(reason_phrase(422), "Unprocessable Entity");
         assert_eq!(reason_phrase(503), "Service Unavailable");
+    }
+
+    #[test]
+    fn http_wire_early_413_coalesced_and_graceful_close_delivers_full_body() {
+        let oversized_body = vec![b'x'; 65 * 1024];
+        let expected_body = br#"{"error":"request body too large"}"#;
+
+        for iter in 0..20 {
+            let Ok(listener) = TcpListener::bind(("127.0.0.1", 0)) else {
+                panic!("iter {iter}: bind loopback failed");
+            };
+            let Ok(addr) = listener.local_addr() else {
+                panic!("iter {iter}: local_addr failed");
+            };
+
+            let server_handle = thread::spawn(move || {
+                let Ok((mut server_stream, _)) = listener.accept() else {
+                    panic!("iter {iter}: accept failed");
+                };
+                let parse_res = read_http_request(&mut server_stream);
+                assert!(
+                    matches!(parse_res, Err(HttpParseError::PayloadTooLarge)),
+                    "iter {iter}: expected PayloadTooLarge, got {parse_res:?}"
+                );
+                let write_res = write_http_response(
+                    &mut server_stream,
+                    413,
+                    "application/json; charset=utf-8",
+                    expected_body,
+                    true,
+                    &[],
+                );
+                assert!(write_res.is_ok(), "iter {iter}: write_http_response failed");
+                finish_early_error_response(&mut server_stream);
+            });
+
+            let Ok(mut client) = TcpStream::connect(addr) else {
+                panic!("iter {iter}: connect failed");
+            };
+            let _ = client.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = client.set_write_timeout(Some(Duration::from_secs(5)));
+
+            let req_head = format!(
+                "POST /api/sync-remote HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                addr.port(),
+                oversized_body.len()
+            );
+            let _ = client.write_all(req_head.as_bytes());
+            let _ = client.write_all(&oversized_body);
+            let _ = client.flush();
+
+            let mut raw = Vec::new();
+            if let Err(err) = client.read_to_end(&mut raw) {
+                panic!("iter {iter}: client read_to_end failed without clean EOF: {err}");
+            }
+            drop(client);
+
+            let text = String::from_utf8_lossy(&raw);
+            let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                panic!("iter {iter}: missing HTTP header/body separator in {text:?}");
+            };
+            let Some(status_line) = head.lines().next() else {
+                panic!("iter {iter}: missing status line in {head:?}");
+            };
+            assert!(
+                status_line.starts_with("HTTP/1.1 413"),
+                "iter {iter}: unexpected status line {status_line:?}"
+            );
+            assert_eq!(
+                body.as_bytes(),
+                expected_body,
+                "iter {iter}: truncated or mismatched 413 JSON body"
+            );
+
+            assert!(
+                server_handle.join().is_ok(),
+                "iter {iter}: server thread panicked"
+            );
+        }
     }
 }

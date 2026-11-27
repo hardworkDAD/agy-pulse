@@ -21,8 +21,8 @@ use crate::render::resolve_language_from_locale;
 use crate::sync::{SyncOutcomeKind, build_remote, load_sync_config, sync_both};
 
 use super::http_wire::{
-    HttpParseError, HttpRequest, is_allowed_host, is_allowed_origin, parse_query_params,
-    query_param, read_http_request, write_http_response,
+    HttpParseError, HttpRequest, finish_early_error_response, is_allowed_host, is_allowed_origin,
+    parse_query_params, query_param, read_http_request, write_http_response,
 };
 use super::keepalive::{
     KeepaliveState, resolve_close_grace_ms, resolve_ping_lease_ms, resolve_sse_ping_interval_ms,
@@ -605,10 +605,12 @@ fn handle_connection(stream: &mut TcpStream, shared: &ServerSharedState) {
         Err(HttpParseError::EmptyOrEof) => return,
         Err(HttpParseError::PayloadTooLarge) => {
             send_error_json(stream, 413, "request body too large");
+            finish_early_error_response(stream);
             return;
         }
         Err(HttpParseError::InvalidRequest(msg)) => {
             send_error_json(stream, 400, msg);
+            finish_early_error_response(stream);
             return;
         }
         Err(HttpParseError::Io) => return,
