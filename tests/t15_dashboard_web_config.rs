@@ -2269,9 +2269,11 @@ fn t15_dashboard_html_settings_ui_anchors_placeholders_and_security_headers() {
     );
 
     for anchor in [
+        "id=\"dashboard-view\"",
+        "id=\"settings-page\"",
+        "id=\"btn-settings-back\"",
+        "id=\"settings-tabs\"",
         "id=\"btn-settings\"",
-        "id=\"settings-overlay\"",
-        "id=\"settings-drawer\"",
         "id=\"tab-btn-pulse\"",
         "id=\"tab-btn-sync\"",
         "id=\"tab-pane-pulse\"",
@@ -2295,10 +2297,44 @@ fn t15_dashboard_html_settings_ui_anchors_placeholders_and_security_headers() {
         );
     }
 
-    for retired_ui in ["pulse-icon-token", "pulse-icon-ctx"] {
+    for retired_ui in [
+        "pulse-icon-token",
+        "pulse-icon-ctx",
+        "id=\"settings-drawer\"",
+        "id=\"settings-overlay\"",
+    ] {
         assert!(
             !res.body.contains(retired_ui),
-            "retired icon input '{retired_ui}' must not appear in dashboard HTML"
+            "retired UI anchor '{retired_ui}' must not appear in dashboard HTML"
+        );
+    }
+
+    for settings_route in ["/settings", "/settings/", "/settings/pulse", "/settings/sync"] {
+        let s_res = send_http(port, "GET", settings_route, &[], "");
+        assert_eq!(
+            s_res.status, 200,
+            "expected 200 OK for standalone settings route {settings_route}"
+        );
+        let s_head_lower = s_res.head.to_ascii_lowercase();
+        assert!(
+            s_head_lower.contains("content-security-policy: default-src 'self'"),
+            "expected CSP header on {settings_route}"
+        );
+        assert!(
+            s_head_lower.contains("x-frame-options: deny"),
+            "expected X-Frame-Options: DENY on {settings_route}"
+        );
+        assert!(
+            s_head_lower.contains("cache-control: no-store"),
+            "expected Cache-Control: no-store on {settings_route}"
+        );
+        assert!(
+            s_res.body.contains(&expected_token_decl),
+            "expected injected CSRF token declaration on {settings_route}"
+        );
+        assert!(
+            s_res.body.contains("id=\"settings-page\""),
+            "expected settings-page anchor on {settings_route}"
         );
     }
 

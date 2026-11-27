@@ -212,7 +212,7 @@ Both `agypl` and `agy-pulse` expose identical subcommands and flags.
 
 - **Unified SQLite WAL Ledger (`agy-pulse-ledger.sqlite`)**: Built-in `rusqlite` (`bundled` SQLite with WAL mode and `busy_timeout`) stores all CLI and IDE **Conversation** steps, **Cascade** lineage, and monotonic rolling daily/7-day cost state (`0600` file permissions).
 - **Lock-free dual-source scanning**: `agy-pulse` incrementally syncs the active CLI **Conversation** during **Statusline** runs and scans both `~/.gemini/antigravity-cli/conversations/*.db` and `~/.gemini/antigravity/conversations/*.db` read-only (`?immutable=1` or temp-copied active WAL) during `stats` and `dashboard`.
-- **Persistent Keepalive Dashboard & Built-in Settings Drawer**: Binds strictly to `127.0.0.1`, validates `Host`/`Origin` + CSP headers, and uses `/api/keepalive` SSE streams + `/api/ping` + `pagehide` `/api/disconnect` beacons so minimized or backgrounded browser tabs stay connected indefinitely and exit only after all pages close. The top-bar **Settings** drawer lets you visually edit global **Pulse Config** (with live Rust **Statusline** preview and all advanced fields) and **Sync Config** (supporting all 4 **Sync Remote** backends, write-only credentials, live connection tests, and config removal), sharing the same underlying config files as `agypl config` and `agypl sync init`.
+- **Persistent Keepalive Dashboard & Built-in Settings Page**: Binds strictly to `127.0.0.1`, validates `Host`/`Origin` + CSP headers, and uses `/api/keepalive` SSE streams + `/api/ping` + `pagehide` `/api/disconnect` beacons so minimized or backgrounded browser tabs stay connected indefinitely and exit only after all pages close. The dedicated **Settings** page (`/settings`, `/settings/sync`, reachable from the floating dock) lets you visually edit global **Pulse Config** (with full-width live Rust **Statusline** preview and all advanced fields) and **Sync Config** (supporting all 4 **Sync Remote** backends, write-only credentials, live connection tests, and config removal), sharing the same underlying config files as `agypl config` and `agypl sync init`.
 
 ### Dashboard HTTP API
 
@@ -261,9 +261,9 @@ Or run `agypl uninstall` directly. Removes `agy-pulse` & `agypl` binaries, `sett
 
 ### Config Paths & Merge Precedence
 
-1. **Environment overrides**: `AGY_PULSE_LANGUAGE`, `AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_FORCE_ASCII` / `AGY_PULSE_FORCE_UNICODE` (displayed as override badges in the **Dashboard** Settings drawer and never persisted back to disk)
+1. **Environment overrides**: `AGY_PULSE_LANGUAGE`, `AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_FORCE_ASCII` / `AGY_PULSE_FORCE_UNICODE` (displayed as override badges on the **Dashboard** Settings page and never persisted back to disk)
 2. **Workspace local config** (highest file priority): `./agy-pulse.config.json` (takes runtime precedence over global config for **Statusline**; never modified by the Web **Dashboard**)
-3. **Global config**: `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (also discovers legacy `agy-pulse-runtime/runtime/agy-pulse.config.json`, or `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`; edited by both `agypl config` and the Web **Dashboard** Settings drawer)
+3. **Global config**: `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (also discovers legacy `agy-pulse-runtime/runtime/agy-pulse.config.json`, or `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`; edited by both `agypl config` and the Web **Dashboard** Settings page)
 4. **Built-in defaults** (`DisplayConfig::builtin_defaults()`, lowest priority)
 
 Unknown or retired keys (`endpoints`, `interestingModels`, `cloudQuota`, `repository`, `display.showModel`, `display.showTokenBar`, `display.showContextBar`, `display.showTurnCacheHitRate`, `display.showCost`, `icons.token`, `icons.ctx`) are silently ignored during deserialization for backward compatibility, and `"quotaStyle": "models"` smoothly maps to `"table"`.
@@ -348,7 +348,7 @@ Unknown or retired keys (`endpoints`, `interestingModels`, `cloudQuota`, `reposi
 
 ## Multi-Device Sync Configuration (`agy-pulse-sync.json`)
 
-Multi-device sync configuration is stored exclusively in the global private file `~/.gemini/antigravity-cli/agy-pulse-sync.json` (or `$AGY_PULSE_SYNC_CONFIG`), created atomically with `0700` parent directory and `0600` file permissions on Unix. Manage it via `agypl sync init` or the local Web **Dashboard** top-bar **Settings** drawer (Sync Config tab, with write-only credential inputs, active `AGY_PULSE_*` env override indicators, live connection probe, and safe removal). **It is never read from or written to workspace `agy-pulse.config.json`**, preventing credentials from being committed to Git repositories.
+Multi-device sync configuration is stored exclusively in the global private file `~/.gemini/antigravity-cli/agy-pulse-sync.json` (or `$AGY_PULSE_SYNC_CONFIG`), created atomically with `0700` parent directory and `0600` file permissions on Unix. Manage it via `agypl sync init` or the local Web **Dashboard** **Settings** page (`/settings/sync`, Sync Config tab, with write-only credential inputs, active `AGY_PULSE_*` env override indicators, live connection probe, and safe removal). **It is never read from or written to workspace `agy-pulse.config.json`**, preventing credentials from being committed to Git repositories.
 
 ### Top-Level Sync Fields
 

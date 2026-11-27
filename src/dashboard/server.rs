@@ -1053,7 +1053,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 &[],
             );
         }
-        "/" | "/index.html" => {
+        "/" | "/index.html" | "/settings" | "/settings/" | "/settings/pulse" | "/settings/sync" => {
             if method != "GET" && method != "HEAD" {
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;

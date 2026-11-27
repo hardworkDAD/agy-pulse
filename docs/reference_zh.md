@@ -214,7 +214,7 @@ irm "https://raw.githubusercontent.com/$env:AGY_PULSE_REPO/main/scripts/install.
 
 - **统一 SQLite WAL 账本（`agy-pulse-ledger.sqlite`）**：内嵌静态编译 `rusqlite`（启用 WAL 模式与忙等待超时），集中保存 CLI 与 IDE 双源**单窗对话**步级遥测、**任务树（Cascade）**父子血缘以及防**上下文压缩**倒扣的今日/7日滚动花费（文件权限 `0600`）。
 - **无锁双源采集**：**状态栏**热路径增量同步当前活跃**单窗对话**；执行 `stats` 或 `dashboard` 时自动以只读模式（`?immutable=1` 或活跃 WAL 临时副本）扫描 `~/.gemini/antigravity-cli/conversations/*.db` 与 `~/.gemini/antigravity/conversations/*.db`。
-- **长效在线网页看板与内置「设置」抽屉**：严格绑定 `127.0.0.1` 并校验 `Host` / `Origin` 与 CSP 头；前端页面通过 `/api/keepalive` SSE 长连接 + `/api/ping` 租约 + `pagehide` `sendBeacon` `/api/disconnect` 维持在线状态，窗口最小化或切至后台标签页永不断连，仅在所有打开页面真正关闭并度过刷新宽限窗口后优雅退出。顶栏内置「设置」抽屉，可图形化管理全局**偏好配置**（含实时 Rust **状态栏**预览与全部高级选项）与全局 `0600` **同步配置**（支持全部 4 种**同步远端**初始化、只写凭据编辑、实时连通性测试与安全移除），与 `agypl config` / `agypl sync init` 共用同一底层配置文件。
+- **长效在线网页看板与内置「设置」独立页面**：严格绑定 `127.0.0.1` 并校验 `Host` / `Origin` 与 CSP 头；前端页面通过 `/api/keepalive` SSE 长连接 + `/api/ping` 租约 + `pagehide` `sendBeacon` `/api/disconnect` 维持在线状态，窗口最小化或切至后台标签页永不断连，仅在所有打开页面真正关闭并度过刷新宽限窗口后优雅退出。内置独立「设置」页面（`/settings`、`/settings/sync`，通过底部浮动 Dock 切换），可图形化管理全局**偏好配置**（含全宽实时 Rust **状态栏**预览与全部高级选项）与全局 `0600` **同步配置**（支持全部 4 种**同步远端**初始化、只写凭据编辑、实时连通性测试与安全移除），与 `agypl config` / `agypl sync init` 共用同一底层配置文件。
 
 ### 网页看板 HTTP API
 
@@ -263,9 +263,9 @@ bash uninstall.sh        # macOS / Linux
 
 ### 配置文件路径与合并优先级
 
-1. **环境变量覆盖**：`AGY_PULSE_LANGUAGE`、`AGY_PULSE_DASHBOARD_PORT`、`AGY_PULSE_DASHBOARD_IDLE_SEC`、`AGY_PULSE_FORCE_ASCII` / `AGY_PULSE_FORCE_UNICODE`（在**网页看板**「设置」抽屉中仅作生效来源徽章提示，绝不反写落盘）
-2. **工作区局部配置**（最高文件优先级）：`./agy-pulse.config.json`（**状态栏**运行期仍优先于全局配置；**网页看板**设置抽屉绝不触碰或修改任何工作区文件）
-3. **全局配置**：`~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json`（兼容自动发现旧路径 `agy-pulse-runtime/runtime/agy-pulse.config.json`，或 `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`；`agypl config` 与**网页看板**「设置」抽屉共同读写此文件）
+1. **环境变量覆盖**：`AGY_PULSE_LANGUAGE`、`AGY_PULSE_DASHBOARD_PORT`、`AGY_PULSE_DASHBOARD_IDLE_SEC`、`AGY_PULSE_FORCE_ASCII` / `AGY_PULSE_FORCE_UNICODE`（在**网页看板**「设置」页面中仅作生效来源徽章提示，绝不反写落盘）
+2. **工作区局部配置**（最高文件优先级）：`./agy-pulse.config.json`（**状态栏**运行期仍优先于全局配置；**网页看板**设置页面绝不触碰或修改任何工作区文件）
+3. **全局配置**：`~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json`（兼容自动发现旧路径 `agy-pulse-runtime/runtime/agy-pulse.config.json`，或 `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`；`agypl config` 与**网页看板**「设置」页面共同读写此文件）
 4. **内置默认值**（`DisplayConfig::builtin_defaults()`，最低优先级）
 
 反序列化对旧版已退役字段（`endpoints`、`interestingModels`、`cloudQuota`、`repository`、`display.showModel`、`display.showTokenBar`、`display.showContextBar`、`display.showTurnCacheHitRate`、`display.showCost`、`icons.token`、`icons.ctx`）向后兼容、静默忽略不报错；`"quotaStyle": "models"` 自动平滑回退为 `"table"`。
@@ -315,7 +315,7 @@ bash uninstall.sh        # macOS / Linux
 | `language` | `"auto" \| "en" \| "zh"` | `"auto"` | 界面语言（`"auto"` 自动读取 `LC_ALL` / `LC_CTYPE` / `LANG`） |
 | `theme` | `object \| string` | `{ primary: "green", secondary: "gray", warning: "yellow", critical: "red" }` | 4 键配色对象、预设字符串（`"Emerald Green"`、`"Ocean Blue"`、`"Cyberpunk Magenta"`、`"Amber Gold"`）或单色名 |
 | `thresholds` | `{ warning, critical }` | `{ warning: 0.7, critical: 0.9 }` | 配额警告/告警比例（`0`–`1`）；底栏上下文监控默认 `65%`/`85%`，自定义时同步按比例生效 |
-| `icons` | `object` | *未设置* | 自定义图标覆写（`branch`、`plan`、`step`、`task`、`model`，最长 8 字符；**网页看板**设置抽屉提供 `branch` 编辑，旧版 `token`/`ctx` 已退役并静默忽略） |
+| `icons` | `object` | *未设置* | 自定义图标覆写（`branch`、`plan`、`step`、`task`、`model`，最长 8 字符；**网页看板**设置页面提供 `branch` 编辑，旧版 `token`/`ctx` 已退役并静默忽略） |
 
 ### `display.*` 全量参数表
 
@@ -350,7 +350,7 @@ bash uninstall.sh        # macOS / Linux
 
 ## 多机同步私有配置（`agy-pulse-sync.json`）
 
-多机同步配置专门存放在用户全局私有文件 `~/.gemini/antigravity-cli/agy-pulse-sync.json`（或 `$AGY_PULSE_SYNC_CONFIG`），在 Unix 下强制以目录 `0700`、文件 `0600` 权限原子落盘。除 `agypl sync init` 外，也可直接在本地**网页看板**顶栏「设置」抽屉的「同步配置」标签页中图形化管理（支持凭据只写不回显、`AGY_PULSE_*` 环境变量覆盖提示、实时连通性测试与安全移除）。**严禁放入工作区 `agy-pulse.config.json`**（程序也绝不会从任何工作区目录读取同步配置），以防密钥随项目提交至 Git 仓库。
+多机同步配置专门存放在用户全局私有文件 `~/.gemini/antigravity-cli/agy-pulse-sync.json`（或 `$AGY_PULSE_SYNC_CONFIG`），在 Unix 下强制以目录 `0700`、文件 `0600` 权限原子落盘。除 `agypl sync init` 外，也可直接在本地**网页看板**「设置」页面（`/settings/sync`）的「同步配置」标签页中图形化管理（支持凭据只写不回显、`AGY_PULSE_*` 环境变量覆盖提示、实时连通性测试与安全移除）。**严禁放入工作区 `agy-pulse.config.json`**（程序也绝不会从任何工作区目录读取同步配置），以防密钥随项目提交至 Git 仓库。
 
 ### 顶层同步配置字段表
 
