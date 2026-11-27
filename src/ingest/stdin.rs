@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::domain::{
     ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity, ProviderQuotaSummary,
@@ -341,15 +341,39 @@ fn extract_native_cost(root: &Value) -> Option<f64> {
     None
 }
 
-fn is_context_window_obj(val: &Value) -> bool {
-    let Some(map) = val.as_object() else {
-        return false;
-    };
+pub(super) fn is_context_window_map(map: &Map<String, Value>) -> bool {
     map.contains_key("total_input_tokens")
         || map.contains_key("total_output_tokens")
         || map.contains_key("context_window_size")
         || map.contains_key("used_percentage")
         || map.get("current_usage").is_some_and(Value::is_object)
+}
+
+fn is_context_window_obj(val: &Value) -> bool {
+    val.as_object().is_some_and(is_context_window_map)
+}
+
+fn find_context_window_children(map: &Map<String, Value>, depth: u8) -> Option<&Value> {
+    for child in map.values() {
+        if child.is_object()
+            && let Some(found) = find_context_window(child, depth + 1)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+pub(super) fn find_context_window_in_map(map: &Map<String, Value>, depth: u8) -> Option<&Value> {
+    if depth > 4 {
+        return None;
+    }
+    if let Some(cw) = map.get("context_window")
+        && is_context_window_obj(cw)
+    {
+        return Some(cw);
+    }
+    find_context_window_children(map, depth)
 }
 
 pub(super) fn find_context_window(val: &Value, depth: u8) -> Option<&Value> {
@@ -362,17 +386,10 @@ pub(super) fn find_context_window(val: &Value, depth: u8) -> Option<&Value> {
     {
         return Some(cw);
     }
-    if is_context_window_obj(val) {
+    if is_context_window_map(map) {
         return Some(val);
     }
-    for child in map.values() {
-        if child.is_object()
-            && let Some(found) = find_context_window(child, depth + 1)
-        {
-            return Some(found);
-        }
-    }
-    None
+    find_context_window_children(map, depth)
 }
 
 pub(super) fn as_u64_non_neg(val: Option<&Value>) -> Option<u64> {

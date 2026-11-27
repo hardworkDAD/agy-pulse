@@ -20,7 +20,7 @@ use crate::platform;
 use super::speed_tracker::{
     PlannerResponseSpan, is_valid_speed, prune_json_cache_dir, sha256_hex,
 };
-use super::stdin::find_context_window;
+use super::stdin::{find_context_window_in_map, is_context_window_map};
 
 const TRANSCRIPT_CACHE_VERSION: u32 = 11;
 const TRANSCRIPT_CACHE_HEAD_BYTES: usize = 256;
@@ -1346,8 +1346,16 @@ fn process_transcript_entry(
         process_generic_child_events(&entry, acc, main_conv_id, step_idx, valid_time_ms);
     }
 
-    let entry_val = Value::Object(entry.clone());
-    let cw_opt = find_context_window(&entry_val, 0).cloned();
+    let cw_opt: Option<Value> = if let Some(cw) = entry
+        .get("context_window")
+        .filter(|v| v.as_object().is_some_and(is_context_window_map))
+    {
+        Some(cw.clone())
+    } else if is_context_window_map(&entry) {
+        Some(Value::Object(entry.clone()))
+    } else {
+        find_context_window_in_map(&entry, 0).cloned()
+    };
     if let Some(Value::Object(mut cw_map)) = cw_opt.clone() {
         let prev_win_size = acc
             .usage
@@ -2187,6 +2195,109 @@ fn resolve_child_model_speeds(
     }
 }
 
+fn can_fast_skip_transcript_line(trimmed: &str) -> bool {
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return false;
+    }
+    if trimmed.contains("\\u") {
+        return false;
+    }
+    const SIGNALS: &[&str] = &[
+        "truncated_fields",
+        "CHECKPOINT",
+        "USER_INPUT",
+        "SYSTEM_MESSAGE",
+        "PLANNER_RESPONSE",
+        "SYSTEM",
+        "content",
+        "context_window",
+        "total_input_tokens",
+        "total_output_tokens",
+        "context_window_size",
+        "used_percentage",
+        "current_usage",
+        "ERROR",
+        "error",
+    ];
+    !SIGNALS.iter().any(|sig| trimmed.contains(sig))
+}
+
+fn fast_extract_step_index(line: &str) -> Option<u64> {
+    if !line.contains("\"step_index\"") {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let needle = b"\"step_index\"";
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'"' => {
+                if depth == 1 && bytes[i..].starts_with(needle) {
+                    let mut j = i + needle.len();
+                    while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b':' {
+                        j += 1;
+                        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                            j += 1;
+                        }
+                        let val_start = j;
+                        while j < bytes.len()
+                            && !matches!(bytes[j], b',' | b'}' | b' ' | b'\t' | b'\r' | b'\n')
+                        {
+                            j += 1;
+                        }
+                        let val_str = std::str::from_utf8(&bytes[val_start..j]).ok()?;
+                        if val_str.is_empty() {
+                            return None;
+                        }
+                        if val_str.bytes().all(|c| c.is_ascii_digit())
+                            && let Ok(u) = val_str.parse::<u64>()
+                        {
+                            return Some(u);
+                        }
+                        if let Ok(f) = val_str.parse::<f64>()
+                            && f.is_finite()
+                            && f >= 0.0
+                        {
+                            return Some(f.trunc() as u64);
+                        }
+                        return None;
+                    }
+                }
+                in_string = true;
+            }
+            b'{' | b'[' => {
+                depth += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Incrementally scan a host `transcript.jsonl` file using inode + 256-byte head SHA-256 caching,
 /// lazy `transcript_full.jsonl` backfill for truncated entries, compaction tracking, and child speed resolution.
 pub(super) fn scan_transcript_incremental(
@@ -2221,6 +2332,15 @@ pub(super) fn scan_transcript_incremental(
         let capped_delta = raw_delta.min(MAX_TRANSCRIPT_DELTA_BYTES);
 
         if capped_delta <= STREAMING_DELTA_THRESHOLD_BYTES {
+            enum ChunkEntry {
+                Parsed(Map<String, Value>),
+                FastSkipCandidate {
+                    start: usize,
+                    end: usize,
+                    step: Option<u64>,
+                },
+            }
+
             let to_read = capped_delta as usize;
             let mut buf = vec![0u8; to_read];
             let mut total_read = 0usize;
@@ -2236,7 +2356,7 @@ pub(super) fn scan_transcript_incremental(
             }
             let view = &buf[..total_read];
             if let Some(last_nl) = view.iter().rposition(|&b| b == b'\n') {
-                let mut parsed_entries: Vec<(Map<String, Value>, u64)> = Vec::new();
+                let mut chunk_entries: Vec<(ChunkEntry, u64)> = Vec::new();
                 let mut needed_full_steps: HashSet<u64> = HashSet::new();
                 let mut line_start = 0usize;
                 let mut saw_skipped_line = false;
@@ -2249,13 +2369,23 @@ pub(super) fn scan_transcript_incremental(
                     let line_end = line_start + rel_nl;
                     let next_off = start_offset + (line_end + 1) as u64;
                     let line_str = String::from_utf8_lossy(&view[line_start..line_end]);
+                    let cur_start = line_start;
                     line_start = line_end + 1;
                     let trimmed = line_str.trim();
                     if trimmed.is_empty() {
                         saw_skipped_line = true;
                         continue;
                     }
-                    if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+                    if can_fast_skip_transcript_line(trimmed) {
+                        chunk_entries.push((
+                            ChunkEntry::FastSkipCandidate {
+                                start: cur_start,
+                                end: line_end,
+                                step: fast_extract_step_index(trimmed),
+                            },
+                            next_off,
+                        ));
+                    } else if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
                         if obj
                             .get("truncated_fields")
                             .and_then(Value::as_array)
@@ -2264,7 +2394,7 @@ pub(super) fn scan_transcript_incremental(
                         {
                             needed_full_steps.insert(step);
                         }
-                        parsed_entries.push((obj, next_off));
+                        chunk_entries.push((ChunkEntry::Parsed(obj), next_off));
                     } else {
                         saw_skipped_line = true;
                     }
@@ -2281,20 +2411,56 @@ pub(super) fn scan_transcript_incremental(
                 if !deadline.is_some_and(|d| Instant::now() >= d) {
                     let (_, main_conv_id) = resolve_brain_context(transcript_path);
                     let mut completed_all = true;
-                    for (entry, next_off) in parsed_entries {
-                        if deadline.is_some_and(|d| Instant::now() >= d) {
+                    for (idx, (item, next_off)) in chunk_entries.into_iter().enumerate() {
+                        if idx > 0
+                            && idx.is_multiple_of(256)
+                            && deadline.is_some_and(|d| Instant::now() >= d)
+                        {
                             completed_all = false;
                             break;
                         }
-                        process_transcript_entry(
-                            entry,
-                            &mut state,
-                            main_conv_id.as_deref(),
-                            full_map.as_ref(),
-                            now_ms,
-                        );
-                        offset = next_off;
-                        cache_dirty = true;
+                        match item {
+                            ChunkEntry::Parsed(entry) => {
+                                process_transcript_entry(
+                                    entry,
+                                    &mut state,
+                                    main_conv_id.as_deref(),
+                                    full_map.as_ref(),
+                                    now_ms,
+                                );
+                                offset = next_off;
+                                cache_dirty = true;
+                            }
+                            ChunkEntry::FastSkipCandidate { start, end, step } => {
+                                if state.pending_planner_start_ms.is_none() {
+                                    if let Some(s) = step
+                                        && s > state.steps
+                                    {
+                                        state.steps = s;
+                                    }
+                                    offset = next_off;
+                                    cache_dirty = true;
+                                } else {
+                                    let line_str = String::from_utf8_lossy(&view[start..end]);
+                                    let trimmed = line_str.trim();
+                                    if let Ok(Value::Object(obj)) =
+                                        serde_json::from_str::<Value>(trimmed)
+                                    {
+                                        process_transcript_entry(
+                                            obj,
+                                            &mut state,
+                                            main_conv_id.as_deref(),
+                                            full_map.as_ref(),
+                                            now_ms,
+                                        );
+                                        offset = next_off;
+                                        cache_dirty = true;
+                                    } else {
+                                        saw_skipped_line = true;
+                                    }
+                                }
+                            }
+                        }
                     }
                     if completed_all {
                         let chunk_end = start_offset + (last_nl + 1) as u64;
@@ -2402,6 +2568,7 @@ pub(super) fn scan_transcript_incremental(
                     let mut pass2_read = 0u64;
                     let mut pass2_consumed = 0u64;
                     let mut pass2_pending = 0u64;
+                    let mut pass2_lines = 0usize;
                     carry.clear();
                     oversized = false;
 
@@ -2422,7 +2589,10 @@ pub(super) fn scan_transcript_incremental(
                         let mut start = 0usize;
                         while start < slice.len() {
                             if let Some(rel_nl) = slice[start..].iter().position(|&b| b == b'\n') {
-                                if deadline.is_some_and(|d| Instant::now() >= d) {
+                                pass2_lines += 1;
+                                if pass2_lines.is_multiple_of(256)
+                                    && deadline.is_some_and(|d| Instant::now() >= d)
+                                {
                                     break 'pass2;
                                 }
                                 let end = start + rel_nl;
@@ -2442,17 +2612,26 @@ pub(super) fn scan_transcript_incremental(
                                     };
                                     let line_str = String::from_utf8_lossy(line_bytes);
                                     let trimmed = line_str.trim();
-                                    if !trimmed.is_empty()
-                                        && let Ok(Value::Object(obj)) =
+                                    if !trimmed.is_empty() {
+                                        if state.pending_planner_start_ms.is_none()
+                                            && can_fast_skip_transcript_line(trimmed)
+                                        {
+                                            if let Some(step) = fast_extract_step_index(trimmed)
+                                                && step > state.steps
+                                            {
+                                                state.steps = step;
+                                            }
+                                        } else if let Ok(Value::Object(obj)) =
                                             serde_json::from_str::<Value>(trimmed)
-                                    {
-                                        process_transcript_entry(
-                                            obj,
-                                            &mut state,
-                                            main_conv_id.as_deref(),
-                                            full_map.as_ref(),
-                                            now_ms,
-                                        );
+                                        {
+                                            process_transcript_entry(
+                                                obj,
+                                                &mut state,
+                                                main_conv_id.as_deref(),
+                                                full_map.as_ref(),
+                                                now_ms,
+                                            );
+                                        }
                                     }
                                     carry.clear();
                                 }
@@ -2602,4 +2781,132 @@ pub(super) fn scan_transcript_incremental(
         persisted_child_turns,
         child_tail_activities,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::ingest::stdin::find_context_window;
+
+    #[test]
+    fn fast_skip_state_matches_full_serde_across_edge_cases() {
+        let now_ms = 1_760_000_000_000i64;
+        let main_conv_id = Some("main-conv-0001");
+
+        let lines = vec![
+            // 1. USER_INPUT
+            r#"{"step_index":1,"type":"USER_INPUT","created_at":"2026-10-01T00:00:00.000Z"}"#,
+            // 2. Ordinary GENERIC filler line (fast-skippable)
+            r#"{"step_index":2,"type":"GENERIC","pad":"xxxxxxxxxxxxxxxx"}"#,
+            // 3. GENERIC with float & whitespace step_index (fast-skippable)
+            r#"  { "type" : "GENERIC" , "step_index" : 4.9 , "pad" : "whitespace-float" }  "#,
+            // 4. Nested/escaped step_index must NOT override steps (fast-skippable)
+            r#"{"type":"GENERIC","meta":{"step_index":999},"pad":"\"step_index\":888"}"#,
+            // 5. PLANNER_RESPONSE sets pending_planner_start_ms
+            r#"{"step_index":5,"type":"PLANNER_RESPONSE","created_at":"2026-10-01T00:00:01.000Z","model":"gemini-4-carbon-high","output_tokens":50,"input_tokens":1000}"#,
+            // 6. GENERIC filler immediately after PLANNER_RESPONSE: MUST NOT skip so it settles pending_planner_start_ms
+            r#"{"step_index":6,"type":"GENERIC","created_at":"2026-10-01T00:00:03.500Z","pad":"post-planner"}"#,
+            // 7. Subsequent GENERIC filler after settlement: fast-skippable again
+            r#"{"step_index":7,"type":"GENERIC","pad":"after-settle"}"#,
+            // 8. GENERIC with "content" subagent event: MUST NOT skip
+            r#"{"step_index":8,"type":"GENERIC","created_at":"2026-10-01T00:00:04.000Z","content":{"status":"added","conversation_id":"sub-agent-0001","name":"worker-1","model":"gemini-4-carbon-high"}}"#,
+            // 9. context_window entry: MUST NOT skip
+            r#"{"step_index":9,"type":"GENERIC","context_window":{"context_window_size":500000,"current_usage":{"input_tokens":200,"output_tokens":30,"cache_read_input_tokens":100}}}"#,
+            // 10. CHECKPOINT entry: MUST NOT skip
+            r#"{"step_index":10,"type":"CHECKPOINT","created_at":"2026-10-01T00:00:05.000Z"}"#,
+            // 11. Uppercase ERROR entry: MUST NOT skip
+            r#"{"step_index":11,"status":"ERROR","created_at":"2026-10-01T00:00:06.000Z","content":"HTTP 429 RESOURCE_EXHAUSTED quotaResetDelay=30s"}"#,
+            // 12. Lowercase error object entry: MUST NOT skip
+            r#"{"step_index":12,"type":"OTHER","created_at":"2026-10-01T00:00:07.000Z","error":{"code":429,"status":"RESOURCE_EXHAUSTED","quotaResetDelay":"120s"}}"#,
+            // 13. Unicode escape bypass (\u0045RROR): MUST NOT skip
+            r#"{"step_index":13,"status":"\u0045RROR","created_at":"2026-10-01T00:00:08.000Z","content":"HTTP 429 RESOURCE_EXHAUSTED quotaResetDelay=240s"}"#,
+            // 14. Trailing GENERIC with float .0 step_index (fast-skippable)
+            r#"{"step_index":14.0,"type":"GENERIC","pad":"final-pad"}"#,
+        ];
+
+        // Verify direct predicate behavior on key samples
+        assert!(can_fast_skip_transcript_line(lines[1].trim()));
+        assert!(can_fast_skip_transcript_line(lines[2].trim()));
+        assert!(can_fast_skip_transcript_line(lines[3].trim()));
+        assert!(!can_fast_skip_transcript_line(lines[4].trim()));
+        assert!(can_fast_skip_transcript_line(lines[5].trim()));
+        assert!(!can_fast_skip_transcript_line(lines[7].trim()));
+        assert!(!can_fast_skip_transcript_line(lines[8].trim()));
+        assert!(!can_fast_skip_transcript_line(lines[9].trim()));
+        assert!(!can_fast_skip_transcript_line(lines[10].trim()));
+        assert!(!can_fast_skip_transcript_line(lines[11].trim()));
+        assert!(!can_fast_skip_transcript_line(lines[12].trim()));
+
+        assert_eq!(fast_extract_step_index(lines[1].trim()), Some(2));
+        assert_eq!(fast_extract_step_index(lines[2].trim()), Some(4));
+        assert_eq!(fast_extract_step_index(lines[3].trim()), None);
+        assert_eq!(fast_extract_step_index(lines[13].trim()), Some(14));
+
+        // Full reference execution
+        let mut full_state = TranscriptAccState::default();
+        for line in &lines {
+            let trimmed = line.trim();
+            if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+                process_transcript_entry(obj, &mut full_state, main_conv_id, None, now_ms);
+            }
+        }
+
+        // Fast-skip execution
+        let mut fast_state = TranscriptAccState::default();
+        let mut skipped_count = 0usize;
+        for line in &lines {
+            let trimmed = line.trim();
+            if fast_state.pending_planner_start_ms.is_none()
+                && can_fast_skip_transcript_line(trimmed)
+            {
+                skipped_count += 1;
+                if let Some(step) = fast_extract_step_index(trimmed)
+                    && step > fast_state.steps
+                {
+                    fast_state.steps = step;
+                }
+            } else if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+                process_transcript_entry(obj, &mut fast_state, main_conv_id, None, now_ms);
+            }
+        }
+
+        // Lines 2, 3, 4, 7, 14 are fast-skipped; line 6 is NOT skipped due to pending_planner_start_ms.
+        assert_eq!(skipped_count, 5);
+        assert_eq!(fast_state.total_api_duration_ms, 2_500);
+        assert_eq!(fast_state.steps, 14);
+        assert_eq!(fast_state.compaction_count, 1);
+        assert_eq!(
+            serde_json::to_value(&fast_state).unwrap(),
+            serde_json::to_value(&full_state).unwrap()
+        );
+    }
+
+    #[test]
+    fn find_context_window_in_map_matches_value_lookup() {
+        let nested_cw: Value = serde_json::json!({
+            "step_index": 1,
+            "context_window": {
+                "context_window_size": 500000,
+                "current_usage": { "input_tokens": 10, "output_tokens": 5 }
+            }
+        });
+        let deep_cw: Value = serde_json::json!({
+            "step_index": 2,
+            "payload": {
+                "inner": {
+                    "total_input_tokens": 123,
+                    "total_output_tokens": 45
+                }
+            }
+        });
+
+        for sample in [&nested_cw, &deep_cw] {
+            let map = sample.as_object().unwrap();
+            assert_eq!(
+                find_context_window_in_map(map, 0),
+                find_context_window(sample, 0)
+            );
+        }
+    }
 }

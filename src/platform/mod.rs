@@ -459,10 +459,9 @@ pub fn current_hostname() -> Option<String> {
 pub fn generate_device_id() -> String {
     let seq = DEVICE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut hasher = Sha256::new();
-    let mut used_urandom = false;
 
     #[cfg(unix)]
-    {
+    let used_urandom = {
         use std::io::Read;
         let mut buf = [0u8; 16];
         if let Ok(mut f) = fs::File::open("/dev/urandom")
@@ -470,9 +469,13 @@ pub fn generate_device_id() -> String {
         {
             hasher.update(buf);
             hasher.update(seq.to_le_bytes());
-            used_urandom = true;
+            true
+        } else {
+            false
         }
-    }
+    };
+    #[cfg(not(unix))]
+    let used_urandom = false;
 
     if !used_urandom {
         let nanos = SystemTime::now()
