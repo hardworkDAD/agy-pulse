@@ -508,6 +508,17 @@ pub(crate) fn temp_dir() -> PathBuf {
             }
         }
     }
+    #[cfg(windows)]
+    {
+        for var in ["TMP", "TEMP"] {
+            if let Some(val) = env_var(var) {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() {
+                    return PathBuf::from(trimmed);
+                }
+            }
+        }
+    }
     std::env::temp_dir()
 }
 
@@ -1313,7 +1324,7 @@ mod tests {
         );
         with_env_overrides(&ov2, || {
             assert_eq!(resolve_runtime_dir(), data_dir.join("runtime"));
-            assert_eq!(resolve_fast_temp_dir(), std::env::temp_dir());
+            assert_eq!(resolve_fast_temp_dir(), temp_dir());
         });
 
         #[cfg(unix)]

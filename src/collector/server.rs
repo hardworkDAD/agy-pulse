@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
+#[cfg(unix)]
 use std::fs;
 use std::io;
 use std::path::PathBuf;

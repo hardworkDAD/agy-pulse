@@ -10,20 +10,26 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
+#[cfg(unix)]
+use std::time::UNIX_EPOCH;
 
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
+use agy_pulse::collector::protocol::read_collector_state;
+#[cfg(unix)]
 use agy_pulse::collector::protocol::{
-    COLLECTOR_APP_ID, CollectorStateFile, collector_state_path, read_collector_state,
+    COLLECTOR_APP_ID, CollectorStateFile, CollectorWireRequest, CollectorWireResponse,
+    collector_state_path, read_frame, write_frame,
 };
 #[cfg(unix)]
-use agy_pulse::collector::protocol::{CollectorWireRequest, CollectorWireResponse, read_frame, write_frame};
 use agy_pulse::collector::snapshot::{
     COLLECTOR_SNAPSHOT_SCHEMA_VERSION, CollectedStatuslineSnapshot, conversation_snapshot_path,
 };
+#[cfg(unix)]
 use agy_pulse::config::{DisplayConfig, LanguageSetting, PulseConfig, QuotaStyle};
+#[cfg(unix)]
 use agy_pulse::domain::{CostSnapshot, ModelIdentity, PulseSnapshot, WorkspaceInfo};
 use agy_pulse::platform;
 use agy_pulse::render::strip_ansi;
@@ -312,6 +318,7 @@ fn snapshot_dir_bytes(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     map
 }
 
+#[cfg(unix)]
 fn exe_mtime_ms(path: &Path) -> i64 {
     fs::metadata(path)
         .ok()

@@ -383,9 +383,7 @@ pub fn cleanup_stale_temp_db_dirs(max_age: Duration) -> usize {
             let Ok(modified) = meta.modified() else {
                 continue;
             };
-            let Ok(age) = now.duration_since(modified) else {
-                continue;
-            };
+            let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
             if age >= max_age && fs::remove_dir_all(&path).is_ok() {
                 removed += 1;
             }
@@ -447,28 +445,41 @@ mod tests {
 
         // Append an uncommitted dirty frame at the end of -wal (db_size=0, valid checksum or garbage).
         let wal_path = sidecar_path(&db_path, "-wal");
-        let mut wal_bytes = fs::read(&wal_path).expect("read wal");
-        assert!(wal_bytes.len() > 32, "expected non-empty wal");
+        assert!(
+            fs::metadata(&wal_path).expect("wal metadata").len() > 32,
+            "expected non-empty wal"
+        );
         // Append a truncated/corrupt dirty tail frame that must be discarded.
-        wal_bytes.extend_from_slice(&[0xAAu8; 24 + 128]);
-        fs::write(&wal_path, &wal_bytes).expect("write wal with dirty tail");
-
-        // Remove -shm to verify our reader works even without -shm.
-        let shm_path = sidecar_path(&db_path, "-shm");
-        if shm_path.exists() {
-            fs::remove_file(&shm_path).expect("remove shm");
+        {
+            let mut wf = fs::OpenOptions::new()
+                .append(true)
+                .open(&wal_path)
+                .expect("open wal for append");
+            wf.write_all(&[0xAAu8; 24 + 128])
+                .expect("append dirty tail");
         }
-        assert!(!shm_path.exists());
+
+        // Remove -shm to verify our reader works even without -shm (Windows locks -shm while writer is open).
+        let shm_path = sidecar_path(&db_path, "-shm");
+        let shm_removed = if shm_path.exists() {
+            fs::remove_file(&shm_path).is_ok()
+        } else {
+            true
+        };
+        #[cfg(unix)]
+        assert!(shm_removed, "expected -shm removal to succeed on Unix");
 
         let mut env_ov = HashMap::new();
         env_ov.insert(
             "AGY_PULSE_DATA_DIR".to_string(),
             Some(isolated_data.to_string_lossy().into_owned()),
         );
-        env_ov.insert(
-            "TMPDIR".to_string(),
-            Some(root.path().to_string_lossy().into_owned()),
-        );
+        for var in ["TMPDIR", "TMP", "TEMP"] {
+            env_ov.insert(
+                var.to_string(),
+                Some(root.path().to_string_lossy().into_owned()),
+            );
+        }
 
         let rows = crate::platform::with_env_overrides(&env_ov, || {
             with_readonly_db(&db_path, |conn| {
@@ -484,7 +495,9 @@ mod tests {
         let temp_dirs = count_temp_db_dirs(root.path());
 
         assert_eq!(rows, Some(vec![(1, "v2".to_string()), (2, "second".to_string())]));
-        assert!(!shm_path.exists(), "source -shm must not be recreated");
+        if shm_removed {
+            assert!(!shm_path.exists(), "source -shm must not be recreated");
+        }
         assert_eq!(
             temp_dirs, 0,
             "in-memory WAL merge must create 0 agy-pulse-db-* temp dirs"
@@ -606,10 +619,12 @@ mod tests {
             "AGY_PULSE_DATA_DIR".to_string(),
             Some(root.path().join("data").to_string_lossy().into_owned()),
         );
-        env_ov.insert(
-            "TMPDIR".to_string(),
-            Some(root.path().to_string_lossy().into_owned()),
-        );
+        for var in ["TMPDIR", "TMP", "TEMP"] {
+            env_ov.insert(
+                var.to_string(),
+                Some(root.path().to_string_lossy().into_owned()),
+            );
+        }
 
         let stale = root.path().join("agy-pulse-db-stale-test");
         let fresh = root.path().join("agy-pulse-db-fresh-test");
@@ -619,17 +634,12 @@ mod tests {
         fs::create_dir_all(&fresh).expect("fresh");
         fs::create_dir_all(&unrelated).expect("unrelated");
 
-        let stale_file = fs::OpenOptions::new()
-            .read(true)
-            .open(&stale)
-            .expect("open stale dir");
-        let old_time = SystemTime::now() - Duration::from_secs(600);
         // Set mtime via `filetime` isn't a dep; use `set_modified` on directory handle on Unix.
         #[cfg(unix)]
-        {
+        if let Ok(stale_file) = fs::OpenOptions::new().read(true).open(&stale) {
+            let old_time = SystemTime::now() - Duration::from_secs(600);
             let _ = stale_file.set_modified(old_time);
         }
-        drop(stale_file);
 
         // If the platform doesn't allow setting directory mtime via File::set_modified,
         // verify at least via `max_age = Duration::from_secs(60)` vs `Duration::ZERO`.

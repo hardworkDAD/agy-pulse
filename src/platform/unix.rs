@@ -261,11 +261,13 @@ pub(super) fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn is_owned_dir_no_symlink(path: &Path, euid: u32) -> bool {
     fs::symlink_metadata(path)
         .is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir() && m.uid() == euid)
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn ensure_owned_dir_0700(path: &Path, euid: u32) -> bool {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != euid {
@@ -375,6 +377,15 @@ pub(super) fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<u32> {
     Ok(child.id())
 }
 
+#[cfg(target_os = "linux")]
+fn is_linux_zombie_or_dead(raw_pid: libc::pid_t) -> bool {
+    fs::read_to_string(format!("/proc/{raw_pid}/stat")).is_ok_and(|stat| {
+        stat.rfind(')')
+            .and_then(|rparen| stat[rparen + 1..].trim_start().as_bytes().first())
+            .is_some_and(|state| matches!(*state, b'Z' | b'X'))
+    })
+}
+
 pub(super) fn is_process_alive(pid: u32) -> bool {
     let Ok(raw_pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -384,18 +395,15 @@ pub(super) fn is_process_alive(pid: u32) -> bool {
     }
     // SAFETY: `kill(pid, 0)` checks process existence without sending a signal.
     let rc = unsafe { libc::kill(raw_pid, 0) };
-    if rc != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
-        return false;
-    }
+    let exists = rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
     #[cfg(target_os = "linux")]
-    if let Ok(stat) = fs::read_to_string(format!("/proc/{raw_pid}/stat"))
-        && let Some(rparen) = stat.rfind(')')
-        && let Some(state) = stat[rparen + 1..].trim_start().as_bytes().first()
-        && matches!(*state, b'Z' | b'X')
     {
-        return false;
+        exists && !is_linux_zombie_or_dead(raw_pid)
     }
-    true
+    #[cfg(not(target_os = "linux"))]
+    {
+        exists
+    }
 }
 
 pub(super) fn terminate_process(pid: u32) -> io::Result<()> {

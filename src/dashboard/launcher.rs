@@ -689,6 +689,11 @@ pub fn stop_background_dashboard(host: &str, port: u16) -> Result<StopDashboardR
     }
 
     clear_dashboard_state_if_owner(running.pid);
+    if let Some(cstate) = crate::collector::protocol::read_collector_state()
+        && cstate.pid == running.pid
+    {
+        crate::collector::protocol::clear_collector_state_if_owner(running.pid, &cstate.token);
+    }
     Ok(StopDashboardResult {
         stopped: true,
         pid: Some(running.pid),
