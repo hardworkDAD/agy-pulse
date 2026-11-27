@@ -9,6 +9,7 @@ mod workspace;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -22,6 +23,15 @@ use crate::profile::{IngestStageTimings, Stage, set_stage};
 
 pub use db_telemetry::ConversationDbRecord;
 pub use proto_wire::{GenerationMetadataRow, GenerationTelemetryStep, TrajectoryMetadata};
+pub use sqlite_ro::cleanup_stale_temp_db_dirs;
+
+/// Pure in-memory stdin extraction result for thin frontend snapshot merging.
+#[derive(Debug, Clone)]
+pub struct StdinLiveFields {
+    pub snapshot: PulseSnapshot,
+    pub workspace_dir: PathBuf,
+    pub transcript_path: Option<PathBuf>,
+}
 
 /// Result of reading host standard input and local workspace metadata.
 #[derive(Debug, Clone)]
@@ -31,6 +41,7 @@ pub struct IngestResult {
     pub conversation_id: Option<String>,
     pub rolling_cost_key: Option<String>,
     pub child_conversation_ids: Vec<String>,
+    pub prefetched_db_records: HashMap<(PathBuf, String), Arc<ConversationDbRecord>>,
     pub diagnostics: Vec<String>,
     pub stage_timings: IngestStageTimings,
 }
@@ -60,11 +71,42 @@ impl HostReader {
 
     /// Pure in-memory stdin snapshot for hard-timeout degradation (zero disk I/O).
     pub fn parse_stdin_fallback(stdin_text: &str, fallback_cwd: &Path) -> (PulseSnapshot, PathBuf) {
+        let live = Self::parse_stdin_live_fields(stdin_text, fallback_cwd);
+        (live.snapshot, live.workspace_dir)
+    }
+
+    /// Pure in-memory stdin extraction including `turn_cache_metrics` and `transcript_path` (zero disk I/O).
+    pub fn parse_stdin_live_fields(stdin_text: &str, fallback_cwd: &Path) -> StdinLiveFields {
         let observed_at_ms = current_epoch_ms();
         let mut parsed = stdin::parse_host_stdin(stdin_text, fallback_cwd, observed_at_ms);
         parsed.snapshot.workspace.current_dir =
             workspace::resolve_current_dir_name(&parsed.workspace_dir);
-        (parsed.snapshot, parsed.workspace_dir)
+        let raw_model_name = parsed
+            .snapshot
+            .model
+            .as_ref()
+            .map(|m| {
+                if !m.display_name.is_empty() {
+                    m.display_name.as_str()
+                } else {
+                    m.id.as_str()
+                }
+            })
+            .unwrap_or("");
+        parsed.snapshot.turn_cache_metrics = resolve_turn_cache_metrics(
+            [
+                parsed.stdin_current_usage_val.as_ref(),
+                parsed.stdin_context_window_val.as_ref(),
+                None,
+                None,
+            ],
+            raw_model_name,
+        );
+        StdinLiveFields {
+            snapshot: parsed.snapshot,
+            workspace_dir: parsed.workspace_dir,
+            transcript_path: parsed.transcript_path,
+        }
     }
 
     /// Parse host stdin payload and enrich within an optional soft deadline so statusline
@@ -261,6 +303,7 @@ impl HostReader {
             })
             .map(str::to_ascii_lowercase);
         let mut compaction_cache = db_telemetry::load_compaction_cache_handle();
+        let mut db_memo = db_telemetry::DbReadMemo::new();
 
         set_stage(Stage::IngestCompaction);
         let t_compaction = Instant::now();
@@ -271,6 +314,7 @@ impl HostReader {
             observed_at_ms,
             deadline,
             &mut compaction_cache,
+            &mut db_memo,
         );
         timings.compaction_ms = t_compaction.elapsed().as_millis() as u64;
 
@@ -294,6 +338,7 @@ impl HostReader {
             observed_at_ms,
             deadline,
             &mut compaction_cache,
+            &mut db_memo,
         );
         compaction_cache.flush_if_dirty();
 
@@ -336,12 +381,18 @@ impl HostReader {
             &parsed.workspace_dir,
         );
 
+        let prefetched_db_records: HashMap<(PathBuf, String), Arc<ConversationDbRecord>> = db_memo
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|rec| (k, rec)))
+            .collect();
+
         IngestResult {
             snapshot: parsed.snapshot,
             workspace_dir: parsed.workspace_dir,
             conversation_id: effective_conv_id,
             rolling_cost_key,
             child_conversation_ids,
+            prefetched_db_records,
             diagnostics: parsed.diagnostics,
             stage_timings: timings,
         }

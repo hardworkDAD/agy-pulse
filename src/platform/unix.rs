@@ -1,4 +1,3 @@
-use std::env;
 use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
@@ -10,11 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn detect_unicode_from_os() -> bool {
-    let locale = env::var("LC_ALL")
-        .ok()
+    let locale = super::env_var("LC_ALL")
         .filter(|s| !s.is_empty())
-        .or_else(|| env::var("LC_CTYPE").ok().filter(|s| !s.is_empty()))
-        .or_else(|| env::var("LANG").ok().filter(|s| !s.is_empty()))
+        .or_else(|| super::env_var("LC_CTYPE").filter(|s| !s.is_empty()))
+        .or_else(|| super::env_var("LANG").filter(|s| !s.is_empty()))
         .unwrap_or_default();
 
     if locale.is_empty() {
@@ -249,14 +247,89 @@ pub(super) fn resolve_claude_desktop_config_path() -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let cfg_root = env::var("XDG_CONFIG_HOME")
-            .ok()
+        let cfg_root = super::env_var("XDG_CONFIG_HOME")
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
         Some(cfg_root.join("Claude").join("claude_desktop_config.json"))
     }
+}
+
+pub(super) fn current_euid() -> u32 {
+    // SAFETY: `geteuid()` has no preconditions and always succeeds.
+    unsafe { libc::geteuid() }
+}
+
+pub(super) fn is_owned_dir_no_symlink(path: &Path, euid: u32) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir() && m.uid() == euid)
+}
+
+pub(super) fn ensure_owned_dir_0700(path: &Path, euid: u32) -> bool {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != euid {
+            return false;
+        }
+        if (meta.permissions().mode() & 0o077) != 0 {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o700);
+            let _ = fs::set_permissions(path, perms);
+        }
+        return true;
+    }
+    if ensure_dir_0700(path).is_err() {
+        return false;
+    }
+    is_owned_dir_no_symlink(path, euid)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn resolve_linux_runtime_dir() -> PathBuf {
+    let euid = current_euid();
+    if let Some(xdg) = super::env_var("XDG_RUNTIME_DIR") {
+        let trimmed = xdg.trim();
+        if !trimmed.is_empty() {
+            let xdg_path = PathBuf::from(trimmed);
+            if is_owned_dir_no_symlink(&xdg_path, euid) {
+                let candidate = xdg_path.join("agy-pulse");
+                if ensure_owned_dir_0700(&candidate, euid) {
+                    return candidate;
+                }
+            }
+        }
+    }
+    if fs::metadata("/dev/shm").is_ok_and(|m| m.is_dir()) {
+        let candidate = PathBuf::from(format!("/dev/shm/agy-pulse-{euid}"));
+        if ensure_owned_dir_0700(&candidate, euid) {
+            return candidate;
+        }
+    }
+    super::temp_dir().join(format!("agy-pulse-{euid}"))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn resolve_linux_fast_temp_dir() -> PathBuf {
+    let euid = current_euid();
+    if let Some(xdg) = super::env_var("XDG_RUNTIME_DIR") {
+        let trimmed = xdg.trim();
+        if !trimmed.is_empty() {
+            let xdg_path = PathBuf::from(trimmed);
+            if is_owned_dir_no_symlink(&xdg_path, euid) {
+                let candidate = xdg_path.join("agy-pulse-tmp");
+                if ensure_owned_dir_0700(&candidate, euid) {
+                    return candidate;
+                }
+            }
+        }
+    }
+    if fs::metadata("/dev/shm").is_ok_and(|m| m.is_dir()) {
+        let candidate = PathBuf::from(format!("/dev/shm/agy-pulse-tmp-{euid}"));
+        if ensure_owned_dir_0700(&candidate, euid) {
+            return candidate;
+        }
+    }
+    super::temp_dir()
 }
 
 static SHUTDOWN_SIGNAL_FLAG: AtomicBool = AtomicBool::new(false);
@@ -288,6 +361,7 @@ pub(super) fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<u32> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    super::apply_thread_env_overrides(&mut cmd);
     // SAFETY: `libc::setsid()` is async-signal-safe and detaches the child into a new session.
     unsafe {
         cmd.pre_exec(|| {
@@ -310,10 +384,18 @@ pub(super) fn is_process_alive(pid: u32) -> bool {
     }
     // SAFETY: `kill(pid, 0)` checks process existence without sending a signal.
     let rc = unsafe { libc::kill(raw_pid, 0) };
-    if rc == 0 {
-        return true;
+    if rc != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+        return false;
     }
-    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{raw_pid}/stat"))
+        && let Some(rparen) = stat.rfind(')')
+        && let Some(state) = stat[rparen + 1..].trim_start().as_bytes().first()
+        && matches!(*state, b'Z' | b'X')
+    {
+        return false;
+    }
+    true
 }
 
 pub(super) fn terminate_process(pid: u32) -> io::Result<()> {

@@ -3,7 +3,10 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -15,6 +18,128 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 static DEVICE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static THREAD_ENV_OVERRIDES: RefCell<Option<HashMap<String, Option<String>>>> = const { RefCell::new(None) };
+}
+
+/// Read an environment variable, honoring any active thread-local `with_env_overrides` scope first.
+pub fn env_var(key: &str) -> Option<String> {
+    let overridden = THREAD_ENV_OVERRIDES.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|map| map.get(key).cloned())
+    });
+    match overridden {
+        Some(val) => val,
+        None => env::var(key).ok(),
+    }
+}
+
+/// Read an environment variable as `OsString`, honoring any active thread-local override scope.
+pub fn env_var_os(key: &str) -> Option<OsString> {
+    let overridden = THREAD_ENV_OVERRIDES.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|map| map.get(key).cloned())
+    });
+    match overridden {
+        Some(val) => val.map(OsString::from),
+        None => env::var_os(key),
+    }
+}
+
+/// Execute `f` with thread-local environment variable overrides (`None` simulates unset)
+/// and panic-safe RAII restoration of any prior override state.
+pub fn with_env_overrides<T, F: FnOnce() -> T>(
+    overrides: &HashMap<String, Option<String>>,
+    f: F,
+) -> T {
+    struct EnvOverrideGuard {
+        prev: Option<HashMap<String, Option<String>>>,
+    }
+
+    impl Drop for EnvOverrideGuard {
+        fn drop(&mut self) {
+            let prev = self.prev.take();
+            THREAD_ENV_OVERRIDES.with(|cell| {
+                *cell.borrow_mut() = prev;
+            });
+        }
+    }
+
+    let prev = THREAD_ENV_OVERRIDES.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let prev = slot.take();
+        let mut merged = prev.clone().unwrap_or_default();
+        for (k, v) in overrides {
+            merged.insert(k.clone(), v.clone());
+        }
+        *slot = Some(merged);
+        prev
+    });
+    let _guard = EnvOverrideGuard { prev };
+    f()
+}
+
+/// Apply active thread-local environment variable overrides onto a child `Command`
+/// so detached background helpers inherit request-scoped env settings.
+pub(crate) fn apply_thread_env_overrides(cmd: &mut Command) {
+    THREAD_ENV_OVERRIDES.with(|cell| {
+        if let Some(ref map) = *cell.borrow() {
+            for (k, v) in map {
+                match v {
+                    Some(val) => {
+                        cmd.env(k, val);
+                    }
+                    None => {
+                        cmd.env_remove(k);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Return the current executable's modification timestamp in epoch milliseconds, or `0` if unavailable.
+pub fn current_exe_mtime_ms() -> i64 {
+    env::current_exe()
+        .ok()
+        .and_then(|p| fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Generate a 128-bit random hexadecimal token suitable for local IPC authentication.
+pub fn random_128bit_hex() -> String {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut buf = [0u8; 16];
+        if let Ok(mut f) = fs::File::open("/dev/urandom")
+            && f.read_exact(&mut buf).is_ok()
+        {
+            return hex::encode(buf);
+        }
+    }
+
+    let seq = DEVICE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = Sha256::new();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(seq.to_le_bytes());
+    if let Some(host) = current_hostname() {
+        hasher.update(host.as_bytes());
+    }
+    let digest = hasher.finalize();
+    hex::encode(&digest[..16])
+}
 
 /// Supported desktop operating systems for launcher & shortcut path conventions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,10 +185,10 @@ pub fn adjust_live_terminal_columns(raw_cols: u16) -> Option<u16> {
 
 /// Detect whether the current terminal supports UTF-8 box-drawing and emoji glyphs.
 pub fn detect_unicode_support() -> bool {
-    if env::var("AGY_PULSE_FORCE_ASCII").ok().as_deref() == Some("1") {
+    if env_var("AGY_PULSE_FORCE_ASCII").as_deref() == Some("1") {
         return false;
     }
-    if env::var("AGY_PULSE_FORCE_UNICODE").ok().as_deref() == Some("1") {
+    if env_var("AGY_PULSE_FORCE_UNICODE").as_deref() == Some("1") {
         return true;
     }
     #[cfg(unix)]
@@ -87,8 +212,7 @@ pub fn detect_terminal_caps(
         .filter(|&w| w > 0)
         .or_else(|| config_width.filter(|&w| w > 0))
         .or_else(|| {
-            env::var("COLUMNS")
-                .ok()
+            env_var("COLUMNS")
                 .and_then(|s| s.trim().parse::<u16>().ok())
                 .filter(|&w| w > 0)
         })
@@ -155,15 +279,15 @@ impl RawTerminalGuard {
 
 /// Resolve current user's home directory from environment variables.
 pub fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
+    env_var_os("HOME")
         .filter(|v| !v.is_empty())
-        .or_else(|| env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
+        .or_else(|| env_var_os("USERPROFILE").filter(|v| !v.is_empty()))
         .map(PathBuf::from)
 }
 
 /// Return ordered candidate `antigravity-cli` data directories.
 pub fn get_antigravity_roots() -> Vec<PathBuf> {
-    if let Ok(override_dir) = env::var("AGY_PULSE_DATA_DIR") {
+    if let Some(override_dir) = env_var("AGY_PULSE_DATA_DIR") {
         let trimmed = override_dir.trim();
         if !trimmed.is_empty() {
             return vec![PathBuf::from(trimmed)];
@@ -179,7 +303,7 @@ pub fn get_antigravity_roots() -> Vec<PathBuf> {
         ("APPDATA", "antigravity-cli"),
         ("LOCALAPPDATA", "antigravity-cli"),
     ] {
-        if let Ok(val) = env::var(var) {
+        if let Some(val) = env_var(var) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 roots.push(PathBuf::from(trimmed).join(suffix));
@@ -212,14 +336,14 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
 /// Returns an empty list when `AGY_PULSE_DATA_DIR` is set without `AGY_PULSE_IDE_DATA_DIR`
 /// so isolated sandboxes/tests never accidentally scan the host's real IDE directory.
 pub fn get_antigravity_ide_roots() -> Vec<PathBuf> {
-    if let Ok(override_dir) = env::var("AGY_PULSE_IDE_DATA_DIR") {
+    if let Some(override_dir) = env_var("AGY_PULSE_IDE_DATA_DIR") {
         let trimmed = override_dir.trim();
         if !trimmed.is_empty() {
             return vec![PathBuf::from(trimmed)];
         }
     }
 
-    if let Ok(cli_override) = env::var("AGY_PULSE_DATA_DIR")
+    if let Some(cli_override) = env_var("AGY_PULSE_DATA_DIR")
         && !cli_override.trim().is_empty()
     {
         return Vec::new();
@@ -234,7 +358,7 @@ pub fn get_antigravity_ide_roots() -> Vec<PathBuf> {
         ("APPDATA", "antigravity"),
         ("LOCALAPPDATA", "antigravity"),
     ] {
-        if let Ok(val) = env::var(var) {
+        if let Some(val) = env_var(var) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 raw_candidates.push(PathBuf::from(trimmed).join(suffix));
@@ -296,7 +420,7 @@ pub fn resolve_antigravity_path(relative: &str) -> PathBuf {
 /// Resolve the global multi-device sync configuration file path (`agy-pulse-sync.json`).
 /// Honors `AGY_PULSE_SYNC_CONFIG` when set and non-empty; never reads workspace directories.
 pub fn resolve_sync_config_path() -> PathBuf {
-    if let Ok(override_path) = env::var("AGY_PULSE_SYNC_CONFIG") {
+    if let Some(override_path) = env_var("AGY_PULSE_SYNC_CONFIG") {
         let trimmed = override_path.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
@@ -348,7 +472,7 @@ pub fn read_sync_identity_hints() -> (Option<String>, Option<String>) {
 
 /// Resolve the directory containing the global `agy-pulse.config.json`.
 pub fn resolve_global_config_dir() -> PathBuf {
-    if let Ok(override_dir) = env::var("AGY_PULSE_GLOBAL_CONFIG_DIR") {
+    if let Some(override_dir) = env_var("AGY_PULSE_GLOBAL_CONFIG_DIR") {
         let trimmed = override_dir.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
@@ -374,10 +498,117 @@ pub fn resolve_global_config_dir() -> PathBuf {
     }
 }
 
+pub(crate) fn temp_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        if let Some(val) = env_var("TMPDIR") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+    }
+    std::env::temp_dir()
+}
+
+/// Resolve the runtime directory used for ephemeral daemon/IPC/PID state.
+pub fn resolve_runtime_dir() -> PathBuf {
+    if let Some(override_dir) = env_var("AGY_PULSE_RUNTIME_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if let Some(data_dir) = env_var("AGY_PULSE_DATA_DIR") {
+        let trimmed = data_dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("runtime");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        unix::resolve_linux_runtime_dir()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let euid = unix::current_euid();
+        temp_dir().join(format!("agy-pulse-{euid}"))
+    }
+    #[cfg(windows)]
+    {
+        windows_local_app_data()
+            .unwrap_or_else(temp_dir)
+            .join("agy-pulse")
+            .join("runtime")
+    }
+}
+
+/// Resolve a fast temporary directory (preferring tmpfs on Linux in production) for short-lived scratch files.
+pub fn resolve_fast_temp_dir() -> PathBuf {
+    if let Some(data_dir) = env_var("AGY_PULSE_DATA_DIR")
+        && !data_dir.trim().is_empty()
+    {
+        return temp_dir();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        unix::resolve_linux_fast_temp_dir()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        temp_dir()
+    }
+}
+
+/// Resolve the collector IPC Unix domain socket path while staying within the 96-byte `sun_path` budget.
+#[cfg(unix)]
+pub fn resolve_ipc_socket_path() -> PathBuf {
+    let runtime_dir = resolve_runtime_dir();
+    let primary = runtime_dir.join("collector.sock");
+    if primary.as_os_str().as_encoded_bytes().len() <= 96 {
+        return primary;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(runtime_dir.to_string_lossy().as_bytes());
+    let hash_hex = hex::encode(hasher.finalize());
+    let short_hash = &hash_hex[..16];
+    let euid = unix::current_euid();
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(xdg) = env_var("XDG_RUNTIME_DIR") {
+            let trimmed = xdg.trim();
+            if !trimmed.is_empty() {
+                let xdg_path = PathBuf::from(trimmed);
+                if unix::is_owned_dir_no_symlink(&xdg_path, euid) {
+                    let cand = xdg_path.join(format!("agyp-{short_hash}.sock"));
+                    if cand.as_os_str().as_encoded_bytes().len() <= 96 {
+                        return cand;
+                    }
+                }
+            }
+        }
+        if fs::metadata("/dev/shm").is_ok_and(|m| m.is_dir()) {
+            let cand = PathBuf::from(format!("/dev/shm/agyp-{euid}-{short_hash}.sock"));
+            if cand.as_os_str().as_encoded_bytes().len() <= 96 {
+                return cand;
+            }
+        }
+    }
+
+    let cand = temp_dir().join(format!("agyp-{euid}-{short_hash}.sock"));
+    if cand.as_os_str().as_encoded_bytes().len() <= 96 {
+        cand
+    } else {
+        PathBuf::from(format!("/tmp/agyp-{euid}-{short_hash}.sock"))
+    }
+}
+
 /// Read current locale string from `LC_ALL`, `LC_CTYPE`, or `LANG`.
 pub fn read_locale_env() -> Option<String> {
     for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
-        if let Ok(val) = env::var(var) {
+        if let Some(val) = env_var(var) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
@@ -389,8 +620,7 @@ pub fn read_locale_env() -> Option<String> {
 
 /// Read optional language override from `AGY_PULSE_LANGUAGE`.
 pub fn read_language_env_override() -> Option<String> {
-    env::var("AGY_PULSE_LANGUAGE")
-        .ok()
+    env_var("AGY_PULSE_LANGUAGE")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -398,7 +628,7 @@ pub fn read_language_env_override() -> Option<String> {
 /// Read OS username fallback from environment.
 pub fn current_username() -> Option<String> {
     for var in ["USER", "USERNAME", "LOGNAME"] {
-        if let Ok(val) = env::var(var) {
+        if let Some(val) = env_var(var) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
@@ -435,7 +665,7 @@ pub fn current_hostname() -> Option<String> {
                 return Some(cleaned);
             }
         }
-        if let Ok(val) = env::var("HOSTNAME")
+        if let Some(val) = env_var("HOSTNAME")
             && let Some(cleaned) = sanitize_hostname(&val)
         {
             return Some(cleaned);
@@ -449,9 +679,7 @@ pub fn current_hostname() -> Option<String> {
     }
     #[cfg(windows)]
     {
-        env::var("COMPUTERNAME")
-            .ok()
-            .and_then(|val| sanitize_hostname(&val))
+        env_var("COMPUTERNAME").and_then(|val| sanitize_hostname(&val))
     }
 }
 
@@ -788,7 +1016,7 @@ pub fn resolve_cli_bin_dir(explicit: Option<&Path>) -> PathBuf {
     if let Some(dir) = explicit {
         return dir.to_path_buf();
     }
-    if let Ok(val) = env::var("AGY_PULSE_BIN_DIR") {
+    if let Some(val) = env_var("AGY_PULSE_BIN_DIR") {
         let trimmed = val.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
@@ -812,7 +1040,7 @@ pub fn cli_shim_candidate_dirs(explicit: Option<&Path>) -> Vec<PathBuf> {
     if let Some(dir) = explicit {
         raw.push(dir.to_path_buf());
     }
-    if let Ok(val) = env::var("AGY_PULSE_BIN_DIR") {
+    if let Some(val) = env_var("AGY_PULSE_BIN_DIR") {
         let trimmed = val.trim();
         if !trimmed.is_empty() {
             raw.push(PathBuf::from(trimmed));
@@ -840,7 +1068,7 @@ pub fn cli_shim_candidate_dirs(explicit: Option<&Path>) -> Vec<PathBuf> {
 
 /// Resolve an executable on `PATH` safely without searching relative directories such as `.`.
 pub fn resolve_safe_executable(name: &str) -> Option<PathBuf> {
-    let path_os = env::var_os("PATH")?;
+    let path_os = env_var_os("PATH")?;
     let exts: &[&str] = if current_desktop_os() == DesktopOs::Windows {
         &["", ".exe", ".cmd", ".bat"]
     } else {
@@ -863,7 +1091,7 @@ pub fn resolve_safe_executable(name: &str) -> Option<PathBuf> {
 
 /// Resolve `$XDG_DATA_HOME` or fallback `$HOME/.local/share`.
 pub fn xdg_data_home() -> Option<PathBuf> {
-    if let Ok(val) = env::var("XDG_DATA_HOME") {
+    if let Some(val) = env_var("XDG_DATA_HOME") {
         let trimmed = val.trim();
         if !trimmed.is_empty() {
             return Some(PathBuf::from(trimmed));
@@ -875,7 +1103,7 @@ pub fn xdg_data_home() -> Option<PathBuf> {
 /// Resolve Windows `%LOCALAPPDATA%` or fallback `%USERPROFILE%\AppData\Local`.
 pub fn windows_local_app_data() -> Option<PathBuf> {
     for var in ["LOCALAPPDATA", "LocalAppData"] {
-        if let Ok(val) = env::var(var) {
+        if let Some(val) = env_var(var) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 return Some(PathBuf::from(trimmed));
@@ -888,7 +1116,7 @@ pub fn windows_local_app_data() -> Option<PathBuf> {
 /// Resolve Windows `%APPDATA%` or fallback `%USERPROFILE%\AppData\Roaming`.
 pub fn windows_app_data() -> Option<PathBuf> {
     for var in ["APPDATA", "AppData"] {
-        if let Ok(val) = env::var(var) {
+        if let Some(val) = env_var(var) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 return Some(PathBuf::from(trimmed));
@@ -932,7 +1160,7 @@ pub fn detect_app_window_browser_path(os: DesktopOs) -> Option<(String, PathBuf)
                 "LOCALAPPDATA",
                 "LocalAppData",
             ] {
-                if let Ok(val) = env::var(var) {
+                if let Some(val) = env_var(var) {
                     let trimmed = val.trim();
                     if !trimmed.is_empty() {
                         roots.push(PathBuf::from(trimmed));
@@ -1019,5 +1247,94 @@ pub fn run_silent_helper(program: &str, args: &[&str]) {
         .spawn()
     {
         let _ = child.wait();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_env_overrides_supports_override_unset_nesting_and_panic_restore() {
+        assert_eq!(env_var("AGY_PULSE_DATA_DIR"), env::var("AGY_PULSE_DATA_DIR").ok());
+
+        let mut outer = HashMap::new();
+        outer.insert(
+            "AGY_PULSE_DATA_DIR".to_string(),
+            Some("/tmp/outer-data".to_string()),
+        );
+        outer.insert("AGY_PULSE_LANGUAGE".to_string(), Some("zh".to_string()));
+
+        with_env_overrides(&outer, || {
+            assert_eq!(
+                env_var("AGY_PULSE_DATA_DIR").as_deref(),
+                Some("/tmp/outer-data")
+            );
+            assert_eq!(get_antigravity_roots(), vec![PathBuf::from("/tmp/outer-data")]);
+            assert_eq!(read_language_env_override().as_deref(), Some("zh"));
+
+            let mut inner = HashMap::new();
+            inner.insert("AGY_PULSE_LANGUAGE".to_string(), None);
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_env_overrides(&inner, || {
+                    assert_eq!(env_var("AGY_PULSE_LANGUAGE"), None);
+                    assert_eq!(read_language_env_override(), None);
+                    panic!("simulated panic inside env override");
+                });
+            }));
+            assert!(panicked.is_err());
+            assert_eq!(env_var("AGY_PULSE_LANGUAGE").as_deref(), Some("zh"));
+        });
+
+        assert_eq!(env_var("AGY_PULSE_DATA_DIR"), env::var("AGY_PULSE_DATA_DIR").ok());
+        assert_eq!(env_var("AGY_PULSE_LANGUAGE"), env::var("AGY_PULSE_LANGUAGE").ok());
+    }
+
+    #[test]
+    fn runtime_and_fast_temp_and_ipc_socket_paths_respect_overrides_and_length_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runtime_override = tmp.path().join("custom-rt");
+        let mut ov1 = HashMap::new();
+        ov1.insert(
+            "AGY_PULSE_RUNTIME_DIR".to_string(),
+            Some(runtime_override.to_string_lossy().into_owned()),
+        );
+        with_env_overrides(&ov1, || {
+            assert_eq!(resolve_runtime_dir(), runtime_override);
+        });
+
+        let data_dir = tmp.path().join("isolated-data");
+        let mut ov2 = HashMap::new();
+        ov2.insert("AGY_PULSE_RUNTIME_DIR".to_string(), None);
+        ov2.insert(
+            "AGY_PULSE_DATA_DIR".to_string(),
+            Some(data_dir.to_string_lossy().into_owned()),
+        );
+        with_env_overrides(&ov2, || {
+            assert_eq!(resolve_runtime_dir(), data_dir.join("runtime"));
+            assert_eq!(resolve_fast_temp_dir(), std::env::temp_dir());
+        });
+
+        #[cfg(unix)]
+        {
+            let long_rt = tmp
+                .path()
+                .join("very-long-directory-name-exceeding-unix-socket-path-limit-0123456789abcdef0123456789abcdef");
+            let mut ov3 = HashMap::new();
+            ov3.insert(
+                "AGY_PULSE_RUNTIME_DIR".to_string(),
+                Some(long_rt.to_string_lossy().into_owned()),
+            );
+            with_env_overrides(&ov3, || {
+                let sock = resolve_ipc_socket_path();
+                assert!(
+                    sock.as_os_str().as_encoded_bytes().len() <= 96,
+                    "socket path too long: {}",
+                    sock.display()
+                );
+                assert_ne!(sock, long_rt.join("collector.sock"));
+            });
+        }
     }
 }

@@ -1,4 +1,3 @@
-use std::env;
 use std::fmt;
 use std::fs;
 use std::io::{self, Write};
@@ -203,8 +202,7 @@ impl Default for SyncConfig {
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
+    platform::env_var(name)
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }

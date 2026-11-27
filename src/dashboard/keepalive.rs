@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use crate::platform;
 
 pub const DEFAULT_CLOSE_GRACE_MS: u64 = 15_000;
 pub const DEFAULT_PING_LEASE_MS: u64 = 150_000;
@@ -12,16 +13,14 @@ pub fn resolve_close_grace_ms(override_ms: Option<u64>) -> u64 {
     if let Some(ms) = override_ms {
         return ms;
     }
-    env::var("AGY_PULSE_DASHBOARD_CLOSE_GRACE_MS")
-        .ok()
+    platform::env_var("AGY_PULSE_DASHBOARD_CLOSE_GRACE_MS")
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_CLOSE_GRACE_MS)
 }
 
 /// Resolve the lease TTL for unconditional `POST /api/ping?client=<id>` heartbeats.
 pub fn resolve_ping_lease_ms() -> u64 {
-    env::var("AGY_PULSE_DASHBOARD_PING_LEASE_MS")
-        .ok()
+    platform::env_var("AGY_PULSE_DASHBOARD_PING_LEASE_MS")
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&v| v > 0)
         .unwrap_or(DEFAULT_PING_LEASE_MS)
@@ -29,8 +28,7 @@ pub fn resolve_ping_lease_ms() -> u64 {
 
 /// Resolve the server-sent `: ping\n\n` frame interval for active SSE streams.
 pub fn resolve_sse_ping_interval_ms() -> u64 {
-    env::var("AGY_PULSE_DASHBOARD_SSE_PING_MS")
-        .ok()
+    platform::env_var("AGY_PULSE_DASHBOARD_SSE_PING_MS")
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&v| v > 0)
         .unwrap_or(DEFAULT_SSE_PING_INTERVAL_MS)

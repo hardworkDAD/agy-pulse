@@ -119,7 +119,7 @@ pub fn validate_redirect_url(from: &Url, location: &str) -> Result<Url, OpsError
 }
 
 fn resolve_repo_slug() -> String {
-    if let Ok(raw) = env::var("AGY_PULSE_REPO") {
+    if let Some(raw) = platform::env_var("AGY_PULSE_REPO") {
         let trimmed = raw.trim().trim_start_matches("git+").trim_end_matches(".git");
         if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
             let slug = rest.trim_matches('/');
@@ -135,8 +135,7 @@ fn resolve_repo_slug() -> String {
 }
 
 fn env_non_empty(key: &str) -> Option<String> {
-    env::var(key)
-        .ok()
+    platform::env_var(key)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -246,7 +245,7 @@ pub fn read_available_update_version() -> Option<String> {
 
 /// Trigger a detached `--check-update-bg` child if 24h have elapsed and checks are not disabled.
 pub fn maybe_spawn_background_update_check() {
-    if env::var("AGY_PULSE_DISABLE_UPDATE_CHECK").ok().as_deref() == Some("1") {
+    if platform::env_var("AGY_PULSE_DISABLE_UPDATE_CHECK").as_deref() == Some("1") {
         return;
     }
     let now = now_epoch_ms();

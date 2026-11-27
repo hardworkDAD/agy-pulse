@@ -309,12 +309,12 @@ Options:\n  \
 }
 
 fn should_auto_open(args: &DashboardCliArgs) -> bool {
-    args.open && env::var("AGY_PULSE_NO_OPEN").ok().as_deref() != Some("1")
+    args.open && platform::env_var("AGY_PULSE_NO_OPEN").as_deref() != Some("1")
 }
 
 /// Execute `agypl dashboard` / `dash` / `ui` / `--dashboard` CLI entrypoint.
 pub fn run_dashboard_cli(argv: &[String]) -> i32 {
-    let env_idle = env::var("AGY_PULSE_DASHBOARD_IDLE_SEC").ok();
+    let env_idle = platform::env_var("AGY_PULSE_DASHBOARD_IDLE_SEC");
     let args = parse_dashboard_args(argv, env_idle.as_deref());
     let cwd = env::current_dir().unwrap_or_default();
 
@@ -518,6 +518,7 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
                 no_sync: args.no_sync,
                 defer_initial_sync: args.background_serve,
                 idle_timeout_ms,
+                enable_collector: args.background_serve,
                 ..Default::default()
             };
 

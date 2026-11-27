@@ -3,9 +3,10 @@ mod schema;
 mod stats_report;
 mod sync;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rusqlite::Connection;
 
@@ -334,6 +335,25 @@ impl LedgerStore {
             child_conversation_ids,
             options,
             self.retry_policy,
+        )
+    }
+
+    /// Incrementally archive an active conversation reusing prefetched DB records from `ingest`.
+    pub fn sync_conversation_with_prefetched(
+        &mut self,
+        conversation_id: &str,
+        child_conversation_ids: &[String],
+        options: &LedgerSyncOptions,
+        prefetched: &HashMap<(PathBuf, String), Arc<crate::ingest::ConversationDbRecord>>,
+    ) -> Result<SingleSyncReport, LedgerError> {
+        sync::sync_conversation_with_prefetched(
+            &mut self.conn,
+            &self.ledger_path,
+            conversation_id,
+            child_conversation_ids,
+            options,
+            self.retry_policy,
+            prefetched,
         )
     }
 

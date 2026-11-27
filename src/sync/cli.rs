@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::panic;
@@ -176,7 +175,7 @@ fn collect_secrets(cfg: Option<&SyncConfig>) -> Vec<String> {
         "AGY_PULSE_S3_ACCESS_KEY",
         "AGY_PULSE_S3_SECRET_KEY",
     ] {
-        if let Ok(val) = env::var(env_name) {
+        if let Some(val) = platform::env_var(env_name) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 secrets.push(trimmed.to_string());

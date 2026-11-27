@@ -63,6 +63,7 @@ pub struct DashboardServerConfig {
     pub auto_sync_interval_ms: u64,
     pub ledger_path: Option<PathBuf>,
     pub source_roots: Option<Vec<SourceRoot>>,
+    pub enable_collector: bool,
 }
 
 impl Default for DashboardServerConfig {
@@ -78,6 +79,7 @@ impl Default for DashboardServerConfig {
             auto_sync_interval_ms: DEFAULT_AUTO_SYNC_INTERVAL_MS,
             ledger_path: None,
             source_roots: None,
+            enable_collector: false,
         }
     }
 }
@@ -151,6 +153,7 @@ pub(super) struct ServerSharedState {
     pub(super) sync_config_lock: Mutex<()>,
     pub(super) keepalive: Arc<KeepaliveState>,
     shutdown: AtomicBool,
+    collector_shutdown: Arc<AtomicBool>,
     sync_remote_in_progress: Arc<AtomicBool>,
     last_remote_sync_instant: Mutex<Option<Instant>>,
     pub(super) ledger: Mutex<LedgerRuntime>,
@@ -185,6 +188,7 @@ pub struct DashboardServer {
     info: DashboardServerInfo,
     shared: Arc<ServerSharedState>,
     accept_thread: Option<JoinHandle<()>>,
+    collector: Option<crate::collector::CollectorServerHandle>,
 }
 
 impl DashboardServer {
@@ -245,6 +249,7 @@ impl DashboardServer {
         ));
 
         let csrf_token = generate_csrf_token();
+        let collector_shutdown = Arc::new(AtomicBool::new(false));
 
         let shared = Arc::new(ServerSharedState {
             port: actual_port,
@@ -260,6 +265,7 @@ impl DashboardServer {
             sync_config_lock: Mutex::new(()),
             keepalive,
             shutdown: AtomicBool::new(false),
+            collector_shutdown: Arc::clone(&collector_shutdown),
             sync_remote_in_progress: Arc::new(AtomicBool::new(false)),
             last_remote_sync_instant: Mutex::new(None),
             ledger: Mutex::new(LedgerRuntime {
@@ -268,6 +274,27 @@ impl DashboardServer {
                 sync_options,
             }),
         });
+
+        let collector = if config.enable_collector {
+            let collector_keepalive = Arc::clone(&shared.keepalive);
+            let on_activity: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                collector_keepalive.touch_activity();
+            });
+            match crate::collector::CollectorServerHandle::start_embedded(
+                collector_shutdown,
+                on_activity,
+            ) {
+                Ok(handle) => Some(handle),
+                Err(err) => {
+                    platform::write_error_log_safely(&format!(
+                        "Embedded collector start error: {err}"
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let thread_shared = Arc::clone(&shared);
         let accept_thread = thread::Builder::new()
@@ -286,6 +313,7 @@ impl DashboardServer {
             info,
             shared,
             accept_thread: Some(accept_thread),
+            collector,
         })
     }
 
@@ -304,13 +332,21 @@ impl DashboardServer {
         if let Some(handle) = self.accept_thread.take() {
             let _ = handle.join();
         }
+        self.shared.collector_shutdown.store(true, Ordering::Release);
+        if let Some(mut collector) = self.collector.take() {
+            collector.shutdown();
+        }
     }
 
     /// Signal graceful shutdown and wait for the listener thread to exit.
     pub fn shutdown(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
+        self.shared.collector_shutdown.store(true, Ordering::Release);
         if let Some(handle) = self.accept_thread.take() {
             let _ = handle.join();
+        }
+        if let Some(mut collector) = self.collector.take() {
+            collector.shutdown();
         }
     }
 }
@@ -328,6 +364,7 @@ fn run_accept_loop(listener: TcpListener, shared: Arc<ServerSharedState>) {
             || platform::shutdown_signal_requested()
         {
             shared.shutdown.store(true, Ordering::Release);
+            shared.collector_shutdown.store(true, Ordering::Release);
             break;
         }
         match listener.accept() {

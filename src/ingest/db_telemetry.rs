@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -45,8 +46,13 @@ pub struct ConversationDbRecord {
     pub trajectory: Option<TrajectoryMetadata>,
     pub step_timestamps: BTreeMap<i64, i64>,
     pub bot_timestamps: BTreeMap<String, i64>,
+    pub bot_timestamps_max: BTreeMap<String, i64>,
     pub gen_rows: Vec<GenerationMetadataRow>,
 }
+
+/// Per-refresh in-memory memoization table keyed by `(db_path, sig)` to avoid
+/// re-opening the same `.db` across compaction, perf, and ledger sync phases.
+pub(crate) type DbReadMemo = HashMap<(PathBuf, String), Option<Arc<ConversationDbRecord>>>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -430,6 +436,7 @@ pub(super) fn resolve_server_compaction_limit(
     now_ms: i64,
     deadline: Option<Instant>,
     cache_handle: &mut CompactionCacheHandle,
+    memo: &mut DbReadMemo,
 ) -> Option<u64> {
     let (transcript_base_dir, derived_conv_id) = extract_transcript_context(transcript_path);
     let effective_conv_id = conversation_id.or(derived_conv_id.as_deref());
@@ -462,7 +469,13 @@ pub(super) fn resolve_server_compaction_limit(
                 .filter(|&lim| is_valid_compaction_limit(lim));
         }
 
-        if let Some(lim) = query_sqlite_compaction_limit(active_path)
+        let active_limit = if let Some(ref sig_str) = sig {
+            read_conversation_db_memoized(active_path, sig_str, memo)
+                .and_then(|rec| rec.compaction_limit)
+        } else {
+            query_sqlite_compaction_limit(active_path)
+        };
+        if let Some(lim) = active_limit
             && is_valid_compaction_limit(lim)
         {
             let mtime_ms = get_db_max_mtime_ms(active_path);
@@ -528,7 +541,14 @@ pub(super) fn resolve_server_compaction_limit(
             return Some(lim);
         }
 
-        if let Some(lim) = query_sqlite_compaction_limit(&recent.path)
+        let recent_limit = if let Some(ref sig_str) = sig
+            && let Some(memo_entry) = memo.get(&(recent.path.clone(), sig_str.clone()))
+        {
+            memo_entry.as_ref().and_then(|rec| rec.compaction_limit)
+        } else {
+            query_sqlite_compaction_limit(&recent.path)
+        };
+        if let Some(lim) = recent_limit
             && is_valid_compaction_limit(lim)
         {
             cache_handle.cache.db_limits.insert(
@@ -565,25 +585,23 @@ struct RawDbTelemetry {
     max_gen_idx: i64,
 }
 
-fn accumulate_row_into_telemetry(
+fn accumulate_decoded_row_into_telemetry(
     state: &mut RawDbTelemetry,
-    idx: i64,
-    blob: &[u8],
+    decoded: &GenerationMetadataRow,
     step_timestamps: &BTreeMap<i64, i64>,
     bot_timestamps: &BTreeMap<String, i64>,
 ) {
-    let decoded = extract_gen_metadata_row_details(idx, blob);
     if state.parent_cascade_id.is_none() {
-        state.parent_cascade_id = decoded.parent_cascade_id;
+        state.parent_cascade_id = decoded.parent_cascade_id.clone();
     }
     if state.root_cascade_id.is_none() {
-        state.root_cascade_id = decoded.root_cascade_id;
+        state.root_cascade_id = decoded.root_cascade_id.clone();
     }
     for &step_idx in &decoded.step_indices {
         state.max_step_index = Some(state.max_step_index.map_or(step_idx, |m| m.max(step_idx)));
     }
 
-    for step in decoded.steps {
+    for step in &decoded.steps {
         if let Some(ls) = step.last_step_index {
             state.max_step_index = Some(state.max_step_index.map_or(ls, |m| m.max(ls)));
         }
@@ -618,14 +636,14 @@ fn accumulate_row_into_telemetry(
                     .copied()
             });
 
-        let acc = state.models.entry(step.model_key).or_default();
+        let acc = state.models.entry(step.model_key.clone()).or_default();
         if let Some(ts) = step_ts
             && ts > 0
         {
             acc.last_updated_ms = acc.last_updated_ms.max(ts);
         }
-        acc.max_gen_idx = acc.max_gen_idx.max(idx);
-        state.max_gen_idx = state.max_gen_idx.max(idx);
+        acc.max_gen_idx = acc.max_gen_idx.max(decoded.idx);
+        state.max_gen_idx = state.max_gen_idx.max(decoded.idx);
 
         if step.valid_stream
             && let Some(sec) = step.stream_sec
@@ -661,6 +679,38 @@ fn accumulate_row_into_telemetry(
             state.total_token_steps = state.total_token_steps.saturating_add(1);
         }
     }
+}
+
+fn accumulate_row_into_telemetry(
+    state: &mut RawDbTelemetry,
+    idx: i64,
+    blob: &[u8],
+    step_timestamps: &BTreeMap<i64, i64>,
+    bot_timestamps: &BTreeMap<String, i64>,
+) {
+    let decoded = extract_gen_metadata_row_details(idx, blob);
+    accumulate_decoded_row_into_telemetry(state, &decoded, step_timestamps, bot_timestamps);
+}
+
+fn raw_telemetry_from_conversation_record(rec: &ConversationDbRecord) -> RawDbTelemetry {
+    let mut state = RawDbTelemetry {
+        models: BTreeMap::new(),
+        parent_cascade_id: None,
+        root_cascade_id: None,
+        total_cost_usd: 0.0,
+        max_step_index: None,
+        total_token_steps: 0,
+        max_gen_idx: 0,
+    };
+    for row in &rec.gen_rows {
+        accumulate_decoded_row_into_telemetry(
+            &mut state,
+            row,
+            &rec.step_timestamps,
+            &rec.bot_timestamps_max,
+        );
+    }
+    state
 }
 
 fn query_raw_db_telemetry(db_path: &Path) -> Option<RawDbTelemetry> {
@@ -933,6 +983,7 @@ pub(super) fn resolve_model_perf_stats(
     now_ms: i64,
     deadline: Option<Instant>,
     cache_handle: &mut CompactionCacheHandle,
+    memo: &mut DbReadMemo,
 ) -> ResolvedModelPerf {
     let (transcript_base_dir, derived_conv_id) = extract_transcript_context(transcript_path);
     let effective_conv_id = conversation_id.or(derived_conv_id.as_deref());
@@ -969,6 +1020,8 @@ pub(super) fn resolve_model_perf_stats(
         cache: &'a CompactionCacheFile,
         candidate_roots: &'a [PathBuf],
         active_conv_id: Option<&'a str>,
+        child_ids_set: &'a HashSet<String>,
+        memo: &'a mut DbReadMemo,
         current_session_turns: Option<u64>,
         now_ms: i64,
         max_cached_access_at: i64,
@@ -1031,28 +1084,46 @@ pub(super) fn resolve_model_perf_stats(
                 return Some(cached.clone());
             }
 
-            let has_wal = super::sqlite_ro::has_non_empty_wal(db_path);
-            let deadline_expired = self.deadline.is_some_and(|d| Instant::now() >= d);
-            if deadline_expired
-                || (!allow_over_budget
-                    && (self.uncached_loads >= MAX_UNCACHED_PERF_DBS_PER_CALL
-                        || (has_wal && self.uncached_wal_copies >= MAX_UNCACHED_WAL_COPY_DBS_PER_CALL)))
+            let telemetry = if let Some(ref sig_str) = sig
+                && let Some(memo_entry) = self.memo.get(&(db_path.to_path_buf(), sig_str.clone()))
             {
-                if let Some(cached) = self.cache.db_perf.get(&key)
-                    && cached.schema_ver == PERF_DB_SCHEMA_VERSION
+                raw_telemetry_from_conversation_record(memo_entry.as_ref()?)
+            } else {
+                let has_wal = super::sqlite_ro::has_non_empty_wal(db_path);
+                let deadline_expired = self.deadline.is_some_and(|d| Instant::now() >= d);
+                if deadline_expired
+                    || (!allow_over_budget
+                        && (self.uncached_loads >= MAX_UNCACHED_PERF_DBS_PER_CALL
+                            || (has_wal
+                                && self.uncached_wal_copies >= MAX_UNCACHED_WAL_COPY_DBS_PER_CALL)))
                 {
-                    self.loaded_by_path
-                        .insert(db_path.to_path_buf(), cached.clone());
-                    return Some(cached.clone());
+                    if let Some(cached) = self.cache.db_perf.get(&key)
+                        && cached.schema_ver == PERF_DB_SCHEMA_VERSION
+                    {
+                        self.loaded_by_path
+                            .insert(db_path.to_path_buf(), cached.clone());
+                        return Some(cached.clone());
+                    }
+                    return None;
                 }
-                return None;
-            }
 
-            self.uncached_loads += 1;
-            if has_wal {
-                self.uncached_wal_copies += 1;
-            }
-            let telemetry = query_raw_db_telemetry(db_path)?;
+                self.uncached_loads += 1;
+                if has_wal {
+                    self.uncached_wal_copies += 1;
+                }
+                let conv_stem = db_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let is_active_or_child = self.active_conv_id == Some(conv_stem)
+                    || self.child_ids_set.contains(conv_stem);
+                if is_active_or_child && let Some(ref sig_str) = sig {
+                    let rec = read_conversation_db_memoized(db_path, sig_str, self.memo)?;
+                    raw_telemetry_from_conversation_record(&rec)
+                } else {
+                    query_raw_db_telemetry(db_path)?
+                }
+            };
             let conv_id = db_path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -1092,6 +1163,8 @@ pub(super) fn resolve_model_perf_stats(
         cache: &cache_handle.cache,
         candidate_roots: &candidate_roots,
         active_conv_id: effective_conv_id,
+        child_ids_set: &child_ids_set,
+        memo,
         current_session_turns,
         now_ms,
         max_cached_access_at,
@@ -1681,7 +1754,11 @@ pub(super) fn read_conversation_db(db_path: &Path) -> Option<ConversationDbRecor
                     if let Some(ts_ms) = ts_opt {
                         rec.step_timestamps.insert(idx, ts_ms);
                         if let Some(bot_uuid) = bot_opt {
-                            rec.bot_timestamps.entry(bot_uuid).or_insert(ts_ms);
+                            rec.bot_timestamps.entry(bot_uuid.clone()).or_insert(ts_ms);
+                            rec.bot_timestamps_max
+                                .entry(bot_uuid)
+                                .and_modify(|prev| *prev = (*prev).max(ts_ms))
+                                .or_insert(ts_ms);
                         }
                     }
                 }
@@ -1690,6 +1767,7 @@ pub(super) fn read_conversation_db(db_path: &Path) -> Option<ConversationDbRecor
             Err(_) => {}
         }
 
+        let mut recent_gen_blobs: VecDeque<Vec<u8>> = VecDeque::with_capacity(16);
         match conn.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx ASC") {
             Ok(mut stmt) => {
                 let mut rows = stmt.query([])?;
@@ -1698,9 +1776,6 @@ pub(super) fn read_conversation_db(db_path: &Path) -> Option<ConversationDbRecor
                     let blob: Vec<u8> = row.get(1)?;
                     if blob.is_empty() {
                         continue;
-                    }
-                    if rec.compaction_limit.is_none() {
-                        rec.compaction_limit = extract_compaction_limit_from_gen_metadata(&blob);
                     }
                     let decoded = extract_gen_metadata_row_details(idx, &blob);
                     if rec.parent_cascade_id.is_none() {
@@ -1713,11 +1788,21 @@ pub(super) fn read_conversation_db(db_path: &Path) -> Option<ConversationDbRecor
                         rec.cascade_id = decoded.cascade_id.clone();
                     }
                     rec.gen_rows.push(decoded);
+                    if recent_gen_blobs.len() == 16 {
+                        recent_gen_blobs.pop_front();
+                    }
+                    recent_gen_blobs.push_back(blob);
                 }
             }
             Err(err) if is_sqlite_open_or_access_error(&err) => return Err(err),
             Err(err) if is_no_such_table_error(&err) => {}
             Err(_) => {}
+        }
+        for blob in recent_gen_blobs.iter().rev() {
+            if let Some(lim) = extract_compaction_limit_from_gen_metadata(blob) {
+                rec.compaction_limit = Some(lim);
+                break;
+            }
         }
 
         if rec.compaction_limit.is_none()
@@ -1737,4 +1822,170 @@ pub(super) fn read_conversation_db(db_path: &Path) -> Option<ConversationDbRecor
 
         Ok(rec)
     })
+}
+
+pub(super) fn read_conversation_db_memoized(
+    db_path: &Path,
+    sig: &str,
+    memo: &mut DbReadMemo,
+) -> Option<Arc<ConversationDbRecord>> {
+    let key = (db_path.to_path_buf(), sig.to_string());
+    if let Some(cached) = memo.get(&key) {
+        return cached.clone();
+    }
+    let loaded = read_conversation_db(db_path).map(Arc::new);
+    memo.insert(key, loaded.clone());
+    loaded
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use rusqlite::{Connection, params};
+
+    fn encode_varint(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+        out
+    }
+
+    fn pb_field(field_num: u32, wire: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = encode_varint((u64::from(field_num) << 3) | u64::from(wire));
+        if wire == 2 {
+            out.extend(encode_varint(payload.len() as u64));
+        }
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn pb_varint(field_num: u32, val: u64) -> Vec<u8> {
+        let mut out = encode_varint(u64::from(field_num) << 3);
+        out.extend(encode_varint(val));
+        out
+    }
+
+    fn pb_bytes(field_num: u32, data: &[u8]) -> Vec<u8> {
+        pb_field(field_num, 2, data)
+    }
+
+    fn pb_str(field_num: u32, s: &str) -> Vec<u8> {
+        pb_bytes(field_num, s.as_bytes())
+    }
+
+    fn pb_duration(field_num: u32, sec: u64, nanos: u64) -> Vec<u8> {
+        let mut inner = pb_varint(1, sec);
+        if nanos > 0 {
+            inner.extend(pb_varint(2, nanos));
+        }
+        pb_bytes(field_num, &inner)
+    }
+
+    fn build_test_gen_blob(
+        compaction_limit: u64,
+        out_tokens: u64,
+        stream_sec: u64,
+        model_name: &str,
+    ) -> Vec<u8> {
+        let mut f4 = Vec::new();
+        f4.extend(pb_varint(2, 1000));
+        f4.extend(pb_varint(3, out_tokens));
+        let f10 = pb_varint(4, compaction_limit);
+        let f9 = pb_bytes(10, &f10);
+        let mut f1 = Vec::new();
+        f1.extend(pb_bytes(4, &f4));
+        f1.extend(pb_bytes(9, &f9));
+        f1.extend(pb_duration(12, stream_sec, 0));
+        f1.extend(pb_str(21, model_name));
+        pb_bytes(1, &f1)
+    }
+
+    #[test]
+    fn single_refresh_memoizes_active_db_across_compaction_perf_and_prefetched() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path().join("data");
+        let conv_dir = data_dir.join("conversations");
+        fs::create_dir_all(&conv_dir).expect("mkdir");
+        let conv_id = "memo-single-read-01";
+        let db_path = conv_dir.join(format!("{conv_id}.db"));
+
+        {
+            let conn = Connection::open(&db_path).expect("open");
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute(
+                "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+                params![1i64, build_test_gen_blob(500_000, 100, 1, "Gemini 4 Neon (High)")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+                params![2i64, build_test_gen_blob(200_000, 200, 1, "Claude Sonnet 4.6 (Thinking)")],
+            )
+            .unwrap();
+        }
+
+        let mut env_ov = HashMap::new();
+        env_ov.insert(
+            "AGY_PULSE_DATA_DIR".to_string(),
+            Some(data_dir.to_string_lossy().into_owned()),
+        );
+
+        crate::platform::with_env_overrides(&env_ov, || {
+            let sig = get_db_signature(&db_path).expect("sig");
+            let mut cache_handle = load_compaction_cache_handle();
+            let mut memo = DbReadMemo::new();
+
+            let lim = resolve_server_compaction_limit(
+                Some(conv_id),
+                None,
+                Some("claude-sonnet-4-6"),
+                1_700_000_000_000,
+                None,
+                &mut cache_handle,
+                &mut memo,
+            );
+            assert_eq!(lim, Some(200_000), "must pick newest gen_metadata compaction limit");
+            assert_eq!(memo.len(), 1);
+
+            let perf = resolve_model_perf_stats(
+                Some(conv_id),
+                None,
+                &[],
+                Some(1),
+                None,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                1_700_000_000_000,
+                None,
+                &mut cache_handle,
+                &mut memo,
+            );
+            assert_eq!(memo.len(), 1, "perf phase must reuse active DB memo entry");
+            let neon = perf.models.get("Neon").expect("Neon summary");
+            assert!((neon.avg_speed.unwrap() - 100.0).abs() < 1e-6);
+
+            let rec = memo
+                .get(&(db_path.clone(), sig))
+                .and_then(|o| o.as_ref())
+                .expect("prefetched record must exist");
+            let direct = query_raw_db_telemetry(&db_path).expect("direct telemetry");
+            let converted = raw_telemetry_from_conversation_record(rec);
+            assert_eq!(converted.total_token_steps, direct.total_token_steps);
+            assert!((converted.total_cost_usd - direct.total_cost_usd).abs() < 1e-12);
+            assert_eq!(converted.models.len(), direct.models.len());
+        });
+    }
 }

@@ -1,14 +1,16 @@
 use super::quota::ProviderQuotaSummary;
 
 /// Pure in-memory domain value types representing a single statusline pulse snapshot.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ModelIdentity {
     pub id: String,
     pub display_name: String,
     pub effort: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -17,7 +19,8 @@ pub struct TokenUsage {
     pub cache_exclusive: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ContextWindowSnapshot {
     pub context_window_size: u64,
     pub used_percentage: Option<f64>,
@@ -29,14 +32,16 @@ pub struct ContextWindowSnapshot {
     pub has_total_input: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct WorkspaceInfo {
     pub current_dir: String,
     pub git_branch: Option<String>,
 }
 
 /// Offline-discovered workspace and host configuration metadata.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct WorkspaceMetadata {
     pub memory_file: Option<String>,
     pub breadcrumbs: Vec<String>,
@@ -46,14 +51,16 @@ pub struct WorkspaceMetadata {
 }
 
 /// Historical peak active turn tokens tracked separately by cache-inclusive vs cache-exclusive mode.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TurnPeakByMode {
     pub inclusive_peak: u64,
     pub exclusive_peak: u64,
 }
 
 /// Per-turn prompt cache hit metrics for statusline display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TurnCacheMetrics {
     pub available: bool,
     pub cache_read: u64,
@@ -62,7 +69,8 @@ pub struct TurnCacheMetrics {
 }
 
 /// Active child/swarm model rolling output speed entry.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ChildModelSpeed {
     pub model: String,
     pub speed_tok_s: f64,
@@ -72,7 +80,8 @@ pub struct ChildModelSpeed {
 }
 
 /// Cumulative per-model token totals from transcript scanning.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ModelTokenTotals {
     pub model_key: String,
     pub input_tokens: u64,
@@ -83,12 +92,14 @@ pub struct ModelTokenTotals {
 }
 
 /// Active image model rate-limit exhaustion window extracted from structured transcript errors.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ImageQuotaExhausted {
     pub reset_time_ms: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct HostIdentity {
     pub conversation_id: Option<String>,
     pub session_id: Option<String>,
@@ -98,7 +109,8 @@ pub struct HostIdentity {
     pub email: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CostSnapshot {
     pub native_total_usd: Option<f64>,
     pub cascade_usd: Option<f64>,
@@ -108,7 +120,8 @@ pub struct CostSnapshot {
 }
 
 /// Complete immutable snapshot passed from `ingest` into `render` and `domain` calculators.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PulseSnapshot {
     pub has_conversation_identity: bool,
     pub model: Option<ModelIdentity>,

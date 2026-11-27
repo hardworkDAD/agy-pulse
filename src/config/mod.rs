@@ -4,7 +4,6 @@ pub use wizard::{
     WizardRunOptions, WizardRunOutcome, render_statusline_preview, run_config_cli, run_wizard_loop,
 };
 
-use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -376,8 +375,7 @@ pub fn read_pulse_env_overrides() -> PulseEnvOverrides {
         }
     });
 
-    let dashboard_port = env::var("AGY_PULSE_DASHBOARD_PORT")
-        .ok()
+    let dashboard_port = platform::env_var("AGY_PULSE_DASHBOARD_PORT")
         .and_then(|raw| {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -393,8 +391,7 @@ pub fn read_pulse_env_overrides() -> PulseEnvOverrides {
                 })
         });
 
-    let dashboard_idle_timeout_sec = env::var("AGY_PULSE_DASHBOARD_IDLE_SEC")
-        .ok()
+    let dashboard_idle_timeout_sec = platform::env_var("AGY_PULSE_DASHBOARD_IDLE_SEC")
         .and_then(|raw| {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -406,12 +403,12 @@ pub fn read_pulse_env_overrides() -> PulseEnvOverrides {
             })
         });
 
-    let unicode = if env::var("AGY_PULSE_FORCE_ASCII").ok().as_deref() == Some("1") {
+    let unicode = if platform::env_var("AGY_PULSE_FORCE_ASCII").as_deref() == Some("1") {
         Some(PulseEnvOverride {
             env_var: "AGY_PULSE_FORCE_ASCII",
             value: "false".to_string(),
         })
-    } else if env::var("AGY_PULSE_FORCE_UNICODE").ok().as_deref() == Some("1") {
+    } else if platform::env_var("AGY_PULSE_FORCE_UNICODE").as_deref() == Some("1") {
         Some(PulseEnvOverride {
             env_var: "AGY_PULSE_FORCE_UNICODE",
             value: "true".to_string(),

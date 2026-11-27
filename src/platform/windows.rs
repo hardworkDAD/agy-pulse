@@ -1,4 +1,3 @@
-use std::env;
 use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::os::windows::process::CommandExt;
@@ -209,8 +208,7 @@ fn write_atomic_0600_inner(path: &Path, bytes: &[u8], sync_disk: bool) -> std::i
 }
 
 pub(super) fn resolve_claude_desktop_config_path() -> Option<PathBuf> {
-    let appdata = env::var("APPDATA")
-        .ok()
+    let appdata = super::env_var("APPDATA")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
@@ -239,13 +237,14 @@ pub(super) fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<u32> {
             }
         }
     }
-    let child = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
-        .spawn()?;
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    super::apply_thread_env_overrides(&mut cmd);
+    let child = cmd.spawn()?;
     Ok(child.id())
 }
 

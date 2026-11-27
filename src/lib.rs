@@ -1,5 +1,6 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod collector;
 pub mod config;
 pub mod dashboard;
 pub mod domain;
@@ -15,7 +16,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::panic;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -26,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use crate::ingest::HostReader;
 use crate::render::resolve_language_from_locale;
 
-const STDIN_HARD_TIMEOUT: Duration = Duration::from_millis(1500);
-const STATUSLINE_POST_STDIN_BUDGET: Duration = Duration::from_millis(900);
+pub(crate) const STDIN_HARD_TIMEOUT: Duration = Duration::from_millis(1500);
+pub(crate) const STATUSLINE_POST_STDIN_BUDGET: Duration = Duration::from_millis(900);
 const STATUSLINE_POST_STDIN_HARD_CAP: Duration = Duration::from_millis(2500);
 const STATUSLINE_TOTAL_HARD_CAP: Duration = Duration::from_millis(3500);
 // Leave time for the host to collect output and observe exit before its 5-second timeout.
@@ -58,7 +59,7 @@ Usage:\n  \
     )
 }
 
-fn read_stdin_with_timeout(timeout: Duration) -> (String, bool) {
+pub(crate) fn read_stdin_with_timeout(timeout: Duration) -> (String, bool) {
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     thread::spawn(move || {
         let mut stdin = io::stdin();
@@ -211,7 +212,7 @@ fn release_bg_ledger_sync_lock_if_owner(expected_token: Option<&str>) {
 }
 
 fn maybe_spawn_background_ledger_sync() {
-    if env::var("AGY_PULSE_DISABLE_BG_LEDGER_SYNC").ok().as_deref() == Some("1") {
+    if platform::env_var("AGY_PULSE_DISABLE_BG_LEDGER_SYNC").as_deref() == Some("1") {
         return;
     }
     let now_ms = current_epoch_ms();
@@ -320,7 +321,7 @@ fn run_sync_ledger_bg_cli(args: &[String]) -> i32 {
 }
 
 fn is_truthy_env(name: &str) -> bool {
-    env::var(name).ok().is_some_and(|raw| {
+    platform::env_var(name).is_some_and(|raw| {
         matches!(
             raw.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes"
@@ -370,8 +371,18 @@ struct StatuslineWorkerOutput {
     summary: String,
 }
 
-fn resolve_post_stdin_hard_cap(process_elapsed: Duration) -> Duration {
-    if let Ok(raw) = env::var("AGY_PULSE_POST_STDIN_HARD_CAP_MS")
+pub(crate) struct CollectedEnrichment {
+    pub enabled: bool,
+    pub snapshot: domain::PulseSnapshot,
+    pub config: config::PulseConfig,
+    pub workspace_dir: PathBuf,
+    #[allow(dead_code)]
+    pub conversation_id: Option<String>,
+    pub summary: String,
+}
+
+pub(crate) fn resolve_post_stdin_hard_cap(process_elapsed: Duration) -> Duration {
+    if let Some(raw) = platform::env_var("AGY_PULSE_POST_STDIN_HARD_CAP_MS")
         && let Ok(ms) = raw.trim().parse::<u64>()
     {
         return Duration::from_millis(ms.max(1));
@@ -382,7 +393,7 @@ fn resolve_post_stdin_hard_cap(process_elapsed: Duration) -> Duration {
     STATUSLINE_POST_STDIN_HARD_CAP.min(remaining_total)
 }
 
-fn render_hard_timeout_fallback(stdin_text: &str, fallback_cwd: &Path) -> String {
+pub(crate) fn render_hard_timeout_fallback(stdin_text: &str, fallback_cwd: &Path) -> String {
     let (snapshot, _workspace_dir) = HostReader::parse_stdin_fallback(stdin_text, fallback_cwd);
     let cfg = config::PulseConfig::default();
     let locale = platform::read_locale_env();
@@ -392,8 +403,7 @@ fn render_hard_timeout_fallback(stdin_text: &str, fallback_cwd: &Path) -> String
         .unicode
         .unwrap_or_else(platform::detect_unicode_support);
     let columns = snapshot.terminal_width.or_else(|| {
-        env::var("COLUMNS")
-            .ok()
+        platform::env_var("COLUMNS")
             .and_then(|s| s.trim().parse::<u16>().ok())
             .filter(|&w| w > 0)
     });
@@ -401,12 +411,30 @@ fn render_hard_timeout_fallback(stdin_text: &str, fallback_cwd: &Path) -> String
     render::render_statusline(&snapshot, &cfg, &term, lang)
 }
 
-fn run_statusline_enriched(
+pub(crate) fn render_snapshot_for_terminal(
+    snapshot: &domain::PulseSnapshot,
+    cfg: &config::PulseConfig,
+) -> (String, u64) {
+    profile::set_stage(profile::Stage::Render);
+    let t_render = Instant::now();
+    let locale = platform::read_locale_env();
+    let resolved_lang = resolve_language_from_locale(cfg.language, locale.as_deref());
+    let term = platform::detect_terminal_caps(
+        snapshot.terminal_width,
+        cfg.display.terminal_width,
+        cfg.display.unicode,
+    );
+    let output = render::render_statusline(snapshot, cfg, &term, resolved_lang);
+    let render_ms = t_render.elapsed().as_millis() as u64;
+    (output, render_ms)
+}
+
+pub(crate) fn collect_statusline_enrichment(
     stdin_text: &str,
-    fallback_cwd: &std::path::Path,
+    fallback_cwd: &Path,
     stdin_ms: u64,
     pipeline_deadline: Instant,
-) -> StatuslineWorkerOutput {
+) -> CollectedEnrichment {
     let mut ingest = HostReader::read_live_pulse_with_deadline(
         stdin_text,
         fallback_cwd,
@@ -421,8 +449,12 @@ fn run_statusline_enriched(
     let cfg = config::load_config(&ingest.workspace_dir);
     let cfg_ms = t_cfg.elapsed().as_millis() as u64;
     if !cfg.enabled {
-        return StatuslineWorkerOutput {
-            output: None,
+        return CollectedEnrichment {
+            enabled: false,
+            snapshot: ingest.snapshot,
+            config: cfg,
+            workspace_dir: ingest.workspace_dir,
+            conversation_id: ingest.conversation_id,
             summary: format!("stdin={stdin_ms} disabled=1"),
         };
     }
@@ -430,7 +462,7 @@ fn run_statusline_enriched(
     let locale = platform::read_locale_env();
     let resolved_lang = resolve_language_from_locale(cfg.language, locale.as_deref());
     let auto_start_dashboard =
-        env::var("AGY_PULSE_NO_DASHBOARD_AUTOSTART").ok().as_deref() != Some("1");
+        platform::env_var("AGY_PULSE_NO_DASHBOARD_AUTOSTART").as_deref() != Some("1");
     let show_dashboard_url = cfg.display.show_dashboard_url.unwrap_or(true);
     profile::set_stage(profile::Stage::DashboardResolve);
     let t_dash = Instant::now();
@@ -527,10 +559,11 @@ fn run_statusline_enriched(
                 if !ledger_write_busy
                     && Instant::now() < pipeline_deadline
                     && let Some(ref conv_id) = ingest.conversation_id
-                    && let Err(err) = store.sync_conversation(
+                    && let Err(err) = store.sync_conversation_with_prefetched(
                         conv_id,
                         &ingest.child_conversation_ids,
                         &sync_opts,
+                        &ingest.prefetched_db_records,
                     )
                 {
                     if err.is_busy() {
@@ -631,16 +664,6 @@ fn run_statusline_enriched(
         }
     }
 
-    profile::set_stage(profile::Stage::Render);
-    let t_render = Instant::now();
-    let term = platform::detect_terminal_caps(
-        ingest.snapshot.terminal_width,
-        cfg.display.terminal_width,
-        cfg.display.unicode,
-    );
-    let output = render::render_statusline(&ingest.snapshot, &cfg, &term, resolved_lang);
-    let render_ms = t_render.elapsed().as_millis() as u64;
-
     profile::set_stage(profile::Stage::DashboardTouch);
     let t_touch = Instant::now();
     if Instant::now() < pipeline_deadline
@@ -659,7 +682,7 @@ fn run_statusline_enriched(
 
     let st = &ingest.stage_timings;
     let summary = format!(
-        "stdin={stdin_ms} parse={} transcript={} speed={} compaction={} db_perf={} cascade={} ws={} cfg={cfg_ms} dash={dash_ms} upd={upd_ms} l_open={l_open_ms} l_bg={l_bg_ms} l_sync={l_sync_ms} l_roll={l_roll_ms} render={render_ms} touch={touch_ms}",
+        "stdin={stdin_ms} parse={} transcript={} speed={} compaction={} db_perf={} cascade={} ws={} cfg={cfg_ms} dash={dash_ms} upd={upd_ms} l_open={l_open_ms} l_bg={l_bg_ms} l_sync={l_sync_ms} l_roll={l_roll_ms} touch={touch_ms}",
         st.parse_ms,
         st.transcript_ms,
         st.speed_ms,
@@ -669,13 +692,44 @@ fn run_statusline_enriched(
         st.workspace_ms,
     );
 
-    StatuslineWorkerOutput {
-        output: Some(output),
+    CollectedEnrichment {
+        enabled: true,
+        snapshot: ingest.snapshot,
+        config: cfg,
+        workspace_dir: ingest.workspace_dir,
+        conversation_id: ingest.conversation_id,
         summary,
     }
 }
 
+fn run_statusline_enriched(
+    stdin_text: &str,
+    fallback_cwd: &Path,
+    stdin_ms: u64,
+    pipeline_deadline: Instant,
+) -> StatuslineWorkerOutput {
+    let collected =
+        collect_statusline_enrichment(stdin_text, fallback_cwd, stdin_ms, pipeline_deadline);
+    if !collected.enabled {
+        return StatuslineWorkerOutput {
+            output: None,
+            summary: collected.summary,
+        };
+    }
+    let (output, render_ms) =
+        render_snapshot_for_terminal(&collected.snapshot, &collected.config);
+    StatuslineWorkerOutput {
+        output: Some(output),
+        summary: format!("{} render={render_ms}", collected.summary),
+    }
+}
+
 fn run_statusline_pipeline(process_start: Instant) {
+    if platform::env_var("AGY_PULSE_SYNC_MODE").as_deref() != Some("1") {
+        collector::run_thin_statusline_pipeline(process_start);
+        return;
+    }
+
     let profiler = profile::Profiler::start_from_env();
     let _main_stage_guard = profile::enter_stage_scope(profiler.stage_handle());
 
@@ -782,6 +836,10 @@ pub fn run_cli() -> i32 {
 
     if args.iter().any(|a| a == "--sync-bg") {
         return sync::run_sync_bg();
+    }
+
+    if args.iter().any(|a| a == "--collector-bg") {
+        return collector::run_collector_bg_cli(&args);
     }
 
     if matches!(first, Some("help" | "--help" | "-h"))

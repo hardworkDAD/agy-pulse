@@ -218,7 +218,7 @@ pub fn is_valid_loopback_dashboard_url(raw: &str) -> bool {
 
 /// Resolve the preferred dashboard port (`AGY_PULSE_DASHBOARD_PORT` > `config.display.dashboard_port` > `3789`).
 pub fn resolve_dashboard_port(config: &PulseConfig) -> u16 {
-    if let Ok(raw) = env::var("AGY_PULSE_DASHBOARD_PORT") {
+    if let Some(raw) = platform::env_var("AGY_PULSE_DASHBOARD_PORT") {
         let trimmed = raw.trim();
         if !trimmed.is_empty()
             && let Ok(port) = trimmed.parse::<u16>()
@@ -238,7 +238,7 @@ pub fn resolve_dashboard_port(config: &PulseConfig) -> u16 {
 /// Resolve idle auto-exit seconds for statusline-launched dashboards
 /// (`AGY_PULSE_DASHBOARD_IDLE_SEC` > `config.display.dashboard_idle_timeout_sec` > `1800`).
 pub fn resolve_statusline_idle_timeout_sec(config: &PulseConfig) -> u64 {
-    if let Ok(raw) = env::var("AGY_PULSE_DASHBOARD_IDLE_SEC") {
+    if let Some(raw) = platform::env_var("AGY_PULSE_DASHBOARD_IDLE_SEC") {
         let trimmed = raw.trim();
         if !trimmed.is_empty()
             && let Ok(sec) = trimmed.parse::<u64>()
@@ -472,6 +472,11 @@ pub fn touch_running_dashboard(
 ) -> TouchDashboardResult {
     if !info.running {
         return TouchDashboardResult::Skipped("not_running");
+    }
+    if info.pid == Some(std::process::id())
+        && crate::collector::is_embedded_collector_active_in_process()
+    {
+        return TouchDashboardResult::Skipped("in_process_unified");
     }
     if info.idle_timeout_ms == 0 {
         return TouchDashboardResult::Skipped("no_idle_timeout");
@@ -734,7 +739,7 @@ pub fn build_app_window_launch_spec(
 
 /// Open the dashboard URL in an app-mode Chromium window if available, else the system browser.
 pub fn open_dashboard_window(url: &str, app_mode: bool) -> BrowserOpenResult {
-    if env::var("AGY_PULSE_NO_OPEN").ok().as_deref() == Some("1") {
+    if platform::env_var("AGY_PULSE_NO_OPEN").as_deref() == Some("1") {
         return BrowserOpenResult {
             ok: false,
             mode: "suppressed",

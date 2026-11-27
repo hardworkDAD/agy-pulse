@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -13,7 +14,7 @@ use crate::domain::{
     SyncDeviceRecord, SyncStepRecord, TokenUsage, UNASSIGNED_ACCOUNT_ID, calculate_token_cost,
     normalize_account_id,
 };
-use crate::ingest::HostReader;
+use crate::ingest::{ConversationDbRecord, HostReader};
 use crate::platform;
 
 use super::LedgerError;
@@ -403,6 +404,7 @@ struct IngestionTarget<'a> {
     source: LedgerSource,
     fallback_parent_id: Option<&'a str>,
     fallback_root_id: Option<&'a str>,
+    prefetched: Option<&'a HashMap<(PathBuf, String), Arc<ConversationDbRecord>>>,
 }
 
 fn build_ingestion_records(target: &IngestionTarget<'_>) -> Option<IngestedConversationBatch> {
@@ -414,7 +416,15 @@ fn build_ingestion_records(target: &IngestionTarget<'_>) -> Option<IngestedConve
     let source = target.source;
     let fallback_parent_id = target.fallback_parent_id;
     let fallback_root_id = target.fallback_root_id;
-    let rec = HostReader::read_conversation_db(db_path)?;
+    let rec_owned: ConversationDbRecord;
+    let rec: &ConversationDbRecord = if let Some(map) = target.prefetched
+        && let Some(cached) = map.get(&(db_path.to_path_buf(), sig.to_string()))
+    {
+        cached.as_ref()
+    } else {
+        rec_owned = HostReader::read_conversation_db(db_path)?;
+        &rec_owned
+    };
     let db_mtime_ms = if max_mtime_ms > 0 {
         max_mtime_ms
     } else {
@@ -503,6 +513,7 @@ fn build_ingestion_records(target: &IngestionTarget<'_>) -> Option<IngestedConve
         created_at_ms,
         cascade_id: rec
             .cascade_id
+            .clone()
             .or_else(|| traj.and_then(|t| t.cascade_id.clone()))
             .unwrap_or_else(|| conversation_id.to_string()),
         parent_conversation_id: parent_conv_id,
@@ -860,6 +871,7 @@ pub(super) fn sync_all(
             source: item.source,
             fallback_parent_id: None,
             fallback_root_id: None,
+            prefetched: None,
         }) {
             batches.push(batch);
         }
@@ -938,6 +950,46 @@ pub(super) fn sync_conversation(
     child_conversation_ids: &[String],
     options: &LedgerSyncOptions,
     retry_policy: BusyRetryPolicy,
+) -> Result<SingleSyncReport, LedgerError> {
+    sync_conversation_inner(
+        conn,
+        ledger_path,
+        conversation_id,
+        child_conversation_ids,
+        options,
+        retry_policy,
+        None,
+    )
+}
+
+pub(super) fn sync_conversation_with_prefetched(
+    conn: &mut Connection,
+    ledger_path: &Path,
+    conversation_id: &str,
+    child_conversation_ids: &[String],
+    options: &LedgerSyncOptions,
+    retry_policy: BusyRetryPolicy,
+    prefetched: &HashMap<(PathBuf, String), Arc<ConversationDbRecord>>,
+) -> Result<SingleSyncReport, LedgerError> {
+    sync_conversation_inner(
+        conn,
+        ledger_path,
+        conversation_id,
+        child_conversation_ids,
+        options,
+        retry_policy,
+        Some(prefetched),
+    )
+}
+
+fn sync_conversation_inner(
+    conn: &mut Connection,
+    ledger_path: &Path,
+    conversation_id: &str,
+    child_conversation_ids: &[String],
+    options: &LedgerSyncOptions,
+    retry_policy: BusyRetryPolicy,
+    prefetched: Option<&HashMap<(PathBuf, String), Arc<ConversationDbRecord>>>,
 ) -> Result<SingleSyncReport, LedgerError> {
     if conversation_id.trim().is_empty() {
         return Ok(SingleSyncReport {
@@ -1021,6 +1073,7 @@ pub(super) fn sync_conversation(
             source,
             fallback_parent_id: fb_parent,
             fallback_root_id: fb_root,
+            prefetched,
         }) {
             batches.push(batch);
         }
