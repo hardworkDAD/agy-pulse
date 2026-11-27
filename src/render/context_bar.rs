@@ -1,4 +1,4 @@
-use crate::config::PulseConfig;
+use crate::config::{CacheHitThresholdsConfig, PulseConfig};
 use crate::domain::{
     PulseSnapshot, TokenUsage, compact_model_name, is_usage_cache_inclusive,
     model_includes_cache_in_input, resolve_cascade_cost_usd, resolve_model_display_name,
@@ -130,6 +130,28 @@ pub(super) fn resolve_monitor_model_label(snapshot: &PulseSnapshot) -> String {
         return sanitize_terminal_text(&resolved, 80);
     }
     "Unknown Model".to_string()
+}
+
+fn resolve_cache_hit_color(
+    hit_pct: f64,
+    palette: &ThemePalette,
+    thresholds: Option<&CacheHitThresholdsConfig>,
+) -> String {
+    let excellent = thresholds
+        .and_then(|t| t.excellent)
+        .filter(|v| v.is_finite())
+        .unwrap_or(80.0);
+    let partial = thresholds
+        .and_then(|t| t.partial)
+        .filter(|v| v.is_finite())
+        .unwrap_or(50.0);
+    if hit_pct >= excellent {
+        format!("{}{BOLD}", palette.primary)
+    } else if hit_pct >= partial {
+        palette.warning.to_string()
+    } else {
+        DIM.to_string()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -341,11 +363,11 @@ pub(super) fn render_context_monitor_line(
 
         if prompt_ctx > 0 && opts.show_cache {
             let cache_pct = ((c_read as f64 * 100.0) / prompt_ctx as f64).clamp(0.0, 100.0);
-            let cache_color = if cache_pct >= 50.0 {
-                palette.primary
-            } else {
-                DIM
-            };
+            let cache_color = resolve_cache_hit_color(
+                cache_pct,
+                palette,
+                config.display.cache_hit_thresholds.as_ref(),
+            );
             if opts.show_cache_abs && cols >= 105 && c_read > 0 {
                 parts.push(format!(
                     "{DIM}{}{RESET} {cache_color}{:.0}%{RESET} {DIM}({}){RESET}",
@@ -452,6 +474,7 @@ struct ModelCacheEntry {
 
 pub(super) fn render_model_cache_line(
     snapshot: &PulseSnapshot,
+    config: &PulseConfig,
     term: &TerminalCaps,
     text: &LanguageText,
     palette: &ThemePalette,
@@ -584,13 +607,11 @@ pub(super) fn render_model_cache_line(
 
     let format_entry = |entry: &ModelCacheEntry, detail_mode: CacheDetailMode| -> String {
         let hit_pct = ((entry.cache_read as f64 * 100.0) / entry.total_prompt as f64).clamp(0.0, 100.0);
-        let hit_color = if hit_pct >= 80.0 {
-            format!("{}{BOLD}", palette.primary)
-        } else if hit_pct >= 50.0 {
-            palette.warning.to_string()
-        } else {
-            DIM.to_string()
-        };
+        let hit_color = resolve_cache_hit_color(
+            hit_pct,
+            palette,
+            config.display.cache_hit_thresholds.as_ref(),
+        );
         let head = format!("{} {hit_color}{hit_pct:.0}%{RESET}", entry.model_key);
         if matches!(detail_mode, CacheDetailMode::PctOnly) {
             return head;

@@ -277,7 +277,6 @@ fn pure_render_quota_table_compact_none_colors_and_ascii_fallback() {
 
     let base_cfg = PulseConfig {
         display: DisplayConfig {
-            show_model: Some(false),
             show_current_dir: Some(false),
             show_context_monitor: Some(false),
             show_model_cache: Some(false),
@@ -555,7 +554,6 @@ fn e2e_bilingual_zh_en_and_ascii_degradation_with_quota() {
         env.global_cfg_dir.join("agy-pulse.config.json"),
         serde_json::json!({
             "display": {
-                "showCost": true,
                 "showContextMonitor": true,
                 "quotaStyle": "table"
             }
@@ -578,7 +576,7 @@ fn e2e_bilingual_zh_en_and_ascii_degradation_with_quota() {
     let (code_zh, out_zh, _) = env.run_stdin(
         &agy_pulse_bin(),
         &payload,
-        &[("AGY_PULSE_LANGUAGE", "zh"), ("AGY_PULSE_FORCE_ASCII", "1")],
+        &[("COLUMNS", "120"), ("AGY_PULSE_LANGUAGE", "zh"), ("AGY_PULSE_FORCE_ASCII", "1")],
     );
     assert_eq!(code_zh, 0);
     let plain_zh = strip_ansi(&out_zh);
@@ -595,7 +593,7 @@ fn e2e_bilingual_zh_en_and_ascii_degradation_with_quota() {
     let (code_en, out_en, _) = env.run_stdin(
         &agy_pulse_bin(),
         &payload,
-        &[("AGY_PULSE_LANGUAGE", "en"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+        &[("COLUMNS", "120"), ("AGY_PULSE_LANGUAGE", "en"), ("AGY_PULSE_FORCE_UNICODE", "1")],
     );
     assert_eq!(code_en, 0);
     let plain_en = strip_ansi(&out_en);

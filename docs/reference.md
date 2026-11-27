@@ -266,7 +266,7 @@ Or run `agypl uninstall` directly. Removes `agy-pulse` & `agypl` binaries, `sett
 3. **Global config**: `~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json` (also discovers legacy `agy-pulse-runtime/runtime/agy-pulse.config.json`, or `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`; edited by both `agypl config` and the Web **Dashboard** Settings drawer)
 4. **Built-in defaults** (`DisplayConfig::builtin_defaults()`, lowest priority)
 
-Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `repository`) are silently ignored during deserialization, and `"quotaStyle": "models"` smoothly maps to `"table"`.
+Unknown or retired keys (`endpoints`, `interestingModels`, `cloudQuota`, `repository`, `display.showModel`, `display.showTokenBar`, `display.showContextBar`, `display.showTurnCacheHitRate`, `display.showCost`, `icons.token`, `icons.ctx`) are silently ignored during deserialization for backward compatibility, and `"quotaStyle": "models"` smoothly maps to `"table"`.
 
 ### Full Default Configuration Example
 
@@ -288,14 +288,9 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
     "showCycleMode": true,
     "showSpeed": true,
     "showDashboardUrl": true,
-    "showModel": false,
-    "showTokenBar": false,
-    "showContextBar": false,
-    "showTurnCacheHitRate": false,
     "showBreadcrumbs": false,
     "showGitBranch": false,
     "showUsername": false,
-    "showCost": false,
     "showDailyCost": false,
     "showWeeklyCost": false,
     "showRoutedCost": false,
@@ -318,15 +313,15 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 | `language` | `"auto" \| "en" \| "zh"` | `"auto"` | UI language (`"auto"` inspects `LC_ALL` / `LC_CTYPE` / `LANG`) |
 | `theme` | `object \| string` | `{ primary: "green", secondary: "gray", warning: "yellow", critical: "red" }` | 4-key object, preset (`"Emerald Green"`, `"Ocean Blue"`, `"Cyberpunk Magenta"`, `"Amber Gold"`), or single color name overriding `primary` |
 | `thresholds` | `{ warning, critical }` | `{ warning: 0.7, critical: 0.9 }` | Quota warning/critical ratios (`0`–`1`); context monitor uses `65%`/`85%` at defaults or `warning*100%`/`critical*100%` when customized |
-| `icons` | `object` | *unset* | Optional icon overrides (`branch`, `plan`, `step`, `task`, `token`, `ctx`, `model`, max 8 chars) |
+| `icons` | `object` | *unset* | Optional icon overrides (`branch`, `plan`, `step`, `task`, `model`, max 8 chars; **Dashboard** Settings exposes `branch`, while retired `token` and `ctx` are silently ignored) |
 
 ### `display.*` Configuration Fields
 
 | Field | Type | Default | Area | Description |
 |---|---|---|---|---|
 | `display.quotaStyle` | `"table" \| "compact" \| "none"` | `"table"` | Quota panel | Provider quota layout (`"models"` falls back to `"table"`) |
-| `display.showContextMonitor` | `boolean` | `true` | Bottom bar | Real-time context & **Compaction** monitor line |
-| `display.showModelCache` | `boolean` | `true` | Session Cache | Per-model cumulative cache hit breakdown line |
+| `display.showContextMonitor` | `boolean` | `true` | Bottom bar | Real-time context & **Compaction** monitor line (model name, progress bar, turn cache, output & single-window cost) |
+| `display.showModelCache` | `boolean` | `true` | Bottom bar | Session model cache line showing cumulative cache hit rate per model (independent toggle, default `true`) |
 | `display.showCurrentDir` | `boolean` | `true` | Line 1 | Current working directory basename |
 | `display.showCycleMode` | `boolean` | `true` | Line 1 | Interactive cycle mode badge (`auto`, `accept-edits`, `plan`, `best-of-n`) |
 | `display.showSpeed` | `boolean` | `true` | Line 1 | Main weighted output `tok/s` + TTFT and up to 3 active child model speeds |
@@ -335,17 +330,12 @@ Unknown or retired `v1` keys (`endpoints`, `interestingModels`, `cloudQuota`, `r
 | `display.dashboardIdleTimeoutSec` | `number` | `1800` | Dashboard | Idle auto-exit timeout in seconds for the status-line auto-started dashboard (`0` keeps it running without idle exit; overridden by `AGY_PULSE_DASHBOARD_IDLE_SEC`) |
 | `display.modelSpeedExpireMinutes` | `number` | `5` | Line 1 | Hide main/child model speed & TTFT after N idle minutes |
 | `display.modelSpeedExpireTurns` | `number` | `30` | Line 1 | Hide main/child model speed & TTFT after N idle turns |
-| `display.showModel` | `boolean` | `false` | Line 1 | Active model name on Line 1 |
-| `display.showTokenBar` | `boolean` | `false` | Line 2 | Token breakdown bar (`in`, `out`, `cache`) |
-| `display.showContextBar` | `boolean` | `false` | Line 2 | Classic context progress bar |
-| `display.showTurnCacheHitRate` | `boolean` | `false` | Line 2 | Per-turn cache hit rate badge |
-| `display.cacheHitThresholds` | `{ excellent?, partial? }` | `{ excellent: 80, partial: 50 }` | Line 2 | Turn cache hit color thresholds |
+| `display.cacheHitThresholds` | `{ excellent?, partial? }` | `{ excellent: 80, partial: 50 }` | Bottom bar | Color thresholds for turn cache & cumulative model cache lines on the bottom **Statusline** (`>= excellent` bold primary, `>= partial` warning, `< partial` dim) |
 | `display.showBreadcrumbs` | `boolean` | `false` | Line 3 | Workspace memory file / breadcrumbs |
 | `display.breadcrumbCount` | `number` | `3` | Line 3 | Max breadcrumb items (`0, 1, 2, 3, 5`) |
 | `display.showGitBranch` | `boolean` | `false` | Line 1 | Current Git branch (hidden outside Git repos) |
 | `display.showUsername` | `boolean` | `false` | Line 1 | Host stdin `username` / `email` or custom `display.username` |
 | `display.username` | `string` | *unset* | Line 1 | Custom username override when `showUsername` is `true` (overrides host `stdin.username` / `stdin.email` and OS username) |
-| `display.showCost` | `boolean` | `false` | Line 1 | Current **Cascade** USD total |
 | `display.showDailyCost` | `boolean` | `false` | Line 1 | Today's cumulative USD cost from **Ledger** |
 | `display.showWeeklyCost` | `boolean` | `false` | Line 1 | 7-day rolling USD cost from **Ledger** |
 | `display.showRoutedCost` | `boolean` | `false` | Cost calc | Trust native routed cost for Bedrock/Vertex models when `true` |

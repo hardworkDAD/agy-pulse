@@ -1,20 +1,14 @@
-use crate::config::{CacheHitThresholdsConfig, LanguageSetting, PulseConfig, QuotaStyle};
-use crate::domain::{
-    ChildModelSpeed, PulseSnapshot, TurnCacheMetrics, calculate_turn_cache_metrics,
-    compact_model_name, format_usd, is_usage_cache_inclusive, resolve_cascade_cost_usd,
-    resolve_model_display_name,
-};
+use crate::config::{LanguageSetting, PulseConfig};
+use crate::domain::{ChildModelSpeed, PulseSnapshot, compact_model_name, format_usd};
 use crate::platform::TerminalCaps;
 
 use super::context_bar::{
-    Glyphs, ProgressBarStyle, create_progress_bar, render_context_monitor_line,
-    render_model_cache_line,
+    Glyphs, render_context_monitor_line, render_model_cache_line,
 };
-use super::i18n::{BOLD, DIM, LanguageText, RESET, ThemePalette, get_language_text, resolve_palette};
+use super::i18n::{BOLD, LanguageText, RESET, ThemePalette, get_language_text, resolve_palette};
 use super::quota_table::render_quota_section;
 use super::width::{
-    ansi_display_width, format_tokens, sanitize_terminal_text, simplify_model_name,
-    truncate_ansi_to_display_width,
+    ansi_display_width, sanitize_terminal_text, truncate_ansi_to_display_width,
 };
 
 fn format_cycle_mode_segment(cycle_mode: Option<&str>) -> String {
@@ -40,36 +34,6 @@ fn format_cycle_mode_segment(cycle_mode: Option<&str>) -> String {
             }
         }
     }
-}
-
-fn resolve_line1_model_name(snapshot: &PulseSnapshot) -> String {
-    if let Some(model) = &snapshot.model {
-        let mut base = if !model.display_name.is_empty() {
-            model.display_name.clone()
-        } else {
-            model.id.clone()
-        };
-        if !base.is_empty() {
-            if let Some(effort) = &model.effort {
-                let trimmed = effort.trim();
-                if !trimmed.is_empty()
-                    && !base
-                        .to_ascii_lowercase()
-                        .contains(&trimmed.to_ascii_lowercase())
-                {
-                    base = format!("{base} ({trimmed})");
-                }
-            }
-            return sanitize_terminal_text(&simplify_model_name(&base), 80);
-        }
-    }
-    if let Some(lt_model) = snapshot.last_turn_model.as_deref()
-        && !lt_model.trim().is_empty()
-    {
-        let resolved = resolve_model_display_name(lt_model.trim(), None);
-        return sanitize_terminal_text(&simplify_model_name(&resolved), 80);
-    }
-    "Unknown Model".to_string()
 }
 
 fn format_ttft(ttft_sec: f64, is_zh: bool) -> Option<String> {
@@ -136,53 +100,6 @@ fn format_child_model_speeds_seg(
     format!("{prefix}{}", parts.join(sep))
 }
 
-fn format_turn_cache_badge(
-    metrics: Option<&TurnCacheMetrics>,
-    label: &str,
-    palette: &ThemePalette,
-    is_compact: bool,
-    thresholds: Option<&CacheHitThresholdsConfig>,
-) -> String {
-    let Some(m) = metrics.filter(|m| m.available) else {
-        return format!("{}{DIM}{label} --{RESET}", palette.secondary);
-    };
-
-    let excellent = thresholds
-        .and_then(|t| t.excellent)
-        .filter(|v| v.is_finite())
-        .unwrap_or(80.0);
-    let partial = thresholds
-        .and_then(|t| t.partial)
-        .filter(|v| v.is_finite())
-        .unwrap_or(50.0);
-    let hit_rate = if m.hit_rate.is_finite() {
-        m.hit_rate.clamp(0.0, 100.0)
-    } else {
-        0.0
-    };
-
-    let style = if hit_rate >= excellent {
-        format!("{}{BOLD}", palette.primary)
-    } else if hit_rate >= partial {
-        palette.warning.to_string()
-    } else if hit_rate > 0.0 {
-        format!("{}{DIM}", palette.warning)
-    } else {
-        format!("{}{DIM}", palette.secondary)
-    };
-
-    let absolute = if is_compact {
-        String::new()
-    } else {
-        format!(
-            " ({}/{})",
-            format_tokens(m.cache_read),
-            format_tokens(m.total_prompt)
-        )
-    };
-    format!("{style}{label} {hit_rate:.1}%{absolute}{RESET}")
-}
-
 fn format_dashboard_url_segment(raw_url: Option<&str>, palette: &ThemePalette) -> String {
     let Some(raw) = raw_url else {
         return String::new();
@@ -228,28 +145,18 @@ pub fn render_statusline(
     let d = &config.display;
     let use_nerd = d.use_nerd_fonts.unwrap_or(false);
     let unicode = term.unicode;
-    let show_git_branch = d.show_git_branch.unwrap_or(true);
-    let show_token_bar = d.show_token_bar.unwrap_or(true);
+    let show_git_branch = d.show_git_branch.unwrap_or(false);
     let show_current_dir = d.show_current_dir.unwrap_or(true);
     let show_username = d.show_username.unwrap_or(false);
-    let show_cost = d.show_cost.unwrap_or(false);
     let show_daily_cost = d.show_daily_cost.unwrap_or(false);
     let show_weekly_cost = d.show_weekly_cost.unwrap_or(false);
     let show_speed = d.show_speed.unwrap_or(true);
-    let show_model = d.show_model.unwrap_or(true);
-    let show_context_bar = d.show_context_bar.unwrap_or(true);
     let show_cycle_mode = d.show_cycle_mode.unwrap_or(true);
-    let show_turn_cache_hit_rate = d.show_turn_cache_hit_rate.unwrap_or(false);
-    let show_breadcrumbs = d.show_breadcrumbs.unwrap_or(true);
-    let allow_routed_cost = d.show_routed_cost.unwrap_or(false);
+    let show_breadcrumbs = d.show_breadcrumbs.unwrap_or(false);
     let show_dashboard_url = d.show_dashboard_url.unwrap_or(true);
-    let is_compact = d.quota_style == QuotaStyle::Compact;
 
     let text = get_language_text(resolved_lang);
     let palette = resolve_palette(&config.theme);
-
-    let warn_thresh = config.thresholds.warning;
-    let crit_thresh = config.thresholds.critical;
 
     let explicit_cols = term.columns.filter(|&c| c > 0).map(|c| c as usize);
 
@@ -271,24 +178,18 @@ pub fn render_statusline(
         }
     };
 
-    let (mut branch_icon, mut token_icon, mut ctx_icon) = if use_nerd {
-        ("\u{e725} ".to_string(), "\u{f06a9} ".to_string(), "\u{f1510} ".to_string())
+    let mut branch_icon = if use_nerd {
+        "\u{e725} ".to_string()
     } else if unicode {
-        ("⎇ ".to_string(), "⚿ ".to_string(), "⛁ ".to_string())
+        "⎇ ".to_string()
     } else {
-        ("[B] ".to_string(), "[Tk] ".to_string(), "[C] ".to_string())
+        "[B] ".to_string()
     };
 
-    if let Some(icons) = &config.icons {
-        if let Some(v) = &icons.branch {
-            branch_icon = sanitize_terminal_text(v, 8);
-        }
-        if let Some(v) = &icons.token {
-            token_icon = sanitize_terminal_text(v, 8);
-        }
-        if let Some(v) = &icons.ctx {
-            ctx_icon = sanitize_terminal_text(v, 8);
-        }
+    if let Some(icons) = &config.icons
+        && let Some(v) = &icons.branch
+    {
+        branch_icon = sanitize_terminal_text(v, 8);
     }
 
     let divider = format!(" {}{}{RESET} ", palette.secondary, glyph.vbar);
@@ -321,12 +222,6 @@ pub fn render_statusline(
     } else {
         String::new()
     };
-    let model_seg = if show_model {
-        let model_name = resolve_line1_model_name(snapshot);
-        format!("{}{model_name}{RESET}", palette.primary)
-    } else {
-        String::new()
-    };
     let plan = sanitize_terminal_text(
         snapshot.host.plan_tier.as_deref().unwrap_or("Free"),
         80,
@@ -338,16 +233,7 @@ pub fn render_statusline(
         String::new()
     };
 
-    let cascade_cost = if show_cost {
-        resolve_cascade_cost_usd(snapshot, allow_routed_cost)
-    } else {
-        None
-    };
-
     let mut cost_parts: Vec<String> = Vec::new();
-    if let Some(sc) = cascade_cost {
-        cost_parts.push(format!("{} {}", text.cost_label, format_usd(sc)));
-    }
     if show_daily_cost && let Some(today) = snapshot.cost.today_usd {
         cost_parts.push(format!("{} {}", text.today_label, format_usd(today)));
     }
@@ -466,9 +352,6 @@ pub fn render_statusline(
         if opts.include_branch && !branch_seg.is_empty() {
             parts.push(branch_seg.clone());
         }
-        if !model_seg.is_empty() {
-            parts.push(model_seg.clone());
-        }
         parts.push(plan_seg.clone());
         if !mode_seg.is_empty() {
             parts.push(mode_seg.clone());
@@ -584,198 +467,24 @@ pub fn render_statusline(
         }
     }
 
-    // Line 2 (Tokens + Turn cache hit rate + Context bar + Image quota)
-    let cw = snapshot.context.as_ref();
-    let total_input = cw
-        .map(|c| c.total_input_tokens)
-        .filter(|&v| v > 0 || cw.is_some_and(|x| x.has_total_input))
-        .unwrap_or(snapshot.transcript_total_input_tokens);
-    let total_output = cw
-        .map(|c| c.total_output_tokens)
-        .filter(|&v| v > 0)
-        .unwrap_or(snapshot.transcript_total_output_tokens);
-    let ctx_pct_raw = cw.and_then(|c| c.used_percentage).unwrap_or(0.0);
-    let cur = cw
-        .and_then(|c| c.current_usage.as_ref())
-        .or(snapshot.last_turn_usage.as_ref());
-    let cache_read = cur
-        .map(|u| u.cache_read_input_tokens)
-        .or_else(|| cw.and_then(|c| c.total_cache_read_tokens))
-        .unwrap_or(0);
-    let cache_write = cur
-        .map(|u| u.cache_creation_input_tokens)
-        .or_else(|| cw.and_then(|c| c.total_cache_creation_tokens))
-        .unwrap_or(0);
-    let cache_total = cache_read.saturating_add(cache_write);
-
-    let in_tokens = match cur {
-        Some(u) => {
-            if is_usage_cache_inclusive(main_model_ident, u) {
-                u.input_tokens.saturating_sub(cache_total)
-            } else {
-                u.input_tokens
-            }
-        }
-        None => total_input.saturating_sub(cache_total),
-    };
-
-    let mut display_cache = cache_total;
-    let mut display_in = in_tokens;
-    let mut is_cache_smooth_applied = false;
-    if cache_total == 0
-        && snapshot.max_historical_cache > 10_000
-        && (in_tokens as f64) >= (snapshot.max_historical_cache as f64 * 0.9)
-    {
-        display_cache = snapshot.max_historical_cache;
-        display_in = in_tokens.saturating_sub(snapshot.max_historical_cache);
-        is_cache_smooth_applied = true;
-    }
-
-    let token_total = display_in
-        .saturating_add(total_output)
-        .saturating_add(display_cache);
-
-    let mut detail_parts = vec![
-        format!("in: {}", format_tokens(display_in)),
-        format!("out: {}", format_tokens(total_output)),
-    ];
-    if display_cache > 0 {
-        let cache_label = if is_cache_smooth_applied {
-            format!("{}*", format_tokens(display_cache))
-        } else {
-            format_tokens(display_cache)
-        };
-        detail_parts.push(format!("cache: {cache_label}"));
-    }
-    let token_parts = if is_compact {
-        format_tokens(token_total)
-    } else {
-        format!(
-            "{} {}({RESET}{}{})",
-            format_tokens(token_total),
-            palette.secondary,
-            detail_parts.join(", "),
-            palette.secondary,
-        )
-    };
-    let token_prefix = if token_icon == "[Tk] " {
-        "Tokens".to_string()
-    } else {
-        format!("{token_icon}Tokens")
-    };
-    let tokens_str = format!("{}{token_prefix} {token_parts}{RESET}", palette.cyan);
-
-    let raw_ctx_size = cw.map(|c| c.context_window_size).unwrap_or(0);
-    let effective_ctx_size = match (raw_ctx_size > 0, snapshot.server_compaction_limit) {
-        (true, Some(srv)) if srv > 0 => raw_ctx_size.min(srv),
-        (false, Some(srv)) if srv > 0 => srv,
-        (true, _) => raw_ctx_size,
-        (false, _) => 0,
-    };
-
-    let has_positive_used_pct = ctx_pct_raw > 0.0;
-    let use_active_turn_ctx = !has_positive_used_pct
-        && (cur.is_some()
-            || (effective_ctx_size > 0 && total_input > effective_ctx_size)
-            || snapshot.compaction_count > 0);
-
-    let (display_ctx_tokens, effective_ctx_percent) = if use_active_turn_ctx {
-        let active = if let Some(u) = cur {
-            display_in
-                .saturating_add(display_cache)
-                .saturating_add(u.output_tokens)
-        } else {
-            0
-        };
-        let pct = if effective_ctx_size > 0 {
-            ((active as f64 * 100.0) / effective_ctx_size as f64).min(100.0)
-        } else {
-            0.0
-        };
-        (active, pct)
-    } else {
-        let pct = if raw_ctx_size > 0 && effective_ctx_size > 0 && effective_ctx_size < raw_ctx_size {
-            if total_input > 0 {
-                ((total_input as f64 * 100.0) / effective_ctx_size as f64).min(100.0)
-            } else {
-                (ctx_pct_raw * (raw_ctx_size as f64 / effective_ctx_size as f64)).min(100.0)
-            }
-        } else {
-            ctx_pct_raw
-        };
-        (total_input, pct)
-    };
-
-    let ctx_bar = create_progress_bar(
-        effective_ctx_percent,
-        &ProgressBarStyle {
-            default_color: palette.cyan,
-            width: 10,
-            is_usage: true,
-            warn_thresh,
-            crit_thresh,
-            palette: &palette,
-            glyph: &glyph,
-        },
-    );
-    let ctx_pct_str = format!("{}%", effective_ctx_percent.round() as u64);
-    let ctx_str = format!(
-        "{}{ctx_icon}{}/{}{RESET} {ctx_bar} {}{ctx_pct_str}{RESET}",
-        palette.cyan,
-        format_tokens(display_ctx_tokens),
-        format_tokens(effective_ctx_size),
-        palette.cyan,
-    );
-
-    let computed_turn_cache = if snapshot.turn_cache_metrics.is_some() {
-        snapshot.turn_cache_metrics.clone()
-    } else if let Some(u) = cur
-        && (u.cache_read_input_tokens > 0 || u.cache_creation_input_tokens > 0)
-    {
-        Some(calculate_turn_cache_metrics(u, main_model_ident))
-    } else {
-        None
-    };
-
-    let mut line2_parts: Vec<String> = Vec::new();
-    if show_token_bar {
-        line2_parts.push(tokens_str);
-    }
-    if show_turn_cache_hit_rate && (computed_turn_cache.is_some() || is_cache_smooth_applied) {
-        let badge = format_turn_cache_badge(
-            if is_cache_smooth_applied {
-                None
-            } else {
-                computed_turn_cache.as_ref()
-            },
-            text.cache_badge_label,
-            &palette,
-            is_compact,
-            d.cache_hit_thresholds.as_ref(),
-        );
-        line2_parts.push(badge);
-    }
-    if show_context_bar {
-        line2_parts.push(ctx_str);
-    }
+    // Line 2 (Image quota exhaustion alert, if active)
+    let mut line2 = String::new();
     if let Some(ex) = &snapshot.image_exhausted {
         let secs_left = ((ex.reset_time_ms - snapshot.observed_at_ms) as f64 / 1000.0).round() as i64;
         if secs_left > 0 {
             let h = secs_left / 3600;
             let m = (secs_left % 3600) / 60;
             let icon = if unicode { "⚠️ " } else { "[!] " };
-            line2_parts.push(format!(
+            line2 = format!(
                 "{}{icon}Image Quota Exhausted (Resets in: {h:02}h{m:02}m){RESET}",
                 palette.critical
-            ));
+            );
+            if let Some(cols) = explicit_cols
+                && ansi_display_width(&line2) > cols
+            {
+                line2 = truncate_ansi_to_display_width(&line2, cols, glyph.ellipsis);
+            }
         }
-    }
-    let mut line2 = line2_parts.join(&divider);
-    if let Some(cols) = explicit_cols
-        && !line2.is_empty()
-        && ansi_display_width(&line2) > cols
-    {
-        line2 = truncate_ansi_to_display_width(&line2, cols, glyph.ellipsis);
     }
 
     // Line 3 (Workspace metadata: memory file / breadcrumbs, rules, MCPs, hooks)
@@ -845,12 +554,11 @@ pub fn render_statusline(
         lines.push(quota_block);
     }
 
-    let show_context_monitor = d.show_context_monitor.unwrap_or(false);
-    let show_model_cache =
-        d.show_model_cache == Some(true) || (d.show_model_cache != Some(false) && show_context_monitor);
+    let show_context_monitor = d.show_context_monitor.unwrap_or(true);
+    let show_model_cache = d.show_model_cache.unwrap_or(true);
 
     if show_model_cache
-        && let Some(cache_line) = render_model_cache_line(snapshot, term, text, &palette)
+        && let Some(cache_line) = render_model_cache_line(snapshot, config, term, text, &palette)
         && !cache_line.is_empty()
     {
         lines.push(cache_line);

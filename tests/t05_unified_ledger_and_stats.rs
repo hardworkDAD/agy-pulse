@@ -600,7 +600,6 @@ fn t05_rolling_daily_weekly_cost_and_compaction_rollback_protection() {
         serde_json::json!({
             "language": "en",
             "display": {
-                "showCost": true,
                 "showDailyCost": true,
                 "showWeeklyCost": true
             }
@@ -966,9 +965,47 @@ fn t05_stats_subcommand_cli_ide_json_bilingual_and_exact_metrics() {
     assert!(out_csv.contains("Hydro,0.51,60,"));
 }
 
+struct ProfileDoneTimings {
+    total_ms: u64,
+    l_open_ms: u64,
+    l_bg_ms: u64,
+    l_sync_ms: u64,
+    l_roll_ms: u64,
+}
+
+fn parse_profile_done_timings(log_path: &Path) -> ProfileDoneTimings {
+    let content = fs::read_to_string(log_path)
+        .unwrap_or_else(|e| panic!("failed to read profile log {}: {e}", log_path.display()));
+    let done_line = content
+        .lines()
+        .find(|line| line.contains("DONE "))
+        .unwrap_or_else(|| panic!("missing DONE line in profile log: {content}"));
+    assert!(
+        !done_line.contains("hard_timeout_fallback=1")
+            && !content.contains("hard_timeout_fallback=1"),
+        "statusline hit hard_timeout_fallback under ledger lock contention: {content}"
+    );
+
+    let parse_field = |prefix: &str, suffix: &str| -> u64 {
+        done_line
+            .split_whitespace()
+            .find_map(|tok| tok.strip_prefix(prefix)?.strip_suffix(suffix))
+            .and_then(|num| num.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("missing {prefix}...{suffix} in DONE line: {done_line}"))
+    };
+
+    ProfileDoneTimings {
+        total_ms: parse_field("total=", "ms"),
+        l_open_ms: parse_field("l_open=", ""),
+        l_bg_ms: parse_field("l_bg=", ""),
+        l_sync_ms: parse_field("l_sync=", ""),
+        l_roll_ms: parse_field("l_roll=", ""),
+    }
+}
+
 #[test]
 fn t05_statusline_exits_promptly_under_ledger_write_lock_contention() {
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     let env = IsolatedEnv::new();
     let ledger_path = env.cli_data_dir.join("agy-pulse-ledger.sqlite");
@@ -981,27 +1018,127 @@ fn t05_statusline_exits_promptly_under_ledger_write_lock_contention() {
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .expect("acquire immediate lock");
 
-    let start = Instant::now();
-    let payload = serde_json::json!({
+    // Case 1: Single-write contention scenario (conversation_id + model + cost).
+    let profile_log_1 = env.cli_data_dir.join("profile-lock-case1.log");
+    let profile_log_1_str = profile_log_1.to_string_lossy().into_owned();
+    let payload_1 = serde_json::json!({
         "conversation_id": "locked-ledger-conv",
         "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" },
         "cost": { "total_cost_usd": 1.25 }
     })
     .to_string();
 
-    let (code, out, _err) = env.run_stdin(&agy_pulse_bin(), &payload, false, &[("COLUMNS", "120")]);
-    let elapsed = start.elapsed();
-    drop(tx);
+    let start_1 = Instant::now();
+    let (code_1, out_1, _err_1) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_1,
+        false,
+        &[
+            ("COLUMNS", "120"),
+            ("AGY_PULSE_PROFILE_LOG", &profile_log_1_str),
+            ("AGY_PULSE_PROFILE_MIN_MS", "0"),
+        ],
+    );
+    let elapsed_1 = start_1.elapsed();
 
-    assert_eq!(code, 0, "statusline must still exit 0 under ledger lock contention");
-    let plain = strip_ansi(&out);
+    assert_eq!(code_1, 0, "statusline must still exit 0 under ledger lock contention");
+    let plain_1 = strip_ansi(&out_1);
     assert!(
-        plain.contains("Carbon") || !plain.trim().is_empty(),
-        "statusline must still render output when ledger is locked: {plain}"
+        plain_1.contains("Carbon") && !plain_1.trim().is_empty(),
+        "statusline must still render Carbon output when ledger is locked: {plain_1}"
+    );
+    let timings_1 = parse_profile_done_timings(&profile_log_1);
+    let ledger_stage_total_1 =
+        timings_1.l_open_ms + timings_1.l_bg_ms + timings_1.l_sync_ms + timings_1.l_roll_ms;
+    eprintln!(
+        "[t05-lock-case1] total={}ms l_open={}ms l_bg={}ms l_sync={}ms l_roll={}ms wall={elapsed_1:?}",
+        timings_1.total_ms,
+        timings_1.l_open_ms,
+        timings_1.l_bg_ms,
+        timings_1.l_sync_ms,
+        timings_1.l_roll_ms
     );
     assert!(
-        elapsed < Duration::from_millis(1200),
-        "statusline must not stall for 3s+ busy_timeout retries when ledger is locked, took {elapsed:?}"
+        ledger_stage_total_1 < 1200,
+        "in-process ledger stages ({ledger_stage_total_1}ms: l_open={}, l_bg={}, l_sync={}, l_roll={}) must stay < 1200ms",
+        timings_1.l_open_ms,
+        timings_1.l_bg_ms,
+        timings_1.l_sync_ms,
+        timings_1.l_roll_ms
+    );
+    assert!(
+        timings_1.total_ms < 1500,
+        "in-process DONE total ({}ms) must stay < 1500ms",
+        timings_1.total_ms
+    );
+    assert!(
+        elapsed_1 < Duration::from_millis(2500),
+        "statusline must not stall for 3s+ busy_timeout retries when ledger is locked, took {elapsed_1:?}"
+    );
+
+    // Case 2: Multi-write circuit-breaker short-circuit (email + conversation + cost + valid quota).
+    let profile_log_2 = env.cli_data_dir.join("profile-lock-case2.log");
+    let profile_log_2_str = profile_log_2.to_string_lossy().into_owned();
+    let future_reset_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_secs() as i64
+        + 3600;
+    let payload_2 = serde_json::json!({
+        "email": "locked@example.com",
+        "conversation_id": "locked-ledger-conv-multi",
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" },
+        "cost": { "total_cost_usd": 2.50 },
+        "quota": {
+            "gemini-5h": {
+                "remainingFraction": 0.75,
+                "resetTime": future_reset_secs
+            }
+        }
+    })
+    .to_string();
+
+    let start_2 = Instant::now();
+    let (code_2, out_2, _err_2) = env.run_stdin(
+        &agy_pulse_bin(),
+        &payload_2,
+        false,
+        &[
+            ("COLUMNS", "120"),
+            ("AGY_PULSE_PROFILE_LOG", &profile_log_2_str),
+            ("AGY_PULSE_PROFILE_MIN_MS", "0"),
+        ],
+    );
+    let elapsed_2 = start_2.elapsed();
+    drop(tx);
+
+    assert_eq!(code_2, 0, "multi-write statusline must still exit 0 under ledger lock contention");
+    let plain_2 = strip_ansi(&out_2);
+    assert!(
+        plain_2.contains("Carbon") && !plain_2.trim().is_empty(),
+        "multi-write statusline must still render output when ledger is locked: {plain_2}"
+    );
+    let timings_2 = parse_profile_done_timings(&profile_log_2);
+    eprintln!(
+        "[t05-lock-case2] total={}ms l_open={}ms l_bg={}ms l_sync={}ms l_roll={}ms wall={elapsed_2:?}",
+        timings_2.total_ms,
+        timings_2.l_open_ms,
+        timings_2.l_bg_ms,
+        timings_2.l_sync_ms,
+        timings_2.l_roll_ms
+    );
+    assert!(
+        timings_2.total_ms < 1500,
+        "multi-write circuit-breaker DONE total ({}ms; l_open={}, l_bg={}, l_sync={}, l_roll={}) must stay < 1500ms",
+        timings_2.total_ms,
+        timings_2.l_open_ms,
+        timings_2.l_bg_ms,
+        timings_2.l_sync_ms,
+        timings_2.l_roll_ms
+    );
+    assert!(
+        elapsed_2 < Duration::from_millis(2500),
+        "multi-write statusline must not accumulate busy retries across writes, took {elapsed_2:?}"
     );
 }
 

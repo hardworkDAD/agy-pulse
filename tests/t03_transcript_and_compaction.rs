@@ -152,11 +152,8 @@ fn t03_incremental_transcript_offset_cache_invalidation_and_pruning() {
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
                 "showContextMonitor": true,
                 "showModelCache": true,
-                "showTokenBar": true,
-                "showContextBar": true,
                 "quotaStyle": "none"
             }
         })
@@ -335,7 +332,6 @@ fn t03_truncated_fields_backfills_from_transcript_full_jsonl() {
             "language": "en",
             "display": {
                 "showSpeed": true,
-                "showContextBar": true,
                 "showContextMonitor": false,
                 "showModelCache": false,
                 "quotaStyle": "none"
@@ -461,12 +457,8 @@ fn t03_turn_cache_hit_rate_and_output_speed_noise_and_spike_filtering() {
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
-                "showTokenBar": true,
-                "showTurnCacheHitRate": true,
-                "showContextBar": true,
                 "showSpeed": true,
-                "showContextMonitor": false,
+                "showContextMonitor": true,
                 "showModelCache": false,
                 "quotaStyle": "table"
             }
@@ -499,7 +491,7 @@ fn t03_turn_cache_hit_rate_and_output_speed_noise_and_spike_filtering() {
         .to_string()
     };
 
-    // Frame 1: baseline speed + 60.0% turn cache hit rate (3k / 5k)
+    // Frame 1: baseline speed + 60% turn cache hit rate (3k / 5k) on context monitor
     let (_, out1, _) = env.run_stdin(
         &agy_pulse_bin(),
         &frame(500, 10_000, 5000, 3000, 1000),
@@ -507,7 +499,7 @@ fn t03_turn_cache_hit_rate_and_output_speed_noise_and_spike_filtering() {
     );
     let plain1 = strip_ansi(&out1);
     assert!(
-        plain1.contains("cache 60.0% (3k/5k)"),
+        plain1.contains("Cache 60% (3K)"),
         "frame 1 missing turn cache hit rate:\n{plain1}"
     );
     assert!(!plain1.contains("tok/s"), "baseline frame must not render speed:\n{plain1}");
@@ -560,7 +552,7 @@ fn t03_turn_cache_hit_rate_and_output_speed_noise_and_spike_filtering() {
         "frame 5 must recover to 200.0 tok/s:\n{plain5}"
     );
 
-    // Compact mode omits absolute ratio on cache badge
+    // Narrower terminal (< 105 cols) omits absolute count on cache badge
     fs::write(
         env.workspace_dir.join("agy-pulse.config.json"),
         serde_json::json!({
@@ -572,12 +564,12 @@ fn t03_turn_cache_hit_rate_and_output_speed_noise_and_spike_filtering() {
     let (_, out_compact, _) = env.run_stdin(
         &agy_pulse_bin(),
         &frame(10_400, 16_200, 5000, 3000, 1000),
-        &[("COLUMNS", "140")],
+        &[("COLUMNS", "90")],
     );
     let plain_compact = strip_ansi(&out_compact);
     assert!(
-        plain_compact.contains("cache 60.0%") && !plain_compact.contains("cache 60.0% ("),
-        "compact mode must omit absolute counts in cache badge:\n{plain_compact}"
+        plain_compact.contains("Cache 60%") && !plain_compact.contains("Cache 60% ("),
+        "narrow mode (<105 cols) must omit absolute counts in cache badge:\n{plain_compact}"
     );
 
     // Prune speed-cache directory to <= 32 files
@@ -611,8 +603,6 @@ fn t03_compaction_checkpoint_resets_active_context_and_preserves_peak_and_count(
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
-                "showContextBar": true,
                 "showContextMonitor": true,
                 "showModelCache": true,
                 "quotaStyle": "none"
@@ -678,12 +668,8 @@ fn t03_compaction_checkpoint_resets_active_context_and_preserves_peak_and_count(
     );
     let plain_after_ckpt = strip_ansi(&out_after_ckpt);
     assert!(
-        plain_after_ckpt.contains("0/512k"),
-        "context bar must reset to 0/512k after CHECKPOINT:\n{plain_after_ckpt}"
-    );
-    assert!(
-        plain_after_ckpt.contains("0.0%"),
-        "monitor must reset to 0.0% after CHECKPOINT:\n{plain_after_ckpt}"
+        plain_after_ckpt.contains("0.0% (limit 512K)"),
+        "monitor must reset to 0.0% (limit 512K) after CHECKPOINT:\n{plain_after_ckpt}"
     );
     assert!(
         plain_after_ckpt.contains("Compacted×1(peak 405K)"),
@@ -1167,7 +1153,6 @@ fn t03_pure_domain_and_render_turn_cache_child_speeds_compaction_and_metadata() 
     let cfg = PulseConfig {
         language: LanguageSetting::Zh,
         display: DisplayConfig {
-            show_model: Some(true),
             show_speed: Some(true),
             show_breadcrumbs: Some(true),
             show_context_monitor: Some(true),
@@ -1542,11 +1527,8 @@ fn t03_streaming_delta_over_8mb_two_pass_and_backfills_truncated_fields() {
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
                 "showContextMonitor": true,
                 "showModelCache": true,
-                "showTokenBar": true,
-                "showContextBar": true,
                 "quotaStyle": "none"
             }
         })

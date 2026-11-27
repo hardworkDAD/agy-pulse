@@ -119,8 +119,9 @@ agypl dashboard open                         # 静默拉起后台并用独立 Ap
     "showCycleMode": true,
     "showSpeed": true,
     "showDashboardUrl": true,
-    "showModel": false,
-    "showCost": false,
+    "showGitBranch": false,
+    "showBreadcrumbs": false,
+    "showDailyCost": false,
     "breadcrumbCount": 3,
     "useNerdFonts": false,
     "columnWidth": 40
@@ -132,7 +133,7 @@ agypl dashboard open                         # 静默拉起后台并用独立 Ap
 }
 ```
 
-全部配置项（如 `display.dashboardPort`、`display.dashboardIdleTimeoutSec` 等）与环境变量（如 `AGY_PULSE_DASHBOARD_PORT`、`AGY_PULSE_DASHBOARD_IDLE_SEC`、`AGY_PULSE_NO_DASHBOARD_AUTOSTART` 等）详情请参阅[完整参考手册](./docs/reference_zh.md#完整配置项参考)。
+全部 12 项**状态栏**开关、`display.cacheHitThresholds`、`display.dashboardPort`、`display.dashboardIdleTimeoutSec`、旧字段向后兼容说明及环境变量（如 `AGY_PULSE_DASHBOARD_PORT`、`AGY_PULSE_DASHBOARD_IDLE_SEC`、`AGY_PULSE_NO_DASHBOARD_AUTOSTART` 等）详情请参阅[完整参考手册](./docs/reference_zh.md#完整配置项参考)。
 
 ## 卸载
 

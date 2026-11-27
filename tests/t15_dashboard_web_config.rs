@@ -409,14 +409,42 @@ fn t15_pulse_config_get_absent_put_preserve_unknown_clear_optionals_and_restart_
     assert_eq!(j1["config"]["enabled"], true);
     assert_eq!(j1["config"]["language"], "auto");
     assert_eq!(j1["config"]["display"]["showContextMonitor"], true);
-    assert_eq!(j1["config"]["display"]["showModel"], false);
+    assert_eq!(j1["config"]["display"]["showModelCache"], true);
+    for retired_key in [
+        "showModel",
+        "showTokenBar",
+        "showContextBar",
+        "showTurnCacheHitRate",
+        "showCost",
+    ] {
+        assert!(
+            j1["config"]["display"].get(retired_key).is_none(),
+            "retired display key {retired_key} must not appear in DTO"
+        );
+    }
+    for active_key in [
+        "showContextMonitor",
+        "showModelCache",
+        "showCurrentDir",
+        "showCycleMode",
+        "showSpeed",
+        "showBreadcrumbs",
+        "showGitBranch",
+        "showUsername",
+        "showDailyCost",
+        "showWeeklyCost",
+        "showRoutedCost",
+        "showDashboardUrl",
+    ] {
+        assert!(
+            j1["config"]["display"][active_key].is_boolean(),
+            "expected boolean display key {active_key} in DTO"
+        );
+    }
     assert_eq!(j1["config"]["display"]["breadcrumbCount"], 3);
     assert_eq!(j1["config"]["display"]["quotaStyle"], "table");
     assert!(j1["config"]["display"].get("columnWidth").is_none());
-    assert_eq!(
-        j1["config"]["icons"],
-        json!({ "branch": null, "token": null, "ctx": null })
-    );
+    assert_eq!(j1["config"]["icons"], json!({ "branch": null }));
     assert_eq!(j1["themePresets"].as_array().unwrap().len(), 4);
     assert_eq!(
         j1["allowedColors"],
@@ -426,10 +454,16 @@ fn t15_pulse_config_get_absent_put_preserve_unknown_clear_optionals_and_restart_
     assert_eq!(j1["runtime"]["currentIdleTimeoutSec"], 600);
 
     // 2. PUT creating global file with custom port & idle timeout -> restartRequired = true
+    //    Also include retired keys in PUT payload to verify silent compatibility.
     let mut cfg1 = j1["config"].clone();
     cfg1["language"] = json!("zh");
     cfg1["theme"] = json!("Ocean Blue");
+    cfg1["display"]["showGitBranch"] = json!(true);
     cfg1["display"]["showModel"] = json!(true);
+    cfg1["display"]["showTokenBar"] = json!(true);
+    cfg1["display"]["showContextBar"] = json!(true);
+    cfg1["display"]["showTurnCacheHitRate"] = json!(true);
+    cfg1["display"]["showCost"] = json!(true);
     cfg1["display"]["dashboardPort"] = json!(4567);
     cfg1["display"]["dashboardIdleTimeoutSec"] = json!(900);
     cfg1["display"]["unicode"] = json!(true);
@@ -460,8 +494,10 @@ fn t15_pulse_config_get_absent_put_preserve_unknown_clear_optionals_and_restart_
     assert!(p1["parseError"].is_null());
     assert_eq!(p1["restartRequired"], true);
     assert_eq!(p1["resolvedLanguage"], "zh");
+    assert_eq!(p1["config"]["display"]["showGitBranch"], true);
     assert_eq!(p1["config"]["display"]["username"], "alice");
-    assert_eq!(p1["config"]["icons"]["branch"], "B");
+    assert_eq!(p1["config"]["icons"], json!({ "branch": "B" }));
+    assert!(p1["config"]["display"].get("showModel").is_none());
 
     let disk_bytes_1 = fs::read(env.global_config_path()).unwrap();
     assert_eq!(p1["version"], sha256_hex(&disk_bytes_1));
@@ -494,14 +530,14 @@ fn t15_pulse_config_get_absent_put_preserve_unknown_clear_optionals_and_restart_
 
     let mut cfg2 = j2["config"].clone();
     cfg2["language"] = json!("en");
-    cfg2["display"]["showCost"] = json!(true);
+    cfg2["display"]["showDailyCost"] = json!(true);
     // Keep dashboardPort & dashboardIdleTimeoutSec unchanged -> restartRequired = false
     cfg2["display"]["unicode"] = Value::Null;
     cfg2["display"]["username"] = json!("   ");
     cfg2["display"]["cacheHitThresholds"] = Value::Null;
     cfg2["display"]["modelSpeedExpireTurns"] = Value::Null;
     cfg2["display"]["modelSpeedExpireMinutes"] = Value::Null;
-    cfg2["icons"] = json!({ "branch": "  ", "token": null, "ctx": null });
+    cfg2["icons"] = json!({ "branch": "  " });
 
     let put2_body = serde_json::to_string(&json!({
         "expectedVersion": expected_v2,
@@ -525,17 +561,15 @@ fn t15_pulse_config_get_absent_put_preserve_unknown_clear_optionals_and_restart_
     assert!(p2["config"]["display"]["unicode"].is_null());
     assert!(p2["config"]["display"]["username"].is_null());
     assert!(p2["config"]["display"]["cacheHitThresholds"].is_null());
-    assert_eq!(
-        p2["config"]["icons"],
-        json!({ "branch": null, "token": null, "ctx": null })
-    );
+    assert_eq!(p2["config"]["icons"], json!({ "branch": null }));
 
     let disk_after: Value =
         serde_json::from_slice(&fs::read(env.global_config_path()).unwrap()).unwrap();
     assert_eq!(disk_after["customTopLevel"], json!({ "keep": true }));
     assert_eq!(disk_after["display"]["columnWidth"], 110);
     assert_eq!(disk_after["display"]["customNested"], "preserve-me");
-    assert_eq!(disk_after["display"]["showCost"], true);
+    assert_eq!(disk_after["display"]["showDailyCost"], true);
+    assert!(disk_after["display"].get("showModel").is_none());
     assert!(disk_after["display"].get("unicode").is_none());
     assert!(disk_after["display"].get("username").is_none());
     assert!(disk_after["display"].get("cacheHitThresholds").is_none());
@@ -597,7 +631,7 @@ fn t15_pulse_config_409_conflict_and_validation_errors() {
     // Simulate external disk modification -> v2
     let mut ext_val: Value =
         serde_json::from_slice(&fs::read(env.global_config_path()).unwrap()).unwrap();
-    ext_val["display"]["showModel"] = json!(true);
+    ext_val["display"]["showGitBranch"] = json!(true);
     let ext_bytes = serde_json::to_vec_pretty(&ext_val).unwrap();
     fs::write(env.global_config_path(), &ext_bytes).unwrap();
     let v2 = sha256_hex(&ext_bytes);
@@ -675,7 +709,7 @@ fn t15_pulse_config_409_conflict_and_validation_errors() {
             json!({ "display": { "username": "bad\nuser" } }),
         ),
         ("icons.branch", json!({ "icons": { "branch": "123456789" } })),
-        ("icons.token", json!({ "icons": { "token": "a\tb" } })),
+        ("icons.branch", json!({ "icons": { "branch": "a\tb" } })),
     ];
 
     for (expected_field, patch) in invalid_cases {
@@ -876,8 +910,6 @@ fn t15_pulse_preview_endpoint_no_disk_write() {
             "language": "zh",
             "theme": "Ocean Blue",
             "display": {
-                "showModel": true,
-                "showCost": true,
                 "showGitBranch": true
             }
         },
@@ -2249,10 +2281,24 @@ fn t15_dashboard_html_settings_ui_anchors_placeholders_and_security_headers() {
         "/api/config/pulse/preview",
         "/api/config/sync",
         "/api/config/sync/test",
+        "Statusline Segments (12)",
+        "状态栏显示项 (12 项)",
+        "groupBottomMonitor",
+        "groupHeaderLine",
+        "groupWorkspaceCost",
+        "Session Model Cache Line",
+        "模型累计缓存行",
     ] {
         assert!(
             res.body.contains(anchor),
             "expected HTML anchor '{anchor}' in dashboard response"
+        );
+    }
+
+    for retired_ui in ["pulse-icon-token", "pulse-icon-ctx"] {
+        assert!(
+            !res.body.contains(retired_ui),
+            "retired icon input '{retired_ui}' must not appear in dashboard HTML"
         );
     }
 

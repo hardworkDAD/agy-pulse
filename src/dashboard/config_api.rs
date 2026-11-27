@@ -102,8 +102,6 @@ pub(super) fn check_config_security(
 #[serde(default, rename_all = "camelCase")]
 pub(super) struct PulseIconsDto {
     pub branch: Option<String>,
-    pub token: Option<String>,
-    pub ctx: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,14 +112,9 @@ pub(super) struct PulseDisplayDto {
     pub show_current_dir: bool,
     pub show_cycle_mode: bool,
     pub show_speed: bool,
-    pub show_model: bool,
-    pub show_token_bar: bool,
-    pub show_context_bar: bool,
-    pub show_turn_cache_hit_rate: bool,
     pub show_breadcrumbs: bool,
     pub show_git_branch: bool,
     pub show_username: bool,
-    pub show_cost: bool,
     pub show_daily_cost: bool,
     pub show_weekly_cost: bool,
     pub show_routed_cost: bool,
@@ -151,17 +144,9 @@ impl From<&DisplayConfig> for PulseDisplayDto {
             show_current_dir: d.show_current_dir.or(def.show_current_dir).unwrap_or(true),
             show_cycle_mode: d.show_cycle_mode.or(def.show_cycle_mode).unwrap_or(true),
             show_speed: d.show_speed.or(def.show_speed).unwrap_or(true),
-            show_model: d.show_model.or(def.show_model).unwrap_or(false),
-            show_token_bar: d.show_token_bar.or(def.show_token_bar).unwrap_or(false),
-            show_context_bar: d.show_context_bar.or(def.show_context_bar).unwrap_or(false),
-            show_turn_cache_hit_rate: d
-                .show_turn_cache_hit_rate
-                .or(def.show_turn_cache_hit_rate)
-                .unwrap_or(false),
             show_breadcrumbs: d.show_breadcrumbs.or(def.show_breadcrumbs).unwrap_or(false),
             show_git_branch: d.show_git_branch.or(def.show_git_branch).unwrap_or(false),
             show_username: d.show_username.or(def.show_username).unwrap_or(false),
-            show_cost: d.show_cost.or(def.show_cost).unwrap_or(false),
             show_daily_cost: d.show_daily_cost.or(def.show_daily_cost).unwrap_or(false),
             show_weekly_cost: d.show_weekly_cost.or(def.show_weekly_cost).unwrap_or(false),
             show_routed_cost: d.show_routed_cost.or(def.show_routed_cost).unwrap_or(false),
@@ -212,8 +197,6 @@ impl From<&PulseConfig> for PulseConfigDto {
             .as_ref()
             .map(|ic| PulseIconsDto {
                 branch: normalize_optional_text_for_dto(ic.branch.as_deref()),
-                token: normalize_optional_text_for_dto(ic.token.as_deref()),
-                ctx: normalize_optional_text_for_dto(ic.ctx.as_deref()),
             })
             .unwrap_or_default();
 
@@ -243,14 +226,9 @@ impl From<PulseConfigDto> for PulseConfig {
             show_current_dir: Some(d.show_current_dir),
             show_cycle_mode: Some(d.show_cycle_mode),
             show_speed: Some(d.show_speed),
-            show_model: Some(d.show_model),
-            show_token_bar: Some(d.show_token_bar),
-            show_context_bar: Some(d.show_context_bar),
-            show_turn_cache_hit_rate: Some(d.show_turn_cache_hit_rate),
             show_breadcrumbs: Some(d.show_breadcrumbs),
             show_git_branch: Some(d.show_git_branch),
             show_username: Some(d.show_username),
-            show_cost: Some(d.show_cost),
             show_daily_cost: Some(d.show_daily_cost),
             show_weekly_cost: Some(d.show_weekly_cost),
             show_routed_cost: Some(d.show_routed_cost),
@@ -272,18 +250,10 @@ impl From<PulseConfigDto> for PulseConfig {
         };
 
         let branch = normalize_optional_text_preserving_control(dto.icons.branch);
-        let token = normalize_optional_text_preserving_control(dto.icons.token);
-        let ctx = normalize_optional_text_preserving_control(dto.icons.ctx);
-        let icons = if branch.is_none() && token.is_none() && ctx.is_none() {
-            None
-        } else {
-            Some(IconsConfig {
-                branch,
-                token,
-                ctx,
-                ..Default::default()
-            })
-        };
+        let icons = branch.map(|branch| IconsConfig {
+            branch: Some(branch),
+            ..Default::default()
+        });
 
         Self {
             enabled: dto.enabled,

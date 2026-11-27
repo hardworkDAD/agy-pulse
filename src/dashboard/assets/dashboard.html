@@ -1078,6 +1078,18 @@
       cursor: pointer;
       flex-shrink: 0;
     }
+    .cfg-toggle-text {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    .cfg-toggle-sub {
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--text-dim);
+      font-weight: 400;
+    }
     .cfg-toggle-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1700,23 +1712,20 @@
         thresholdCriticalLabel: 'Critical Threshold (0.0–1.0)',
         thresholdPctHint: 'Fractions from 0.0 to 1.0 (e.g. 0.70 = 70%, 0.90 = 90%)',
         thresholdOrderErr: 'Warning threshold must be <= critical threshold (both 0.0–1.0)',
-        pulseDisplaysTitle: 'Statusline Segments (17)',
-        groupContextCache: 'Context & Cache',
-        groupSessionSpeed: 'Session & Speed',
-        groupCostDashboard: 'Cost & Dashboard',
-        showContextMonitor: 'Context Monitor',
-        showModelCache: 'Model Quota & Cache',
-        showContextBar: 'Context Progress Bar',
-        showTokenBar: 'Token Breakdown Bar',
-        showTurnCacheHitRate: 'Turn Cache Hit Rate',
+        pulseDisplaysTitle: 'Statusline Segments (12)',
+        groupBottomMonitor: 'Bottom Monitor',
+        groupHeaderLine: 'Header Line',
+        groupWorkspaceCost: 'Workspace, Cost & Dashboard',
+        showContextMonitor: 'Context Monitor Line',
+        showContextMonitorSub: 'Model, progress bar, turn cache, output & cost',
+        showModelCache: 'Session Model Cache Line',
+        showModelCacheSub: 'Cumulative cache hit rate per model',
         showCurrentDir: 'Current Directory',
         showCycleMode: 'Cycle / Plan Mode',
         showSpeed: 'Output Speed',
-        showModel: 'Active Model Name',
         showBreadcrumbs: 'Breadcrumbs',
         showGitBranch: 'Git Branch',
         showUsername: 'Username',
-        showCost: 'Conversation Cost',
         showDailyCost: 'Daily Cost',
         showWeeklyCost: 'Weekly Cost',
         showRoutedCost: 'Routed Cost',
@@ -1731,12 +1740,11 @@
         terminalWidthLabel: 'Terminal Width (20–1000)',
         cacheHitExcellentLabel: 'Cache Hit Excellent % (0–100)',
         cacheHitPartialLabel: 'Cache Hit Partial % (0–100)',
+        cacheHitThresholdsHint: 'Applies to bottom statusline turn cache and cumulative model cache coloring',
         speedExpireTurnsLabel: 'Speed Expire Turns (>= 1)',
         speedExpireMinutesLabel: 'Speed Expire Minutes (> 0)',
         iconsOverridesTitle: 'Custom Icons (max 8 columns; blank = default)',
         iconBranchLabel: 'Branch Icon',
-        iconTokenLabel: 'Token Icon',
-        iconCtxLabel: 'Context Icon',
         restoreDefaultsBtn: 'Restore Defaults',
         discardBtn: 'Discard Changes',
         savePulseBtn: 'Save Pulse Config',
@@ -1954,23 +1962,20 @@
         thresholdCriticalLabel: '严重阈值 (0.0–1.0)',
         thresholdPctHint: '填写 0.0 到 1.0 之间的小数（例如 0.70 = 70%，0.90 = 90%）',
         thresholdOrderErr: '警告阈值必须小于或等于严重阈值（且均在 0.0–1.0 之间）',
-        pulseDisplaysTitle: '状态栏显示项 (17 项)',
-        groupContextCache: '上下文与缓存',
-        groupSessionSpeed: '会话与速率',
-        groupCostDashboard: '费用与看板',
-        showContextMonitor: '上下文占用监控',
-        showModelCache: '模型配额与缓存',
-        showContextBar: '上下文进度条',
-        showTokenBar: 'Token 分布条',
-        showTurnCacheHitRate: '单轮缓存命中率',
+        pulseDisplaysTitle: '状态栏显示项 (12 项)',
+        groupBottomMonitor: '底部监控区',
+        groupHeaderLine: '顶部概览行',
+        groupWorkspaceCost: '工作区、费用与看板',
+        showContextMonitor: '上下文监控行',
+        showContextMonitorSub: '含模型名、进度条、单轮缓存、输出量与单窗费用',
+        showModelCache: '模型累计缓存行',
+        showModelCacheSub: '按模型汇总的累计缓存命中率',
         showCurrentDir: '当前工作目录',
         showCycleMode: '模式与周期',
         showSpeed: '输出速率',
-        showModel: '当前模型名称',
         showBreadcrumbs: '对话面包屑',
         showGitBranch: 'Git 分支',
         showUsername: '用户名',
-        showCost: '单窗对话费用',
         showDailyCost: '今日费用',
         showWeeklyCost: '本周费用',
         showRoutedCost: '路由归因费用',
@@ -1985,12 +1990,11 @@
         terminalWidthLabel: '终端宽度覆盖 (20–1000)',
         cacheHitExcellentLabel: '缓存命中极佳阈值 % (0–100)',
         cacheHitPartialLabel: '缓存命中中等阈值 % (0–100)',
+        cacheHitThresholdsHint: '用于状态栏底栏单轮缓存与模型累计缓存行的三档着色',
         speedExpireTurnsLabel: '速率过期轮次 (>= 1)',
         speedExpireMinutesLabel: '速率过期分钟 (> 0)',
         iconsOverridesTitle: '自定义图标覆盖（最多 8 列字符，留空恢复默认）',
         iconBranchLabel: '分支图标',
-        iconTokenLabel: 'Token 图标',
-        iconCtxLabel: '上下文图标',
         restoreDefaultsBtn: '恢复默认',
         discardBtn: '放弃修改',
         savePulseBtn: '保存偏好配置',
@@ -3327,31 +3331,26 @@
 
     var PULSE_TOGGLE_GROUPS = [
       {
-        titleKey: 'groupContextCache',
+        titleKey: 'groupBottomMonitor',
         keys: [
           'showContextMonitor',
-          'showModelCache',
-          'showContextBar',
-          'showTokenBar',
-          'showTurnCacheHitRate'
+          'showModelCache'
         ]
       },
       {
-        titleKey: 'groupSessionSpeed',
+        titleKey: 'groupHeaderLine',
         keys: [
           'showCurrentDir',
           'showCycleMode',
           'showSpeed',
-          'showModel',
-          'showBreadcrumbs',
           'showGitBranch',
           'showUsername'
         ]
       },
       {
-        titleKey: 'groupCostDashboard',
+        titleKey: 'groupWorkspaceCost',
         keys: [
-          'showCost',
+          'showBreadcrumbs',
           'showDailyCost',
           'showWeeklyCost',
           'showRoutedCost',
@@ -3359,6 +3358,11 @@
         ]
       }
     ];
+
+    var PULSE_TOGGLE_SUBKEYS = {
+      showContextMonitor: 'showContextMonitorSub',
+      showModelCache: 'showModelCacheSub'
+    };
 
     var settingsUi = {
       open: false,
@@ -3559,7 +3563,7 @@
       if (!cfg.display.cacheHitThresholds || (cfg.display.cacheHitThresholds.excellent == null && cfg.display.cacheHitThresholds.partial == null)) {
         cfg.display.cacheHitThresholds = null;
       }
-      cfg.icons = cfg.icons || { branch: null, token: null, ctx: null };
+      cfg.icons = cfg.icons || { branch: null };
       return {
         enabled: cfg.enabled,
         language: cfg.language,
@@ -3570,9 +3574,7 @@
         },
         display: cfg.display,
         icons: {
-          branch: cfg.icons.branch || null,
-          token: cfg.icons.token || null,
-          ctx: cfg.icons.ctx || null
+          branch: cfg.icons.branch || null
         }
       };
     }
@@ -4003,16 +4005,20 @@
         '</div>'
       );
 
-      // 17 display toggles grouped
+      // 12 display toggles grouped
       var toggleSections = [];
       for (var gi = 0; gi < PULSE_TOGGLE_GROUPS.length; gi++) {
         var grp = PULSE_TOGGLE_GROUPS[gi];
         var items = [];
         for (var ki = 0; ki < grp.keys.length; ki++) {
           var fk = grp.keys[ki];
+          var subKey = PULSE_TOGGLE_SUBKEYS[fk];
+          var labelHtml = subKey
+            ? '<span class="cfg-toggle-text"><span>' + escHtml(t(fk)) + '</span><span class="cfg-toggle-sub">' + escHtml(t(subKey)) + '</span></span>'
+            : '<span>' + escHtml(t(fk)) + '</span>';
           items.push(
             '<label class="cfg-toggle-row">' +
-              '<span>' + escHtml(t(fk)) + '</span>' +
+              labelHtml +
               '<input type="checkbox" class="pulse-show-toggle" data-key="' + escHtml(fk) + '"' + (disp[fk] ? ' checked' : '') + '>' +
             '</label>'
           );
@@ -4063,6 +4069,7 @@
                 '<div class="cfg-label-row"><span>' + escHtml(t('cacheHitPartialLabel')) + '</span></div>' +
                 '<input type="number" class="cfg-input mono" id="pulse-cht-partial" min="0" max="100" step="1" value="' + escHtml(cht.partial == null ? '' : String(cht.partial)) + '">' +
               '</div>' +
+              '<div class="cfg-hint" style="grid-column:1/-1;margin-top:-4px;">' + escHtml(t('cacheHitThresholdsHint')) + '</div>' +
               '<div class="cfg-field">' +
                 '<div class="cfg-label-row"><span>' + escHtml(t('speedExpireTurnsLabel')) + '</span></div>' +
                 '<input type="number" class="cfg-input mono" id="pulse-expire-turns" min="1" step="1" value="' + escHtml(disp.modelSpeedExpireTurns == null ? '' : String(disp.modelSpeedExpireTurns)) + '">' +
@@ -4077,14 +4084,6 @@
               '<div class="cfg-field">' +
                 '<div class="cfg-label-row"><span>' + escHtml(t('iconBranchLabel')) + '</span></div>' +
                 '<input type="text" class="cfg-input mono" id="pulse-icon-branch" value="' + escHtml(icons.branch || '') + '">' +
-              '</div>' +
-              '<div class="cfg-field">' +
-                '<div class="cfg-label-row"><span>' + escHtml(t('iconTokenLabel')) + '</span></div>' +
-                '<input type="text" class="cfg-input mono" id="pulse-icon-token" value="' + escHtml(icons.token || '') + '">' +
-              '</div>' +
-              '<div class="cfg-field">' +
-                '<div class="cfg-label-row"><span>' + escHtml(t('iconCtxLabel')) + '</span></div>' +
-                '<input type="text" class="cfg-input mono" id="pulse-icon-ctx" value="' + escHtml(icons.ctx || '') + '">' +
               '</div>' +
             '</div>' +
           '</div>' +
@@ -4256,7 +4255,7 @@
         onDraftChanged(false);
       });
 
-      ['branch', 'token', 'ctx'].forEach(function (ik) {
+      ['branch'].forEach(function (ik) {
         var el = document.getElementById('pulse-icon-' + ik);
         if (!el) return;
         el.addEventListener('input', function (e) {

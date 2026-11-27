@@ -238,7 +238,6 @@ fn t04_lockfree_db_zero_side_effects_with_active_wal_and_immutable() {
             "language": "en",
             "display": {
                 "showContextMonitor": true,
-                "showContextBar": true,
                 "quotaStyle": "none"
             }
         })
@@ -280,7 +279,7 @@ fn t04_lockfree_db_zero_side_effects_with_active_wal_and_immutable() {
     assert_eq!(err_a, "");
     let plain_a = strip_ansi(&out_a);
     assert!(
-        plain_a.contains("200k/400k") && plain_a.contains("50%"),
+        plain_a.contains("200K/400K") && plain_a.contains("50.0%"),
         "static immutable DB compaction limit not applied:\n{plain_a}"
     );
     let after_static = snapshot_dir_bytes(&conv_dir);
@@ -351,7 +350,7 @@ fn t04_lockfree_db_zero_side_effects_with_active_wal_and_immutable() {
     assert_eq!(err_b, "");
     let plain_b = strip_ansi(&out_b);
     assert!(
-        plain_b.contains("160k/320k") && plain_b.contains("50%"),
+        plain_b.contains("160K/320K") && plain_b.contains("50.0%"),
         "active WAL uncommitted frame (320k) must be read via TempDir copy:\n{plain_b}"
     );
     let after_wal = snapshot_dir_bytes(&conv_dir);
@@ -384,7 +383,6 @@ fn t04_server_compaction_limit_calibrates_context_bar_and_monitor() {
             "language": "en",
             "display": {
                 "showContextMonitor": true,
-                "showContextBar": true,
                 "quotaStyle": "none"
             }
         })
@@ -424,12 +422,8 @@ fn t04_server_compaction_limit_calibrates_context_bar_and_monitor() {
     assert_eq!(err, "");
     let plain = strip_ansi(&out);
     assert!(
-        plain.contains("250k/500k") && plain.contains("50%"),
-        "Line 2 context bar must calibrate to 50% (250k/500k), not 25%:\n{plain}"
-    );
-    assert!(
-        plain.contains("50.0% (250K/500K)"),
-        "Context monitor must calibrate to 50.0% (250K/500K):\n{plain}"
+        plain.contains("50.0% (250K/500K)") && !plain.contains("25.0%"),
+        "Context monitor must calibrate to 50.0% (250K/500K), not 25.0%:\n{plain}"
     );
 
     let cache_path = env.data_dir.join("agy-pulse-compaction-cache.json");
@@ -442,14 +436,14 @@ fn t04_server_compaction_limit_calibrates_context_bar_and_monitor() {
         "cache must store _last_known_limit=500000"
     );
 
-    // Second run with DB removed should hit _last_known_limit cache and still render 50% (250k/500k)
+    // Second run with DB removed should hit _last_known_limit cache and still render 50.0% (250K/500K)
     fs::remove_file(&db_path).unwrap();
     let (code2, out2, _) = env.run_stdin(&payload, &[("COLUMNS", "120")]);
     assert_eq!(code2, 0);
     let plain2 = strip_ansi(&out2);
     assert!(
-        plain2.contains("250k/500k") && plain2.contains("50.0% (250K/500K)"),
-        "cached _last_known_limit must calibrate context bar after DB removal:\n{plain2}"
+        plain2.contains("50.0% (250K/500K)"),
+        "cached _last_known_limit must calibrate context monitor after DB removal:\n{plain2}"
     );
 }
 
@@ -461,7 +455,6 @@ fn t04_recent_dbs_weighted_streaming_speed_and_ttft_and_cache() {
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
                 "showSpeed": true,
                 "showContextMonitor": false,
                 "showModelCache": false,
@@ -579,9 +572,7 @@ fn t04_unified_pricing_cascade_cost_tree_and_trailing_transcript_backfill() {
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
-                "showCost": true,
-                "showContextMonitor": false,
+                "showContextMonitor": true,
                 "showModelCache": false,
                 "quotaStyle": "none"
             }
@@ -846,7 +837,6 @@ fn t04_lineage_child_db_perf_survives_top30_eviction_and_stale_turn_lockin() {
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": false,
                 "showSpeed": true,
                 "showContextMonitor": false,
                 "showModelCache": true,
@@ -1026,7 +1016,6 @@ fn t04_many_uncached_wal_dbs_are_bounded_per_statusline_call() {
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
                 "showSpeed": true,
                 "quotaStyle": "none"
             }
@@ -1111,7 +1100,6 @@ fn t04_same_session_model_switch_expires_old_model_even_when_db_mtime_refreshes(
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
                 "showSpeed": true,
                 "showContextMonitor": false,
                 "showModelCache": false,
@@ -1217,7 +1205,6 @@ fn t04_same_session_model_switch_expires_old_model_even_when_db_mtime_refreshes(
         serde_json::json!({
             "language": "en",
             "display": {
-                "showModel": true,
                 "showSpeed": true,
                 "showContextMonitor": false,
                 "showModelCache": false,
@@ -1360,7 +1347,6 @@ fn t04_same_session_model_switch_refreshes_compaction_limit_immediately() {
             "language": "en",
             "display": {
                 "showContextMonitor": true,
-                "showContextBar": true,
                 "quotaStyle": "none"
             }
         })
@@ -1399,7 +1385,7 @@ fn t04_same_session_model_switch_refreshes_compaction_limit_immediately() {
         .to_string()
     };
 
-    // 1) Initial model Carbon -> 100k / 500k (20%)
+    // 1) Initial model Carbon -> 100K / 500K (20.0%)
     let (code1, out1, err1) = env.run_stdin(
         &make_payload("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
         &[("COLUMNS", "120")],
@@ -1407,8 +1393,8 @@ fn t04_same_session_model_switch_refreshes_compaction_limit_immediately() {
     assert_eq!(code1, 0, "stderr: {err1}");
     let plain1 = strip_ansi(&out1);
     assert!(
-        plain1.contains("100k/500k") && plain1.contains("20%"),
-        "initial compaction limit must be 500k:\n{plain1}"
+        plain1.contains("100K/500K") && plain1.contains("20.0%"),
+        "initial compaction limit must be 500K:\n{plain1}"
     );
 
     // 2) Update DB with a new gen_metadata row carrying 200k compaction limit
@@ -1429,11 +1415,11 @@ fn t04_same_session_model_switch_refreshes_compaction_limit_immediately() {
     assert_eq!(code2, 0, "stderr: {err2}");
     let plain2 = strip_ansi(&out2);
     assert!(
-        plain2.contains("100k/500k") && plain2.contains("20%"),
-        "same model within recheck window should reuse cached 500k:\n{plain2}"
+        plain2.contains("100K/500K") && plain2.contains("20.0%"),
+        "same model within recheck window should reuse cached 500K:\n{plain2}"
     );
 
-    // 3) Switch model to Claude Sonnet 4.6 -> must bypass 5-minute cache and refresh to 200k (50%) immediately!
+    // 3) Switch model to Claude Sonnet 4.6 -> must bypass 5-minute cache and refresh to 200K (50.0%) immediately!
     let (code3, out3, err3) = env.run_stdin(
         &make_payload("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
         &[("COLUMNS", "120")],
@@ -1441,8 +1427,8 @@ fn t04_same_session_model_switch_refreshes_compaction_limit_immediately() {
     assert_eq!(code3, 0, "stderr: {err3}");
     let plain3 = strip_ansi(&out3);
     assert!(
-        plain3.contains("100k/200k") && plain3.contains("50%"),
-        "switching model in same session must immediately refresh compaction limit to 200k:\n{plain3}"
+        plain3.contains("100K/200K") && plain3.contains("50.0%"),
+        "switching model in same session must immediately refresh compaction limit to 200K:\n{plain3}"
     );
 }
 

@@ -182,8 +182,6 @@ pub struct IconsConfig {
     pub plan: Option<String>,
     pub step: Option<String>,
     pub task: Option<String>,
-    pub token: Option<String>,
-    pub ctx: Option<String>,
     pub model: Option<String>,
 }
 
@@ -204,7 +202,7 @@ impl Default for ThresholdsConfig {
     }
 }
 
-/// Threshold percentages (0..=100) for per-turn cache hit rate coloring.
+/// Threshold percentages (0..=100) for statusline cache hit rate coloring.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CacheHitThresholdsConfig {
@@ -221,14 +219,9 @@ pub struct DisplayConfig {
     pub show_current_dir: Option<bool>,
     pub show_cycle_mode: Option<bool>,
     pub show_speed: Option<bool>,
-    pub show_model: Option<bool>,
-    pub show_token_bar: Option<bool>,
-    pub show_context_bar: Option<bool>,
-    pub show_turn_cache_hit_rate: Option<bool>,
     pub show_breadcrumbs: Option<bool>,
     pub show_git_branch: Option<bool>,
     pub show_username: Option<bool>,
-    pub show_cost: Option<bool>,
     pub show_daily_cost: Option<bool>,
     pub show_weekly_cost: Option<bool>,
     pub show_routed_cost: Option<bool>,
@@ -256,14 +249,9 @@ impl DisplayConfig {
             show_current_dir: Some(true),
             show_cycle_mode: Some(true),
             show_speed: Some(true),
-            show_model: Some(false),
-            show_token_bar: Some(false),
-            show_context_bar: Some(false),
-            show_turn_cache_hit_rate: Some(false),
             show_breadcrumbs: Some(false),
             show_git_branch: Some(false),
             show_username: Some(false),
-            show_cost: Some(false),
             show_daily_cost: Some(false),
             show_weekly_cost: Some(false),
             show_routed_cost: Some(false),
@@ -639,27 +627,21 @@ pub fn validate_pulse_config(cfg: &PulseConfig) -> Result<(), (String, String)> 
         ));
     }
 
-    if let Some(ref icons) = cfg.icons {
-        for (field, opt_val) in [
-            ("icons.branch", icons.branch.as_deref()),
-            ("icons.token", icons.token.as_deref()),
-            ("icons.ctx", icons.ctx.as_deref()),
-        ] {
-            if let Some(raw) = opt_val {
-                if raw.chars().any(|ch| ch.is_control()) {
-                    return Err((
-                        field.to_string(),
-                        format!("{field} must not contain control characters"),
-                    ));
-                }
-                let trimmed = raw.trim();
-                if UnicodeWidthStr::width(trimmed) > 8 {
-                    return Err((
-                        field.to_string(),
-                        format!("{field} display width must be <= 8 columns"),
-                    ));
-                }
-            }
+    if let Some(ref icons) = cfg.icons
+        && let Some(raw) = icons.branch.as_deref()
+    {
+        if raw.chars().any(|ch| ch.is_control()) {
+            return Err((
+                "icons.branch".to_string(),
+                "icons.branch must not contain control characters".to_string(),
+            ));
+        }
+        let trimmed = raw.trim();
+        if UnicodeWidthStr::width(trimmed) > 8 {
+            return Err((
+                "icons.branch".to_string(),
+                "icons.branch display width must be <= 8 columns".to_string(),
+            ));
         }
     }
 
@@ -747,14 +729,9 @@ pub fn save_global_pulse_config_preserving_unknown(
         ("showCurrentDir", d.show_current_dir),
         ("showCycleMode", d.show_cycle_mode),
         ("showSpeed", d.show_speed),
-        ("showModel", d.show_model),
-        ("showTokenBar", d.show_token_bar),
-        ("showContextBar", d.show_context_bar),
-        ("showTurnCacheHitRate", d.show_turn_cache_hit_rate),
         ("showBreadcrumbs", d.show_breadcrumbs),
         ("showGitBranch", d.show_git_branch),
         ("showUsername", d.show_username),
-        ("showCost", d.show_cost),
         ("showDailyCost", d.show_daily_cost),
         ("showWeeklyCost", d.show_weekly_cost),
         ("showRoutedCost", d.show_routed_cost),
@@ -827,16 +804,6 @@ pub fn save_global_pulse_config_preserving_unknown(
         &mut icons_map,
         "branch",
         cfg.icons.as_ref().and_then(|i| i.branch.as_deref()),
-    );
-    set_or_remove_opt_trimmed_str(
-        &mut icons_map,
-        "token",
-        cfg.icons.as_ref().and_then(|i| i.token.as_deref()),
-    );
-    set_or_remove_opt_trimmed_str(
-        &mut icons_map,
-        "ctx",
-        cfg.icons.as_ref().and_then(|i| i.ctx.as_deref()),
     );
     if !icons_map.is_empty() {
         root.insert("icons".to_string(), Value::Object(icons_map));

@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS sync_chunk_state (
 );
 ";
 
-fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
+pub(super) fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
     matches!(
         err.sqlite_error_code(),
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)

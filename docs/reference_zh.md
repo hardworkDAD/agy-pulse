@@ -268,7 +268,7 @@ bash uninstall.sh        # macOS / Linux
 3. **全局配置**：`~/.gemini/antigravity-cli/agy-pulse-runtime/agy-pulse.config.json`（兼容自动发现旧路径 `agy-pulse-runtime/runtime/agy-pulse.config.json`，或 `$AGY_PULSE_GLOBAL_CONFIG_DIR/agy-pulse.config.json`；`agypl config` 与**网页看板**「设置」抽屉共同读写此文件）
 4. **内置默认值**（`DisplayConfig::builtin_defaults()`，最低优先级）
 
-反序列化对旧版已退役字段（`endpoints`、`interestingModels`、`cloudQuota`、`repository`）做静默忽略；`"quotaStyle": "models"` 自动平滑回退为 `"table"`。
+反序列化对旧版已退役字段（`endpoints`、`interestingModels`、`cloudQuota`、`repository`、`display.showModel`、`display.showTokenBar`、`display.showContextBar`、`display.showTurnCacheHitRate`、`display.showCost`、`icons.token`、`icons.ctx`）向后兼容、静默忽略不报错；`"quotaStyle": "models"` 自动平滑回退为 `"table"`。
 
 ### 完整默认配置示例
 
@@ -290,14 +290,9 @@ bash uninstall.sh        # macOS / Linux
     "showCycleMode": true,
     "showSpeed": true,
     "showDashboardUrl": true,
-    "showModel": false,
-    "showTokenBar": false,
-    "showContextBar": false,
-    "showTurnCacheHitRate": false,
     "showBreadcrumbs": false,
     "showGitBranch": false,
     "showUsername": false,
-    "showCost": false,
     "showDailyCost": false,
     "showWeeklyCost": false,
     "showRoutedCost": false,
@@ -320,15 +315,15 @@ bash uninstall.sh        # macOS / Linux
 | `language` | `"auto" \| "en" \| "zh"` | `"auto"` | 界面语言（`"auto"` 自动读取 `LC_ALL` / `LC_CTYPE` / `LANG`） |
 | `theme` | `object \| string` | `{ primary: "green", secondary: "gray", warning: "yellow", critical: "red" }` | 4 键配色对象、预设字符串（`"Emerald Green"`、`"Ocean Blue"`、`"Cyberpunk Magenta"`、`"Amber Gold"`）或单色名 |
 | `thresholds` | `{ warning, critical }` | `{ warning: 0.7, critical: 0.9 }` | 配额警告/告警比例（`0`–`1`）；底栏上下文监控默认 `65%`/`85%`，自定义时同步按比例生效 |
-| `icons` | `object` | *未设置* | 自定义图标覆写（`branch`、`plan`、`step`、`task`、`token`、`ctx`、`model`，最长 8 字符） |
+| `icons` | `object` | *未设置* | 自定义图标覆写（`branch`、`plan`、`step`、`task`、`model`，最长 8 字符；**网页看板**设置抽屉提供 `branch` 编辑，旧版 `token`/`ctx` 已退役并静默忽略） |
 
 ### `display.*` 全量参数表
 
 | 字段 | 类型 | 默认值 | 所属区域 | 说明 |
 |---|---|---|---|---|
 | `display.quotaStyle` | `"table" \| "compact" \| "none"` | `"table"` | 配额面板 | 厂商配额展示布局（`"models"` 自动回退 `"table"`） |
-| `display.showContextMonitor` | `boolean` | `true` | 底部监控行 | 是否显示底部实时上下文与压缩监控行 |
-| `display.showModelCache` | `boolean` | `true` | 累计缓存行 | 是否显示分模型累计缓存命中行 |
+| `display.showContextMonitor` | `boolean` | `true` | 底部监控行 | 是否显示底部实时上下文与压缩监控行（含模型名、进度条、单轮缓存、输出量与单窗费用） |
+| `display.showModelCache` | `boolean` | `true` | 底部监控行 | 是否显示模型累计缓存行（按模型汇总的累计缓存命中率，独立开关默认开启） |
 | `display.showCurrentDir` | `boolean` | `true` | 第 1 行 | 是否显示当前工作区目录名 |
 | `display.showCycleMode` | `boolean` | `true` | 第 1 行 | 是否显示 `agy` 交互模式徽章（`auto`、`accept-edits`、`plan`、`best-of-n`） |
 | `display.showSpeed` | `boolean` | `true` | 第 1 行 | 是否显示主模型流式加权均速与 TTFT，及最多 3 个活跃子模型速率 |
@@ -337,17 +332,12 @@ bash uninstall.sh        # macOS / Linux
 | `display.dashboardIdleTimeoutSec` | `number` | `1800` | 网页看板 | 状态栏自动拉起网页看板时的空闲自动退出秒数（默认 `1800` 秒即 30 分钟；设为 `0` 常驻不自动退出；优先级低于 `AGY_PULSE_DASHBOARD_IDLE_SEC`） |
 | `display.modelSpeedExpireMinutes` | `number` | `5` | 第 1 行 | 超过 N 分钟未调用自动隐藏速度与首字 |
 | `display.modelSpeedExpireTurns` | `number` | `30` | 第 1 行 | 超过 N 轮未调用自动隐藏速度与首字 |
-| `display.showModel` | `boolean` | `false` | 第 1 行 | 是否在状态栏首行显示模型名 |
-| `display.showTokenBar` | `boolean` | `false` | 第 2 行 | 是否显示 Token 明细栏 |
-| `display.showContextBar` | `boolean` | `false` | 第 2 行 | 是否显示经典上下文进度条 |
-| `display.showTurnCacheHitRate` | `boolean` | `false` | 第 2 行 | 是否显示单轮缓存命中率徽章 |
-| `display.cacheHitThresholds` | `{ excellent?, partial? }` | `{ excellent: 80, partial: 50 }` | 第 2 行 | 单轮缓存命中率颜色阈值 |
+| `display.cacheHitThresholds` | `{ excellent?, partial? }` | `{ excellent: 80, partial: 50 }` | 底部监控行 | 状态栏底栏单轮缓存与模型累计缓存行的三档着色阈值（`>= excellent` 粗体主色，`>= partial` 警告色，低于 `partial` 暗色） |
 | `display.showBreadcrumbs` | `boolean` | `false` | 第 3 行 | 是否显示工作区记忆文件或最近修改面包屑 |
 | `display.breadcrumbCount` | `number` | `3` | 第 3 行 | 面包屑最多显示条目数 |
 | `display.showGitBranch` | `boolean` | `false` | 第 1 行 | 是否显示当前 Git 分支（非 Git 目录自动隐藏） |
 | `display.showUsername` | `boolean` | `false` | 第 1 行 | 是否显示宿主 `stdin.username` / `stdin.email` 或自定义 `display.username`（自动读取宿主登录账号） |
 | `display.username` | `string` | *未设置* | 第 1 行 | 自定义用户名覆写（开启 `showUsername` 时优先于宿主 `stdin.username` / `stdin.email` 与系统用户名） |
-| `display.showCost` | `boolean` | `false` | 第 1 行 | 是否在状态栏首行显示当前**任务树**汇总费用 |
 | `display.showDailyCost` | `boolean` | `false` | 第 1 行 | 是否显示今日累计费用（来自**账本**） |
 | `display.showWeeklyCost` | `boolean` | `false` | 第 1 行 | 是否显示近 7 日滚动费用（来自**账本**） |
 | `display.showRoutedCost` | `boolean` | `false` | 费用计算 | Bedrock/Vertex 路由模型是否采信 CLI 原生费用 |

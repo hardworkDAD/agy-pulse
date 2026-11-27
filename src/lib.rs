@@ -503,8 +503,12 @@ fn run_statusline_enriched(
         l_open_ms = t_l_open.elapsed().as_millis() as u64;
         match opened {
             Ok(mut store) => {
-                if let Some(ref acct) = active_account {
-                    let _ = store.set_last_observed_email(acct);
+                let mut ledger_write_busy = false;
+                if let Some(ref acct) = active_account
+                    && let Err(err) = store.set_last_observed_email(acct)
+                    && err.is_busy()
+                {
+                    ledger_write_busy = true;
                 }
 
                 profile::set_stage(profile::Stage::LedgerBgSyncSpawn);
@@ -520,7 +524,8 @@ fn run_statusline_enriched(
 
                 profile::set_stage(profile::Stage::LedgerSyncConv);
                 let t_l_sync = Instant::now();
-                if Instant::now() < pipeline_deadline
+                if !ledger_write_busy
+                    && Instant::now() < pipeline_deadline
                     && let Some(ref conv_id) = ingest.conversation_id
                     && let Err(err) = store.sync_conversation(
                         conv_id,
@@ -528,6 +533,9 @@ fn run_statusline_enriched(
                         &sync_opts,
                     )
                 {
+                    if err.is_busy() {
+                        ledger_write_busy = true;
+                    }
                     platform::write_error_log_safely(&format!(
                         "Ledger conversation sync error: {err}"
                     ));
@@ -551,7 +559,8 @@ fn run_statusline_enriched(
                 };
                 profile::set_stage(profile::Stage::LedgerRolling);
                 let t_l_roll = Instant::now();
-                if (ingest.snapshot.has_conversation_identity || show_daily || show_weekly)
+                if !ledger_write_busy
+                    && (ingest.snapshot.has_conversation_identity || show_daily || show_weekly)
                     && Instant::now() < pipeline_deadline
                 {
                     match store.record_rolling_costs(&rolling_input) {
@@ -561,6 +570,9 @@ fn run_statusline_enriched(
                         }
                         Ok(None) => {}
                         Err(err) => {
+                            if err.is_busy() {
+                                ledger_write_busy = true;
+                            }
                             platform::write_error_log_safely(&format!(
                                 "Ledger rolling cost error: {err}"
                             ));
@@ -569,7 +581,8 @@ fn run_statusline_enriched(
                 }
                 l_roll_ms = t_l_roll.elapsed().as_millis() as u64;
 
-                if has_valid_quota
+                if !ledger_write_busy
+                    && has_valid_quota
                     && Instant::now() < pipeline_deadline
                     && let Some(ref quota) = ingest.snapshot.quota
                     && let Ok(local_device_id) = store.local_device_id()
@@ -591,15 +604,21 @@ fn run_statusline_enriched(
                         observed_at_ms: ingest.snapshot.observed_at_ms,
                         quota: quota.clone(),
                     };
-                    let _ = store.upsert_quota_snapshot(&qs);
-                    let _ = store.upsert_sync_device(
-                        &quota_account_id,
-                        &local_device_id,
-                        &resolved_device_name,
-                        true,
-                        ingest.snapshot.observed_at_ms,
-                        plan_tier.as_deref(),
-                    );
+                    if let Err(err) = store.upsert_quota_snapshot(&qs)
+                        && err.is_busy()
+                    {
+                        ledger_write_busy = true;
+                    }
+                    if !ledger_write_busy {
+                        let _ = store.upsert_sync_device(
+                            &quota_account_id,
+                            &local_device_id,
+                            &resolved_device_name,
+                            true,
+                            ingest.snapshot.observed_at_ms,
+                            plan_tier.as_deref(),
+                        );
+                    }
                 }
 
                 if Instant::now() < pipeline_deadline {

@@ -47,6 +47,13 @@ pub enum LedgerError {
     InvalidSyncOperation(String),
 }
 
+impl LedgerError {
+    /// Return `true` when this error represents SQLite lock contention (`SQLITE_BUSY` / `SQLITE_LOCKED`).
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Sqlite(err) if schema::is_sqlite_busy(err))
+    }
+}
+
 /// Deep module owning the unified `agy-pulse-ledger.sqlite` (WAL) connection.
 /// Never exposes `rusqlite::Connection` outside `ledger`.
 pub struct LedgerStore {

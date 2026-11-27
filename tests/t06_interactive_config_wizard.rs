@@ -288,6 +288,13 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
     let env = IsolatedEnv::new();
     let _guard = EnvVarGuard::set("AGY_PULSE_GLOBAL_CONFIG_DIR", &env.global_cfg_dir);
 
+    fs::create_dir_all(env.workspace_dir.join(".git")).unwrap();
+    fs::write(
+        env.workspace_dir.join(".git/HEAD"),
+        "ref: refs/heads/feat/wizard-branch\n",
+    )
+    .unwrap();
+
     let global_cfg = env.global_cfg_dir.join("agy-pulse.config.json");
     let seed_json = r#"{
   "customOwner": "keep-this",
@@ -307,7 +314,7 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
   "display": {
     "customDisplayFlag": 42,
     "quotaStyle": "table",
-    "showModel": false,
+    "showGitBranch": false,
     "showContextMonitor": true,
     "showModelCache": true
   }
@@ -319,11 +326,7 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
     // '2' -> index 1 (Language): Space -> en -> zh
     // '3' -> index 2 (Theme Preset): Space -> Emerald Green -> Ocean Blue
     // '4' -> index 3 (Quota Display Mode): Space -> Table -> Compact
-    // '5' -> index 4 (Warning Threshold): Space -> 70% -> 75% (or next value != 0.7)
-    // Move down to `Show Model (Line 1)` (index 11): press '5' then 7x 'j' -> wait, let's use exact index or `j`!
-    // Better: jump with '9' (index 8) then 3x 'j' (index 11) -> toggle Show Model (Line 1) -> then press 's' to save.
-    // Wait: let's inspect exact menu item index or navigate cleanly using label checks?
-    // Even simpler: use `j` from index 4:
+    // '5' -> index 4 (Warning Threshold): Space -> next preset (!= 0.7)
     // 0: Scope
     // 1: Language
     // 2: Theme Preset
@@ -335,13 +338,13 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
     // 8: Show Model Cache Line
     // 9: Show Current Directory
     // 10: Show Cycle Mode (Shift+Tab)
-    // 11: Show Model (Line 1)
+    // 11: Show Git Branch
     let mut keys = Vec::new();
     keys.extend_from_slice(b"2 "); // index 1: Language -> zh
     keys.extend_from_slice(b"3 "); // index 2: Theme Preset -> Ocean Blue
     keys.extend_from_slice(b"4 "); // index 3: Quota Display Mode -> Compact
     keys.extend_from_slice(b"5 "); // index 4: Warning Threshold -> next preset (!= 0.7)
-    keys.extend_from_slice(b"jjjjjjj "); // index 4 + 7 = 11: Show Model (Line 1) -> Enabled
+    keys.extend_from_slice(b"jjjjjjj "); // index 4 + 7 = 11: Show Git Branch -> Enabled
     keys.extend_from_slice(b"s"); // Save & Exit
 
     let opts = WizardRunOptions {
@@ -385,7 +388,7 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
     assert_eq!(saved["language"], "zh");
     assert_eq!(saved["theme"]["primary"], "blue");
     assert_eq!(saved["display"]["quotaStyle"], "compact");
-    assert_eq!(saved["display"]["showModel"], true);
+    assert_eq!(saved["display"]["showGitBranch"], true);
     let warn_val = saved["thresholds"]["warning"].as_f64().unwrap();
     assert!((warn_val - 0.7).abs() > 1e-6, "warning threshold should have updated: {warn_val}");
 
@@ -412,7 +415,7 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
     assert!(stdout.contains("\x1b[34m"), "expected Ocean Blue ANSI primary color in statusline: {stdout:?}");
     assert!(plain.contains("上下文"), "expected Chinese statusline label after saving language=zh: {plain}");
     assert!(plain.contains("Google:"), "expected compact quota line after saving quotaStyle=compact: {plain}");
-    assert!(plain.contains("Gemini 4 Carbon"), "expected model on Line 1 after showModel=true: {plain}");
+    assert!(plain.contains("feat/wizard-branch"), "expected git branch on Line 1 after showGitBranch=true: {plain}");
 }
 
 #[test]
@@ -580,6 +583,7 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
         },
         "icons": {
             "branch": "B",
+            "token": "T",
             "plan": "P",
             "customIcon": "X"
         }
@@ -604,8 +608,6 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
     updated.display.model_speed_expire_minutes = None;
     updated.icons = Some(IconsConfig {
         branch: None,
-        token: Some("T".to_string()),
-        ctx: None,
         ..Default::default()
     });
     assert!(validate_pulse_config(&updated).is_ok());
@@ -698,12 +700,12 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
 
     let bad_icon = PulseConfig {
         icons: Some(IconsConfig {
-            ctx: Some("123456789".to_string()),
+            branch: Some("123456789".to_string()),
             ..Default::default()
         }),
         ..Default::default()
     };
-    assert_eq!(validate_pulse_config(&bad_icon).unwrap_err().0, "icons.ctx");
+    assert_eq!(validate_pulse_config(&bad_icon).unwrap_err().0, "icons.branch");
 
     // 6. Preview helper consistency (disabled, empty, active)
     let disabled_cfg = PulseConfig {

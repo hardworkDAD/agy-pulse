@@ -284,12 +284,7 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
                 "language": "en",
                 "display": {
                     "quotaStyle": "none",
-                    "showModel": true,
                     "showGitBranch": true,
-                    "showTokenBar": true,
-                    "showContextBar": true,
-                    "showTurnCacheHitRate": true,
-                    "showCost": true,
                     "showBreadcrumbs": true,
                     "showContextMonitor": true,
                     "showModelCache": true
@@ -350,19 +345,15 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
-        assert_eq!(lines.len(), 5, "expected 5 lines, got:\n{plain}");
-        assert!(lines[0].starts_with("ws │ ⎇ feat/rust-v2 │ Claude Sonnet 4.6 │ Pro │ auto │ Cost $0.0242 │ out: "));
+        assert_eq!(lines.len(), 4, "expected 4 lines, got:\n{plain}");
+        assert!(lines[0].starts_with("ws │ ⎇ feat/rust-v2 │ Pro │ auto │ out: "));
+        assert_eq!(lines[1], "1 rules");
         assert_eq!(
-            lines[1],
-            "⚿ Tokens 12.6k (in: 3k, out: 600, cache: 9k) │ cache 66.7% (8k/12k) │ ⛁ 12.6k/200k [█░░░░░░░░░] 6%"
-        );
-        assert_eq!(lines[2], "1 rules");
-        assert_eq!(
-            lines[3],
+            lines[2],
             "⟳ Session Cache · Sonnet 67% (hit 8K · write 1K / in 12K)"
         );
         assert_eq!(
-            lines[4],
+            lines[3],
             "◈ Claude Sonnet 4.6 · Ctx ▓··········· 6.3% (12.6K/200K) · Cache 67% (8K) · Out 600 · Cost $0.02"
         );
     }
@@ -376,9 +367,6 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
                 "language": "en",
                 "display": {
                     "quotaStyle": "none",
-                    "showModel": true,
-                    "showTokenBar": true,
-                    "showContextBar": true,
                     "showContextMonitor": true,
                     "showModelCache": true
                 }
@@ -418,18 +406,14 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
-        assert_eq!(lines.len(), 4, "got:\n{plain}");
-        assert!(lines[0].starts_with("ws │ Claude Sonnet 4.6 │ Free │ out: "));
+        assert_eq!(lines.len(), 3, "got:\n{plain}");
+        assert!(lines[0].starts_with("ws │ Free │ out: "));
         assert_eq!(
             lines[1],
-            "⚿ Tokens 31k (in: 13k, out: 3k, cache: 15k) │ ⛁ 29k/200k [█░░░░░░░░░] 15%"
-        );
-        assert_eq!(
-            lines[2],
             "⟳ Session Cache · Sonnet 70% (hit 135K / in 193K)"
         );
         assert_eq!(
-            lines[3],
+            lines[2],
             "◈ Claude Sonnet 4.6 · Ctx █▒·········· 14.5% (29K/200K) · Compacted×1(peak 167K) · Cache 54% (15K) · Out 3K · Cost $0.26"
         );
     }
@@ -443,10 +427,6 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
                 "language": "en",
                 "display": {
                     "quotaStyle": "none",
-                    "showModel": true,
-                    "showTokenBar": true,
-                    "showContextBar": true,
-                    "showCost": true,
                     "showSpeed": true,
                     "showContextMonitor": true,
                     "showModelCache": true
@@ -593,8 +573,7 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         assert_eq!(
             lines,
             vec![
-                "ws │ Claude Sonnet 4.6 │ Pro │ Cost $0.0848 │ out: 100.0 tok/s (ttft 400ms) │ ⚡ Flash: 200.0 tok/s (ttft 200ms)",
-                "⚿ Tokens 20.4k (in: 5k, out: 400, cache: 15k) │ ⛁ 20.4k/180k [█░░░░░░░░░] 11%",
+                "ws │ Pro │ out: 100.0 tok/s (ttft 400ms) │ ⚡ Flash: 200.0 tok/s (ttft 200ms)",
                 "⟳ Session Cache · Sonnet 42% (hit 15K / in 36K) · Flash 36% (hit 6K / in 16.5K)",
                 "◈ Claude Sonnet 4.6 · Ctx █░·········· 11.3% (20.4K/180K) · Cache 75% (15K) · Out 400 · Cost $0.08",
             ]
@@ -652,9 +631,6 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
                 "language": "en",
                 "display": {
                     "quotaStyle": style,
-                    "showModel": true,
-                    "showTokenBar": true,
-                    "showContextBar": true,
                     "showContextMonitor": true
                 }
             })
@@ -682,15 +658,14 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
-        assert_eq!(lines.len(), 7, "style={style} got:\n{plain}");
-        assert_eq!(lines[0], "ws │ Gemini 3.1 Pro │ Ultra");
-        assert_eq!(lines[1], "⚿ Tokens 5.3k (in: 5k, out: 300) │ ⛁ 5k/512k [░░░░░░░░░░] 0%");
-        assert_eq!(lines[2], "  ───────────────────────────────────────────────────────────────────");
-        assert_eq!(lines[3], "  Google 5h   [█████░]  85% ~2h15m │ Claude 5h   [█░░░░░]  15% ~2h15m");
-        assert_eq!(lines[4], "  Google week [███░░░]  42% ~3d4h  │ Claude week [░░░░░░]   5% ~3d4h ");
-        assert_eq!(lines[5], "  Argon 5h    [████░░]  60% ~2h15m");
+        assert_eq!(lines.len(), 6, "style={style} got:\n{plain}");
+        assert_eq!(lines[0], "ws │ Ultra");
+        assert_eq!(lines[1], "  ───────────────────────────────────────────────────────────────────");
+        assert_eq!(lines[2], "  Google 5h   [█████░]  85% ~2h15m │ Claude 5h   [█░░░░░]  15% ~2h15m");
+        assert_eq!(lines[3], "  Google week [███░░░]  42% ~3d4h  │ Claude week [░░░░░░]   5% ~3d4h ");
+        assert_eq!(lines[4], "  Argon 5h    [████░░]  60% ~2h15m");
         assert!(!plain.contains("Openai") && !plain.contains("OpenAI"));
-        assert_eq!(lines[6], "◈ Gemini 3.1 Pro · Ctx ············ 0.0% (limit 512K) · Out 300 · Cost $0.01");
+        assert_eq!(lines[5], "◈ Gemini 3.1 Pro · Ctx ············ 0.0% (limit 512K) · Out 300 · Cost $0.01");
     }
 
     // Scenario 4B: Multi-provider quota `compact` mode
@@ -702,9 +677,6 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
                 "language": "en",
                 "display": {
                     "quotaStyle": "compact",
-                    "showModel": true,
-                    "showTokenBar": true,
-                    "showContextBar": true,
                     "showContextMonitor": true
                 }
             })
@@ -731,8 +703,7 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
         assert_eq!(code, 0, "stderr: {err}");
         assert_eq!(
             strip_ansi(&out),
-            "ws │ Gemini 3.1 Pro │ Ultra\n\
-             ⚿ Tokens 5.3k │ ⛁ 5k/512k [░░░░░░░░░░] 0%\n\
+            "ws │ Ultra\n\
              Google: 42% │ Claude: 5% │ Argon: 60%\n\
              ◈ Gemini 3.1 Pro · Ctx ············ 0.0% (limit 512K) · Out 300 · Cost $0.01"
         );
@@ -772,10 +743,6 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
                 "language": "zh",
                 "display": {
                     "quotaStyle": "table",
-                    "showModel": true,
-                    "showTokenBar": true,
-                    "showContextBar": true,
-                    "showCost": true,
                     "showContextMonitor": true,
                     "showModelCache": true
                 }
@@ -796,7 +763,7 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
                 "line exceeded 64 cols: {line}"
             );
         }
-        assert!(plain.contains("费用 $0.176"));
+        assert!(plain.contains("ws │ Pro │ accept-edits"));
         assert!(plain.contains("累计缓存"));
         assert!(plain.contains("上下文 █▓······ 24.1% (48.2K/200K) · 缓存 67%"));
     }
@@ -810,10 +777,6 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
                 "language": "zh",
                 "display": {
                     "quotaStyle": "table",
-                    "showModel": true,
-                    "showTokenBar": true,
-                    "showContextBar": true,
-                    "showCost": true,
                     "showContextMonitor": true,
                     "showModelCache": true
                 }
@@ -848,10 +811,6 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
                 "language": "en",
                 "display": {
                     "quotaStyle": "table",
-                    "showModel": true,
-                    "showTokenBar": true,
-                    "showContextBar": true,
-                    "showCost": true,
                     "showContextMonitor": true,
                     "showModelCache": true
                 }
@@ -872,7 +831,7 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
                 "line exceeded 64 cols: {line}"
             );
         }
-        assert!(plain.contains("ws | Claude Opus 4.6 | Pro | accept-edits | Cost $0.176"));
+        assert!(plain.contains("ws | Pro | accept-edits"));
         assert!(plain.contains("~ Session Cache | Opus 67% (hit 30K, write 5K / in 45K)"));
         assert!(plain.contains("Ctx #=...... 24.1% (48.2K/200K) | Cache 67%"));
     }

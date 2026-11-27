@@ -321,7 +321,6 @@ fn t11_loopback_url_validation_and_line1_rendering() {
 
     let default_cfg = PulseConfig {
         display: DisplayConfig {
-            show_model: Some(true),
             show_context_monitor: Some(false),
             show_model_cache: Some(false),
             ..DisplayConfig::builtin_defaults()
@@ -344,7 +343,7 @@ fn t11_loopback_url_validation_and_line1_rendering() {
     assert_eq!(
         wide_lines,
         vec![
-            "ws │ Claude Sonnet 4.6 │ Pro │ auto │ out: 42.0 tok/s (ttft 400ms) │ ⟳ v2.1.0",
+            "ws │ Pro │ auto │ out: 42.0 tok/s (ttft 400ms) │ ⟳ v2.1.0",
             "http://127.0.0.1:3789",
         ]
     );
@@ -363,7 +362,6 @@ fn t11_loopback_url_validation_and_line1_rendering() {
     }];
     let monitor_cfg = PulseConfig {
         display: DisplayConfig {
-            show_model: Some(false),
             show_context_monitor: Some(true),
             show_model_cache: Some(false),
             ..DisplayConfig::builtin_defaults()
@@ -966,10 +964,10 @@ fn t11_wizard_preview_toggle_save_and_uninstall_cleans_lock() {
     fs::write(&global_cfg, "{}\n").unwrap();
 
     // 1. Preview includes http://127.0.0.1:3789 and menu includes Show Dashboard URL (Auto-Start);
-    //    MENU_ITEMS has DashboardUrl at index 24 (press '9' -> idx 8, then 16x 'j' -> idx 24, Space -> false, 's' -> save).
+    //    MENU_ITEMS has DashboardUrl at index 19 (press '9' -> idx 8, then 11x 'j' -> idx 19, Space -> false, 's' -> save).
     let mut keys = Vec::new();
     keys.push(b'9');
-    keys.extend_from_slice(&[b'j'; 16]);
+    keys.extend_from_slice(&[b'j'; 11]);
     keys.push(b' ');
     keys.push(b's');
 

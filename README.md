@@ -119,8 +119,9 @@ You can also run `agypl config` for the interactive terminal wizard, create `./a
     "showCycleMode": true,
     "showSpeed": true,
     "showDashboardUrl": true,
-    "showModel": false,
-    "showCost": false,
+    "showGitBranch": false,
+    "showBreadcrumbs": false,
+    "showDailyCost": false,
     "breadcrumbCount": 3,
     "useNerdFonts": false,
     "columnWidth": 40
@@ -132,7 +133,7 @@ You can also run `agypl config` for the interactive terminal wizard, create `./a
 }
 ```
 
-See [Reference Manual](./docs/reference.md#configuration-reference) for all configuration fields (`display.dashboardPort`, `display.dashboardIdleTimeoutSec`, etc.) and environment variables (`AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_NO_DASHBOARD_AUTOSTART`, etc.).
+See [Reference Manual](./docs/reference.md#configuration-reference) for all 12 **Statusline** toggles, `display.cacheHitThresholds`, `display.dashboardPort`, `display.dashboardIdleTimeoutSec`, backward-compatibility notes for retired fields, and environment variables (`AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_NO_DASHBOARD_AUTOSTART`, etc.).
 
 ## Uninstall
 
