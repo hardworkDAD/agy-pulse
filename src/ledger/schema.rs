@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -12,9 +12,8 @@ use super::LedgerError;
 pub(super) const DEFAULT_LEDGER_FILENAME: &str = "agy-pulse-ledger.sqlite";
 pub const LEDGER_SCHEMA_VERSION: &str = "4";
 pub(super) const DEFAULT_BUSY_TIMEOUT_MS: u64 = 3000;
-pub(super) const STATUSLINE_BUSY_TIMEOUT_MS: u64 = 100;
 pub(super) const DEFAULT_BUSY_RETRIES: u32 = 15;
-pub(super) const STATUSLINE_BUSY_RETRIES: u32 = 2;
+pub(super) const STATUSLINE_BUSY_BUDGET_MS: u64 = 350;
 
 const LEDGER_SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS ledger_meta (
@@ -115,19 +114,86 @@ pub(super) fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
     )
 }
 
-pub(super) fn run_with_busy_retry_n<T, F>(max_retries: u32, mut op: F) -> Result<T, rusqlite::Error>
+#[derive(Debug, Clone, Copy)]
+pub(super) enum BusyRetryPolicy {
+    /// Standard CLI / dashboard / sync path: 3s SQLite busy_timeout + bounded retries.
+    Standard { max_retries: u32 },
+    /// Hot-path statusline: zero SQLite blind-usleep timeout; strict wall-clock retry budget.
+    WallClockBounded { budget: Duration },
+}
+
+impl BusyRetryPolicy {
+    pub(super) const fn standard() -> Self {
+        Self::Standard {
+            max_retries: DEFAULT_BUSY_RETRIES,
+        }
+    }
+
+    pub(super) const fn statusline() -> Self {
+        Self::WallClockBounded {
+            budget: Duration::from_millis(STATUSLINE_BUSY_BUDGET_MS),
+        }
+    }
+
+    pub(super) const fn sqlite_busy_timeout(self) -> Duration {
+        match self {
+            Self::Standard { .. } => Duration::from_millis(DEFAULT_BUSY_TIMEOUT_MS),
+            Self::WallClockBounded { .. } => Duration::ZERO,
+        }
+    }
+}
+
+pub(super) fn run_with_busy_retry_policy<T, F>(
+    policy: BusyRetryPolicy,
+    mut op: F,
+) -> Result<T, rusqlite::Error>
 where
     F: FnMut() -> Result<T, rusqlite::Error>,
 {
-    let mut attempt = 0u32;
-    loop {
-        match op() {
-            Ok(val) => return Ok(val),
-            Err(err) if is_sqlite_busy(&err) && attempt < max_retries => {
-                attempt += 1;
-                thread::sleep(Duration::from_millis(20 + u64::from(attempt) * 10));
+    match policy {
+        BusyRetryPolicy::Standard { max_retries } => {
+            let mut attempt = 0u32;
+            loop {
+                match op() {
+                    Ok(val) => return Ok(val),
+                    Err(err) if is_sqlite_busy(&err) && attempt < max_retries => {
+                        attempt += 1;
+                        thread::sleep(Duration::from_millis(20 + u64::from(attempt) * 10));
+                    }
+                    Err(err) => return Err(err),
+                }
             }
-            Err(err) => return Err(err),
+        }
+        BusyRetryPolicy::WallClockBounded { budget } => {
+            let started = Instant::now();
+            let mut attempt = 0u32;
+            loop {
+                match op() {
+                    Ok(val) => return Ok(val),
+                    Err(err) if is_sqlite_busy(&err) => {
+                        let elapsed = started.elapsed();
+                        if elapsed >= budget {
+                            return Err(err);
+                        }
+                        attempt = attempt.saturating_add(1);
+                        let step_ms = match attempt {
+                            1 => 5,
+                            2 => 10,
+                            3 => 15,
+                            4 => 25,
+                            5 => 35,
+                            _ => 50,
+                        };
+                        let sleep_for =
+                            Duration::from_millis(step_ms).min(budget.saturating_sub(elapsed));
+                        if sleep_for.is_zero() {
+                            return Err(err);
+                        }
+                        thread::sleep(sleep_for);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
         }
     }
 }
@@ -136,7 +202,7 @@ pub(super) fn run_with_busy_retry<T, F>(op: F) -> Result<T, rusqlite::Error>
 where
     F: FnMut() -> Result<T, rusqlite::Error>,
 {
-    run_with_busy_retry_n(DEFAULT_BUSY_RETRIES, op)
+    run_with_busy_retry_policy(BusyRetryPolicy::standard(), op)
 }
 
 fn has_table_column(conn: &Connection, table_name: &str, col_name: &str) -> Result<bool, rusqlite::Error> {
@@ -190,17 +256,16 @@ fn is_schema_already_initialized(conn: &Connection) -> bool {
 
 fn ensure_schema(
     conn: &mut Connection,
-    busy_timeout_ms: u64,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<(), rusqlite::Error> {
     // Enable busy_timeout first; avoid acquiring write locks on hot-path opens when schema is already current.
-    conn.busy_timeout(Duration::from_millis(busy_timeout_ms))?;
+    conn.busy_timeout(retry_policy.sqlite_busy_timeout())?;
     if is_schema_already_initialized(conn) {
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         return Ok(());
     }
 
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
 
@@ -315,8 +380,7 @@ fn ensure_schema(
 
 pub(super) fn open_ledger_connection_with_options(
     ledger_path: &Path,
-    busy_timeout_ms: u64,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<Connection, LedgerError> {
     if let Some(parent) = ledger_path.parent()
         && !parent.as_os_str().is_empty()
@@ -324,11 +388,87 @@ pub(super) fn open_ledger_connection_with_options(
         platform::ensure_dir_0700(parent)?;
     }
     let mut conn = Connection::open(ledger_path)?;
-    ensure_schema(&mut conn, busy_timeout_ms, max_retries)?;
+    ensure_schema(&mut conn, retry_policy)?;
     let _ = platform::set_file_0600(ledger_path);
     Ok(conn)
 }
 
 pub(super) fn open_ledger_connection(ledger_path: &Path) -> Result<Connection, LedgerError> {
-    open_ledger_connection_with_options(ledger_path, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_BUSY_RETRIES)
+    open_ledger_connection_with_options(ledger_path, BusyRetryPolicy::standard())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wall_clock_bounded_retry_caps_slow_attempts_within_budget() {
+        let mut calls = 0u32;
+        let policy = BusyRetryPolicy::WallClockBounded {
+            budget: Duration::from_millis(120),
+        };
+        let started = Instant::now();
+        let res = run_with_busy_retry_policy(policy, || {
+            calls += 1;
+            thread::sleep(Duration::from_millis(70));
+            Err::<(), _>(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            ))
+        });
+        let elapsed = started.elapsed();
+
+        let Err(err) = res else {
+            panic!("expected SQLITE_BUSY error");
+        };
+        assert!(is_sqlite_busy(&err), "expected sqlite busy, got {err}");
+        assert!(
+            (1..=3).contains(&calls),
+            "expected 1-3 attempts within 120ms budget, got {calls}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "expected wall-clock bounded exit < 700ms, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_open_and_locked_write_exits_within_wall_clock_budget() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            panic!("failed to create tempdir");
+        };
+        let path = tmp.path().join("ledger.sqlite");
+        let Ok(init_conn) = open_ledger_connection(&path) else {
+            panic!("failed to initialize WAL ledger");
+        };
+        drop(init_conn);
+
+        let Ok(mut lock_conn) = Connection::open(&path) else {
+            panic!("failed to open lock connection");
+        };
+        let Ok(tx) = lock_conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        else {
+            panic!("failed to acquire IMMEDIATE write lock");
+        };
+
+        let started = Instant::now();
+        let Ok(conn) = open_ledger_connection_with_options(&path, BusyRetryPolicy::statusline())
+        else {
+            panic!("statusline open should succeed on initialized WAL ledger");
+        };
+        let res = run_with_busy_retry_policy(BusyRetryPolicy::statusline(), || {
+            conn.execute_batch("BEGIN IMMEDIATE")
+        });
+        let elapsed = started.elapsed();
+        drop(tx);
+
+        let Err(err) = res else {
+            panic!("expected SQLITE_BUSY error under write lock contention");
+        };
+        assert!(is_sqlite_busy(&err), "expected sqlite busy, got {err}");
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed <= Duration::from_millis(900),
+            "expected statusline locked write elapsed in [300ms, 900ms], took {elapsed:?}"
+        );
+    }
 }

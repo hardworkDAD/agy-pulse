@@ -59,7 +59,7 @@ impl LedgerError {
 pub struct LedgerStore {
     conn: Connection,
     ledger_path: PathBuf,
-    max_retries: u32,
+    retry_policy: schema::BusyRetryPolicy,
 }
 
 impl LedgerStore {
@@ -78,15 +78,12 @@ impl LedgerStore {
     /// never blocks past the host CLI's statusline deadline.
     pub fn open_default_for_statusline() -> Result<Self, LedgerError> {
         let path = Self::default_ledger_path();
-        let conn = schema::open_ledger_connection_with_options(
-            &path,
-            schema::STATUSLINE_BUSY_TIMEOUT_MS,
-            schema::STATUSLINE_BUSY_RETRIES,
-        )?;
+        let retry_policy = schema::BusyRetryPolicy::statusline();
+        let conn = schema::open_ledger_connection_with_options(&path, retry_policy)?;
         Ok(Self {
             conn,
             ledger_path: path,
-            max_retries: schema::STATUSLINE_BUSY_RETRIES,
+            retry_policy,
         })
     }
 
@@ -96,7 +93,7 @@ impl LedgerStore {
         Ok(Self {
             conn,
             ledger_path: ledger_path.to_path_buf(),
-            max_retries: schema::DEFAULT_BUSY_RETRIES,
+            retry_policy: schema::BusyRetryPolicy::standard(),
         })
     }
 
@@ -117,12 +114,12 @@ impl LedgerStore {
 
     /// Normalize and persist `last_observed_email` in `ledger_meta`, skipping writes when unchanged.
     pub fn set_last_observed_email(&self, email: &str) -> Result<(), LedgerError> {
-        sync::set_last_observed_email(&self.conn, email, self.max_retries)
+        sync::set_last_observed_email(&self.conn, email, self.retry_policy)
     }
 
     /// Persist a device quota observation snapshot into `quota_snapshots`.
     pub fn upsert_quota_snapshot(&self, snapshot: &QuotaSnapshot) -> Result<(), LedgerError> {
-        sync::upsert_quota_snapshot(&self.conn, snapshot, self.max_retries)
+        sync::upsert_quota_snapshot(&self.conn, snapshot, self.retry_policy)
     }
 
     /// Return the latest `QuotaSnapshot` per `account_id` (`observed_at_ms` max, tie-broken by `device_id ASC`),
@@ -143,14 +140,14 @@ impl LedgerStore {
             email,
             workspace_substr,
             dry_run,
-            self.max_retries,
+            self.retry_policy,
         )
     }
 
     /// Atomically purge all remote-device rows and pull chunk states inside a single Immediate transaction,
     /// preserving local device rows and push chunk states. Returns the number of deleted remote step rows.
     pub fn clear_remote_data(&self) -> Result<usize, LedgerError> {
-        sync::clear_remote_data(&self.conn, self.max_retries)
+        sync::clear_remote_data(&self.conn, self.retry_policy)
     }
 
     /// Upsert a device metadata row in `sync_devices`.
@@ -171,7 +168,7 @@ impl LedgerStore {
             is_local,
             last_seen_ms,
             plan_tier,
-            self.max_retries,
+            self.retry_policy,
         )
     }
 
@@ -235,13 +232,13 @@ impl LedgerStore {
             direction,
             content_sha256,
             now_ms,
-            self.max_retries,
+            self.retry_policy,
         )
     }
 
     /// Clear local device `push` entries in `sync_chunk_state` so subsequent pushes re-upload chunks.
     pub fn clear_local_push_chunk_states(&self) -> Result<usize, LedgerError> {
-        sync::clear_local_push_chunk_states(&self.conn, self.max_retries)
+        sync::clear_local_push_chunk_states(&self.conn, self.retry_policy)
     }
 
     /// Atomically import a remote device's monthly chunk into `ingested_dbs`, `telemetry_steps`,
@@ -266,13 +263,13 @@ impl LedgerStore {
             convs,
             steps,
             now_ms,
-            self.max_retries,
+            self.retry_policy,
         )
     }
 
     /// Atomically delete all rows belonging to `target_device_id` across ledger tables.
     pub fn delete_device_data(&self, target_device_id: &str) -> Result<usize, LedgerError> {
-        sync::delete_device_data(&self.conn, target_device_id, self.max_retries)
+        sync::delete_device_data(&self.conn, target_device_id, self.retry_policy)
     }
 
     /// Read multi-device sync metadata values from `ledger_meta`.
@@ -286,7 +283,7 @@ impl LedgerStore {
         key: &str,
         value: Option<&str>,
     ) -> Result<(), LedgerError> {
-        sync::set_sync_meta_field(&self.conn, key, value, self.max_retries)
+        sync::set_sync_meta_field(&self.conn, key, value, self.retry_policy)
     }
 
     /// Return all known device rows from `sync_devices` ordered by
@@ -336,7 +333,7 @@ impl LedgerStore {
             conversation_id,
             child_conversation_ids,
             options,
-            self.max_retries,
+            self.retry_policy,
         )
     }
 
@@ -345,7 +342,7 @@ impl LedgerStore {
         &mut self,
         input: &RollingCostInput<'_>,
     ) -> Result<Option<RollingCostTotals>, LedgerError> {
-        sync::record_rolling_costs(&mut self.conn, input, self.max_retries)
+        sync::record_rolling_costs(&mut self.conn, input, self.retry_policy)
     }
 
     /// Query multi-dimensional overview (summary KPIs, timeseries, models, sources, cascade trees).

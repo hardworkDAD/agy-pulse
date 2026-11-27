@@ -22,7 +22,7 @@ use super::query::{
     resolve_root_conversation_id,
 };
 use super::schema::{
-    DEFAULT_BUSY_RETRIES, read_local_device_id, run_with_busy_retry, run_with_busy_retry_n,
+    BusyRetryPolicy, read_local_device_id, run_with_busy_retry, run_with_busy_retry_policy,
 };
 
 pub(super) const SYNC_THROTTLE_MS: i64 = 15_000;
@@ -579,9 +579,9 @@ fn upsert_batches(
     batches: &[IngestedConversationBatch],
     full_scan_ts_ms: Option<i64>,
     policy: &BatchSyncPolicy,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<usize, LedgerError> {
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let local_device_id = read_local_device_id(&tx)?;
         let last_observed = read_last_observed_email_from_conn(&tx)?;
@@ -875,7 +875,13 @@ pub(super) fn sync_all(
         })?;
         0
     } else {
-        upsert_batches(conn, &batches, Some(now_ms), &policy, DEFAULT_BUSY_RETRIES)?
+        upsert_batches(
+            conn,
+            &batches,
+            Some(now_ms),
+            &policy,
+            BusyRetryPolicy::standard(),
+        )?
     };
 
     Ok(LedgerSyncReport {
@@ -931,7 +937,7 @@ pub(super) fn sync_conversation(
     conversation_id: &str,
     child_conversation_ids: &[String],
     options: &LedgerSyncOptions,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<SingleSyncReport, LedgerError> {
     if conversation_id.trim().is_empty() {
         return Ok(SingleSyncReport {
@@ -1031,7 +1037,7 @@ pub(super) fn sync_conversation(
     }
 
     let synced_dbs = batches.len();
-    let steps_upserted = upsert_batches(conn, &batches, None, &policy, max_retries)?;
+    let steps_upserted = upsert_batches(conn, &batches, None, &policy, retry_policy)?;
     Ok(SingleSyncReport {
         ok: true,
         skipped: false,
@@ -1178,7 +1184,7 @@ fn compute_db_cost_by_root(
 pub(super) fn record_rolling_costs(
     conn: &mut Connection,
     input: &RollingCostInput<'_>,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<Option<RollingCostTotals>, LedgerError> {
     let now_ms = input.now_ms;
     let today_key = local_date_key(now_ms);
@@ -1188,7 +1194,7 @@ pub(super) fn record_rolling_costs(
         None => now_ms - SEVEN_DAY_WINDOW_MS,
     };
 
-    run_with_busy_retry_n(max_retries, || -> Result<Option<RollingCostTotals>, rusqlite::Error> {
+    run_with_busy_retry_policy(retry_policy, || -> Result<Option<RollingCostTotals>, rusqlite::Error> {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         // Aggregate ledger totals inside the Immediate transaction so DB reads and cursor anchor
@@ -1504,8 +1510,11 @@ impl Drop for ImmediateTxGuard<'_> {
     }
 }
 
-pub(super) fn clear_remote_data(conn: &Connection, max_retries: u32) -> Result<usize, LedgerError> {
-    run_with_busy_retry_n(max_retries, || {
+pub(super) fn clear_remote_data(
+    conn: &Connection,
+    retry_policy: BusyRetryPolicy,
+) -> Result<usize, LedgerError> {
+    run_with_busy_retry_policy(retry_policy, || {
         let tx = ImmediateTxGuard::begin(conn)?;
         let local_device_id = read_local_device_id(conn)?;
         let deleted_steps = conn.execute(
@@ -1540,9 +1549,9 @@ pub(super) fn upsert_sync_device(
     is_local: bool,
     last_seen_ms: i64,
     plan_tier: Option<&str>,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<(), LedgerError> {
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         upsert_sync_device_on_conn(
             conn,
             account_id,
@@ -1563,7 +1572,7 @@ pub(super) fn last_observed_email(conn: &Connection) -> Result<Option<String>, L
 pub(super) fn set_last_observed_email(
     conn: &Connection,
     email: &str,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<(), LedgerError> {
     let Some(normalized) = normalize_non_unassigned_account(Some(email)) else {
         return Ok(());
@@ -1573,7 +1582,7 @@ pub(super) fn set_last_observed_email(
     {
         return Ok(());
     }
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         conn.execute(
             "INSERT OR REPLACE INTO ledger_meta (key, value) VALUES ('last_observed_email', ?1)",
             params![&normalized],
@@ -1586,7 +1595,7 @@ pub(super) fn set_last_observed_email(
 pub(super) fn upsert_quota_snapshot(
     conn: &Connection,
     snapshot: &QuotaSnapshot,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<(), LedgerError> {
     let account_id = normalize_account_id(&snapshot.account_id)
         .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
@@ -1607,7 +1616,7 @@ pub(super) fn upsert_quota_snapshot(
         .filter(|s| !s.is_empty());
     let quota_json = serde_json::to_string(&snapshot.quota)?;
 
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         conn.execute(
             "INSERT INTO quota_snapshots (account_id, device_id, device_name, plan_tier, observed_at_ms, quota_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1713,7 +1722,7 @@ pub(super) fn assign_unassigned_account(
     email: &str,
     workspace_substr: Option<&str>,
     dry_run: bool,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<AccountAssignReport, LedgerError> {
     let normalized_email = validate_and_normalize_account_email(email)
         .ok_or_else(|| LedgerError::InvalidAccountEmail(email.trim().to_string()))?;
@@ -1743,7 +1752,7 @@ pub(super) fn assign_unassigned_account(
     let (_, device_name_hint) = platform::read_sync_identity_hints();
     let device_name = resolve_effective_device_name(device_name_hint.as_deref());
 
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         let tx = ImmediateTxGuard::begin(conn)?;
         let local_device_id = read_local_device_id(conn)?;
         let matched = find_matching_unassigned_conversations(conn, &local_device_id, ws_filter)?;
@@ -2023,12 +2032,12 @@ pub(super) fn set_sync_chunk_hash(
     direction: &str,
     content_sha256: &str,
     now_ms: i64,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<(), LedgerError> {
     let normalized_account =
         normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
     let trimmed_device = device_id.trim();
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         conn.execute(
             "INSERT OR REPLACE INTO sync_chunk_state (
                account_id, device_id, month_key, direction, content_sha256, updated_at_ms
@@ -2049,9 +2058,9 @@ pub(super) fn set_sync_chunk_hash(
 
 pub(super) fn clear_local_push_chunk_states(
     conn: &Connection,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<usize, LedgerError> {
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         let local_device_id = read_local_device_id(conn)?;
         conn.execute(
             "DELETE FROM sync_chunk_state WHERE device_id = ?1 AND direction = 'push'",
@@ -2071,7 +2080,7 @@ pub(super) fn import_remote_chunk(
     convs: &[SyncConvRecord],
     steps: &[SyncStepRecord],
     now_ms: i64,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<usize, LedgerError> {
     let normalized_account =
         normalize_account_id(account_id).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
@@ -2089,7 +2098,7 @@ pub(super) fn import_remote_chunk(
         )));
     }
 
-    let steps_opt = run_with_busy_retry_n(max_retries, || -> Result<Option<usize>, rusqlite::Error> {
+    let steps_opt = run_with_busy_retry_policy(retry_policy, || -> Result<Option<usize>, rusqlite::Error> {
         let tx = ImmediateTxGuard::begin(conn)?;
         let tx_local_device_id = read_local_device_id(conn)?;
         if trimmed_device == tx_local_device_id {
@@ -2231,7 +2240,7 @@ pub(super) fn import_remote_chunk(
 pub(super) fn delete_device_data(
     conn: &Connection,
     target_device_id: &str,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<usize, LedgerError> {
     let trimmed = target_device_id.trim();
     if trimmed.is_empty() {
@@ -2240,7 +2249,7 @@ pub(super) fn delete_device_data(
         ));
     }
 
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         let tx = ImmediateTxGuard::begin(conn)?;
         let mut total_deleted = 0usize;
         for sql in [
@@ -2302,7 +2311,7 @@ pub(super) fn set_sync_meta_field(
     conn: &Connection,
     key: &str,
     value: Option<&str>,
-    max_retries: u32,
+    retry_policy: BusyRetryPolicy,
 ) -> Result<(), LedgerError> {
     let trimmed_key = key.trim();
     if !matches!(
@@ -2317,7 +2326,7 @@ pub(super) fn set_sync_meta_field(
         )));
     }
 
-    run_with_busy_retry_n(max_retries, || {
+    run_with_busy_retry_policy(retry_policy, || {
         match value.map(str::trim).filter(|s| !s.is_empty()) {
             Some(v) => {
                 conn.execute(
