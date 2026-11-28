@@ -3347,6 +3347,15 @@ mod tests {
         ];
         let models = [None, Some("Haiku 4.5")];
         let workspaces = [None, Some("alpha")];
+        let env_overrides = HashMap::from([(
+            "AGY_PULSE_SYNC_CONFIG".to_string(),
+            Some(
+                tmp.path()
+                    .join("sync-config.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        )]);
 
         for range in ranges {
             for source in sources {
@@ -3368,13 +3377,19 @@ mod tests {
                                         include_subagents,
                                         now_ms: Some(now_ms),
                                     };
-                                    let Ok(indexed) = query_overview(&conn, &path, &filter, now_ms)
-                                    else {
+                                    let (indexed, reference) =
+                                        crate::platform::with_env_overrides(&env_overrides, || {
+                                            (
+                                                query_overview(&conn, &path, &filter, now_ms),
+                                                query_overview_full_scan_reference(
+                                                    &conn, &path, &filter, now_ms,
+                                                ),
+                                            )
+                                        });
+                                    let Ok(indexed) = indexed else {
                                         panic!("indexed query_overview failed");
                                     };
-                                    let Ok(reference) = query_overview_full_scan_reference(
-                                        &conn, &path, &filter, now_ms,
-                                    ) else {
+                                    let Ok(reference) = reference else {
                                         panic!("reference query_overview failed");
                                     };
                                     let Ok(idx_val) = serde_json::to_value(&indexed) else {

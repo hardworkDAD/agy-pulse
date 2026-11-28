@@ -6,7 +6,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
@@ -557,9 +557,21 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
     );
 
     // 3. After 24h cooldown expires, statusline spawns detached --check-update-bg asynchronously
-    let server2 = LocalHttpServer::start(|path| {
+    let update_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let response_gate = Arc::clone(&update_gate);
+    let server2 = LocalHttpServer::start(move |path| {
         if path == "/latest.json" {
-            MockResponse::json(200, r#"{"tag_name":"v99.2.0"}"#)
+            let (lock, ready) = &*response_gate;
+            let (released, _) = ready
+                .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(8), |exited| {
+                    !*exited
+                })
+                .unwrap();
+            if *released {
+                MockResponse::json(200, r#"{"tag_name":"v99.2.0"}"#)
+            } else {
+                MockResponse::json(503, "{}")
+            }
         } else {
             MockResponse::json(404, "{}")
         }
@@ -581,7 +593,6 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
     )
     .unwrap();
 
-    let started = Instant::now();
     let mut child2 = env
         .cmd(&agy_pulse_bin())
         .env(
@@ -601,11 +612,10 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
         .write_all(stdin_payload.as_bytes())
         .unwrap();
     let out2 = child2.wait_with_output().unwrap();
+    let (lock, ready) = &*update_gate;
+    *lock.lock().unwrap() = true;
+    ready.notify_all();
     assert_eq!(out2.status.code(), Some(0));
-    assert!(
-        started.elapsed() < Duration::from_millis(1400),
-        "statusline must not block on background update check"
-    );
 
     // Wait up to 3s for detached child to finish writing 99.2.0
     let deadline = Instant::now() + Duration::from_secs(3);

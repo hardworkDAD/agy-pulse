@@ -540,28 +540,47 @@ fn empty_and_malformed_stdin_exit_zero_and_log_safely_without_following_symlink(
 #[test]
 fn hanging_stdin_respects_1500ms_hard_timeout_and_exits_zero() {
     let env = IsolatedEnv::new();
-    let start = Instant::now();
+    let profile_log = env.data_dir.join("stdin-timeout-profile.log");
+    let runtime_dir = env.data_dir.join("runtime");
     let mut child = env
         .cmd(&agy_pulse_bin())
+        .env("AGY_PULSE_PROFILE_LOG", &profile_log)
+        .env("AGY_PULSE_PROFILE_MIN_MS", "0")
+        .env("AGY_PULSE_RUNTIME_DIR", &runtime_dir)
+        .env_remove("AGY_PULSE_SYNC_MODE")
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn binary");
 
     // Hold stdin open without writing EOF
     let _held_stdin = child.stdin.take().unwrap();
-    let output = child.wait_with_output().expect("wait with timeout");
-    let elapsed = start.elapsed();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll statusline exit") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().ok();
+            child.wait().expect("reap timed-out statusline");
+            panic!("statusline exceeded the 5-second host timeout");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
 
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(status.code(), Some(0));
+    let profile = fs::read_to_string(&profile_log).expect("read statusline timeout profile");
+    let stdin_ms = profile
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("stdin=")?.parse::<u64>().ok())
+        .expect("profile recorded stdin duration");
     assert!(
-        elapsed >= Duration::from_millis(1300) && elapsed < Duration::from_millis(2600),
-        "expected ~1500ms timeout exit, took {:?}",
-        elapsed
+        (1300..=2000).contains(&stdin_ms) && profile.contains("hard_timeout_fallback=1"),
+        "expected the stdin timeout fallback at about 1500ms, profile: {profile}"
     );
     assert!(
-        !env.data_dir.join("runtime").exists(),
+        !runtime_dir.exists(),
         "an empty stdin timeout should leave the collector idle"
     );
 }

@@ -21,8 +21,8 @@ use agy_pulse::dashboard::{
     DASHBOARD_STATE_FILENAME, DEFAULT_DASHBOARD_PORT, DashboardServer, DashboardServerConfig,
     DashboardStateFile, STATUSLINE_IDLE_TIMEOUT_SEC, StatusLineDashboardInfo, TouchDashboardResult,
     acquire_dashboard_spawn_lock, dashboard_spawn_lock_path, dashboard_state_path,
-    get_running_dashboard_info, is_valid_loopback_dashboard_url, release_dashboard_spawn_lock,
-    resolve_dashboard_port, resolve_dashboard_url_for_statusline,
+    get_running_dashboard_info, is_valid_loopback_dashboard_url, ping_dashboard,
+    release_dashboard_spawn_lock, resolve_dashboard_port, resolve_dashboard_url_for_statusline,
     resolve_statusline_idle_timeout_sec, touch_running_dashboard, write_dashboard_state,
 };
 use agy_pulse::domain::{
@@ -634,6 +634,17 @@ fn t11_spawn_lock_dead_pid_cleanup_and_touch_keepalive() {
         started_at: srv_info.started_at.clone(),
     };
     write_dashboard_state(&live_state).unwrap();
+    assert!(
+        ping_dashboard(&live_state.host, live_state.port, 2_000),
+        "legacy discovery state should fetch the token and ping"
+    );
+    let mut state_with_token = serde_json::to_value(&live_state).unwrap();
+    state_with_token["csrfToken"] = Value::from(server.csrf_token());
+    platform::write_atomic_0600(
+        &dashboard_state_path(),
+        &serde_json::to_vec(&state_with_token).unwrap(),
+    )
+    .unwrap();
 
     // Backdate mtime to 2 seconds ago so the next touch is initially throttled (< 10s),
     // then unthrottled when passing a future `now_ms`.

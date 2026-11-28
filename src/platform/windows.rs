@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
+use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,8 +33,9 @@ use windows_sys::Win32::System::Console::{
     SetConsoleMode,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, GetCurrentProcess, GetExitCodeProcess, OpenProcess,
-    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    GetCurrentProcess, GetExitCodeProcess, OpenProcess, OpenProcessToken, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, STARTUPINFOW, TerminateProcess,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -417,19 +420,128 @@ pub(super) fn shutdown_signal_requested() -> bool {
     SHUTDOWN_SIGNAL_FLAG.load(Ordering::Acquire)
 }
 
+fn detached_command_line(program: &[u16], args: &[&str]) -> io::Result<Vec<u16>> {
+    const QUOTE: u16 = b'"' as u16;
+    const BACKSLASH: u16 = b'\\' as u16;
+
+    if program.contains(&QUOTE) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "double quote in Windows executable path",
+        ));
+    }
+    let mut line = vec![QUOTE];
+    line.extend_from_slice(program);
+    line.push(QUOTE);
+    for arg in args {
+        if arg.contains('\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "interior NUL in Windows argument",
+            ));
+        }
+        line.extend([b' ' as u16, QUOTE]);
+        let mut backslashes = 0;
+        for unit in arg.encode_utf16() {
+            if unit == BACKSLASH {
+                backslashes += 1;
+                continue;
+            }
+            if unit == QUOTE {
+                backslashes = 2 * backslashes + 1;
+            }
+            line.extend(std::iter::repeat_n(BACKSLASH, backslashes));
+            backslashes = 0;
+            line.push(unit);
+        }
+        line.extend(std::iter::repeat_n(BACKSLASH, 2 * backslashes));
+        line.push(QUOTE);
+    }
+    line.push(0);
+    Ok(line)
+}
+
+fn detached_environment(command: &Command) -> io::Result<Option<Vec<u16>>> {
+    let mut overrides = command.get_envs().peekable();
+    if overrides.peek().is_none() {
+        return Ok(None);
+    }
+
+    let mut entries: BTreeMap<_, _> = env::vars_os()
+        .map(|(key, value)| (key.to_ascii_uppercase(), (key, value)))
+        .collect();
+    for (key, value) in overrides {
+        if key.is_empty() || key.as_encoded_bytes().iter().any(|&b| b == 0 || b == b'=') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid Windows environment variable name",
+            ));
+        }
+        let normalized = key.to_ascii_uppercase();
+        if let Some(value) = value {
+            entries.insert(normalized, (key.to_owned(), value.to_owned()));
+        } else {
+            entries.remove(&normalized);
+        }
+    }
+
+    let mut block = Vec::new();
+    for (key, value) in entries.values() {
+        let key_wide = os_str_to_wide_null(key)?;
+        block.extend_from_slice(&key_wide[..key_wide.len() - 1]);
+        block.push(b'=' as u16);
+        block.extend(os_str_to_wide_null(value)?);
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    Ok(Some(block))
+}
+
 pub(super) fn spawn_detached(program: &Path, args: &[&str]) -> io::Result<u32> {
-    // Rust's `std::process::Command` on Windows opens `NUL` for `Stdio::null()` and
-    // restricts handle inheritance via `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, so we do
-    // not mutate the current process's global `STD_*_HANDLE` inheritance flags.
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    super::apply_thread_env_overrides(&mut cmd);
-    let child = cmd.spawn()?;
-    Ok(child.id())
+    let program_wide = os_str_to_wide_null(program.as_os_str())?;
+    let mut command_line = detached_command_line(&program_wide[..program_wide.len() - 1], args)?;
+    let application = if program.is_absolute() && program.extension().is_some() {
+        program_wide.as_ptr()
+    } else {
+        ptr::null()
+    };
+    let mut command = Command::new(program);
+    super::apply_thread_env_overrides(&mut command);
+    let environment = detached_environment(&command)?;
+    let environment_ptr = environment
+        .as_deref()
+        .map_or(ptr::null(), |block| block.as_ptr().cast());
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+
+    // SAFETY: The command line is mutable, NUL-terminated UTF-16. The optional application
+    // name and environment block are valid for the call. The OS initializes the two owned
+    // handles in process on success. Handle inheritance is disabled for this child.
+    let created = unsafe {
+        CreateProcessW(
+            application,
+            command_line.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            0,
+            CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            environment_ptr,
+            ptr::null(),
+            &startup,
+            &mut process,
+        )
+    };
+    if created == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _process_handle = HandleGuard(process.hProcess);
+    let _thread_handle = HandleGuard(process.hThread);
+    Ok(process.dwProcessId)
 }
 
 pub(super) fn is_process_alive(pid: u32) -> bool {
@@ -609,5 +721,62 @@ pub(super) fn remove_binary_file_safely(path: &Path) -> io::Result<bool> {
             }
             Err(remove_err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    #[test]
+    fn detached_command_line_round_trips_windows_arguments() {
+        let program = r"C:\Program Files\agy-pulse\agypl.exe";
+        let program_wide: Vec<u16> = program.encode_utf16().collect();
+        let args = [
+            "",
+            "two words",
+            "中文 路径",
+            r#"with\"quotes"#,
+            r"trailing slash\",
+        ];
+        let Ok(line) = detached_command_line(&program_wide, &args) else {
+            panic!("build Windows command line");
+        };
+        let mut argc = 0;
+        // SAFETY: The command line is NUL-terminated and argc is an out parameter.
+        let argv = unsafe { CommandLineToArgvW(line.as_ptr(), &mut argc) };
+        assert!(!argv.is_null());
+        // SAFETY: The OS reports argc NUL-terminated wide strings in this allocation.
+        let parsed: Vec<String> = unsafe {
+            std::slice::from_raw_parts(argv, argc as usize)
+                .iter()
+                .map(|&arg| {
+                    let mut len = 0;
+                    while *arg.add(len) != 0 {
+                        len += 1;
+                    }
+                    String::from_utf16_lossy(std::slice::from_raw_parts(arg, len))
+                })
+                .collect()
+        };
+        // SAFETY: CommandLineToArgvW returns one allocation owned by this test.
+        unsafe { LocalFree(argv.cast()) };
+        let expected: Vec<&str> = std::iter::once(program).chain(args).collect();
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn detached_environment_encodes_overrides_in_a_double_terminated_block() {
+        let mut command = Command::new("agypl.exe");
+        command.env("AGY_PULSE_TEST_OVERRIDE", "path with 空格");
+        let Ok(Some(block)) = detached_environment(&command) else {
+            panic!("build Windows environment block");
+        };
+        let entry: Vec<u16> = "AGY_PULSE_TEST_OVERRIDE=path with 空格"
+            .encode_utf16()
+            .collect();
+        assert!(block.ends_with(&[0, 0]));
+        assert!(block.split(|&unit| unit == 0).any(|part| part == entry));
     }
 }
