@@ -194,30 +194,209 @@ fn remove_extra_files(root: &Path) -> Vec<PathBuf> {
     removed
 }
 
-fn remove_temp_artifacts() -> Vec<PathBuf> {
-    let mut removed = Vec::new();
-    let tmp_dir = env::temp_dir();
+fn remove_non_symlink_entry(path: &Path, allow_dir: bool) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return false;
+    }
+    if meta.is_dir() {
+        allow_dir && fs::remove_dir_all(path).is_ok()
+    } else {
+        fs::remove_file(path).is_ok()
+    }
+}
+
+fn is_known_runtime_artifact_name(name: &str) -> bool {
+    if name.starts_with("agy-pulse-ledger") {
+        return false;
+    }
+    matches!(
+        name,
+        "collector.sock" | "collector.json" | "collector.lock" | "snap-global.json"
+    ) || (name.starts_with("snap-") && name.ends_with(".json"))
+        || (name.starts_with("agyp-") && name.ends_with(".sock"))
+        || name.starts_with("agy-pulse-db-")
+        || name.starts_with("agy-pulse-bootstrap-")
+        || name.starts_with("agy-pulse-update-")
+        || (name.starts_with("agy-pulse-")
+            && (name.ends_with(".sock")
+                || name.ends_with(".lock")
+                || name.ends_with(".pid")))
+}
+
+fn clean_dedicated_runtime_dir(
+    dir: &Path,
+    seen_dirs: &mut HashSet<PathBuf>,
+    removed: &mut Vec<PathBuf>,
+) {
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return;
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return;
+    }
+    let key = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !seen_dirs.insert(key) {
+        return;
+    }
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if is_known_runtime_artifact_name(&name) {
+                let entry_path = entry.path();
+                if remove_non_symlink_entry(&entry_path, true) {
+                    removed.push(entry_path);
+                }
+            }
+        }
+    }
+
+    if fs::read_dir(dir).is_ok_and(|mut it| it.next().is_none()) {
+        let _ = fs::remove_dir(dir);
+    }
+}
+
+fn clean_shared_temp_dir(
+    dir: &Path,
+    seen_dirs: &mut HashSet<PathBuf>,
+    removed: &mut Vec<PathBuf>,
+) {
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return;
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return;
+    }
+    let key = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if !seen_dirs.insert(key) {
+        return;
+    }
+
     for name in ["agy-pulse-token.json", "agy-pulse-quota-cache.json"] {
-        let p = tmp_dir.join(name);
-        if remove_path_best_effort(&p) {
+        let p = dir.join(name);
+        if remove_non_symlink_entry(&p, false) {
             removed.push(p);
         }
     }
-    if let Ok(entries) = fs::read_dir(&tmp_dir) {
+    if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
             if name.starts_with("agy-pulse-db-")
                 || name.starts_with("agy-pulse-bootstrap-")
                 || name.starts_with("agy-pulse-update-")
+                || (name.starts_with("agyp-") && name.ends_with(".sock"))
             {
                 let p = entry.path();
-                if remove_path_best_effort(&p) {
+                if remove_non_symlink_entry(&p, true) {
                     removed.push(p);
                 }
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn current_process_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata("/proc/self").ok().map(|m| m.uid())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn current_process_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    platform::home_dir().and_then(|h| fs::symlink_metadata(h).ok().map(|m| m.uid()))
+}
+
+fn remove_temp_artifacts() -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    let mut seen_runtime_dirs = HashSet::new();
+    let mut seen_shared_dirs = HashSet::new();
+
+    let mut runtime_dirs = Vec::new();
+    if let Some(override_dir) = platform::env_var("AGY_PULSE_RUNTIME_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            runtime_dirs.push(PathBuf::from(trimmed));
+        }
+    }
+    if let Some(data_dir) = platform::env_var("AGY_PULSE_DATA_DIR") {
+        let trimmed = data_dir.trim();
+        if !trimmed.is_empty() {
+            runtime_dirs.push(PathBuf::from(trimmed).join("runtime"));
+        }
+    }
+    for root in platform::get_antigravity_roots() {
+        runtime_dirs.push(root.join("runtime"));
+    }
+
+    #[cfg(unix)]
+    {
+        if let Some(xdg) = platform::env_var("XDG_RUNTIME_DIR") {
+            let trimmed = xdg.trim();
+            if !trimmed.is_empty() {
+                let xdg_path = PathBuf::from(trimmed);
+                if fs::symlink_metadata(&xdg_path)
+                    .is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir())
+                {
+                    runtime_dirs.push(xdg_path.join("agy-pulse"));
+                    runtime_dirs.push(xdg_path.join("agy-pulse-tmp"));
+                    clean_shared_temp_dir(&xdg_path, &mut seen_shared_dirs, &mut removed);
+                }
+            }
+        }
+        if let Some(home) = platform::home_dir() {
+            runtime_dirs.push(home.join(".agy-pulse").join("runtime"));
+        }
+        if let Some(uid) = current_process_uid() {
+            for base in [env::temp_dir(), PathBuf::from("/tmp")] {
+                runtime_dirs.push(base.join(format!("agy-pulse-{uid}")));
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let shm = PathBuf::from("/dev/shm");
+                if fs::symlink_metadata(&shm)
+                    .is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir())
+                {
+                    runtime_dirs.push(shm.join(format!("agy-pulse-{uid}")));
+                    runtime_dirs.push(shm.join(format!("agy-pulse-tmp-{uid}")));
+                    clean_shared_temp_dir(&shm, &mut seen_shared_dirs, &mut removed);
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(local_app) = platform::windows_local_app_data() {
+            runtime_dirs.push(local_app.join("agy-pulse").join("runtime"));
+        }
+        runtime_dirs.push(env::temp_dir().join("agy-pulse").join("runtime"));
+    }
+
+    for dir in runtime_dirs {
+        clean_dedicated_runtime_dir(&dir, &mut seen_runtime_dirs, &mut removed);
+    }
+
+    let mut temp_candidates = vec![env::temp_dir()];
+    #[cfg(unix)]
+    temp_candidates.push(PathBuf::from("/tmp"));
+    for var in ["TMPDIR", "TMP", "TEMP"] {
+        if let Some(val) = platform::env_var(var) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                temp_candidates.push(PathBuf::from(trimmed));
+            }
+        }
+    }
+    for tmp_dir in temp_candidates {
+        clean_shared_temp_dir(&tmp_dir, &mut seen_shared_dirs, &mut removed);
+    }
+
     removed
 }
 
@@ -320,4 +499,38 @@ pub(super) fn uninstall(
         preserved_ledgers,
         purged_ledgers,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn clean_dedicated_runtime_dir_removes_only_runtime_artifacts_and_preserves_ledger() {
+        let dir = TempDir::new().expect("temp dir");
+        let rt = dir.path().join("agy-pulse");
+        fs::create_dir_all(&rt).expect("mkdir");
+
+        fs::write(rt.join("collector.json"), b"{}").expect("write");
+        fs::write(rt.join("collector.lock"), b"{}").expect("write");
+        fs::write(rt.join("snap-global.json"), b"{}").expect("write");
+        fs::write(rt.join("snap-1234.json"), b"{}").expect("write");
+        fs::write(rt.join("agy-pulse-ledger.sqlite"), b"keep").expect("write");
+
+        let mut seen = HashSet::new();
+        let mut removed = Vec::new();
+        clean_dedicated_runtime_dir(&rt, &mut seen, &mut removed);
+
+        assert!(!rt.join("collector.json").exists());
+        assert!(!rt.join("collector.lock").exists());
+        assert!(!rt.join("snap-global.json").exists());
+        assert!(!rt.join("snap-1234.json").exists());
+        assert!(
+            rt.join("agy-pulse-ledger.sqlite").is_file(),
+            "runtime dir cleanup must never delete ledger files"
+        );
+        assert_eq!(removed.len(), 4);
+    }
 }

@@ -24,6 +24,10 @@ const UPDATE_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_REDIRECTS: usize = 5;
 const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_EXTRACTED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_TAR_LONG_NAME_BYTES: u64 = 64 * 1024;
+const MAX_TAR_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+const TAR_SKIP_SCRATCH_BYTES: usize = 8192;
 
 /// Local persisted state for 24-hour background update checks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -363,6 +367,43 @@ fn matches_target_binary_name(entry_path: &str, expected_names: &[&str]) -> bool
     expected_names.contains(&base)
 }
 
+fn skip_exact_bytes<R: Read>(
+    reader: &mut R,
+    mut remaining: u64,
+    context: &str,
+) -> Result<(), OpsError> {
+    let mut scratch = [0u8; TAR_SKIP_SCRATCH_BYTES];
+    while remaining > 0 {
+        let chunk = remaining.min(scratch.len() as u64) as usize;
+        reader
+            .read_exact(&mut scratch[..chunk])
+            .map_err(|err| OpsError::Archive(format!("Truncated {context}: {err}")))?;
+        remaining -= chunk as u64;
+    }
+    Ok(())
+}
+
+fn read_bounded_tar_payload<R: Read>(
+    reader: &mut R,
+    size: u64,
+    context: &str,
+) -> Result<Vec<u8>, OpsError> {
+    let initial_cap = usize::try_from(size).unwrap_or(usize::MAX).min(1024 * 1024);
+    let mut payload = Vec::with_capacity(initial_cap);
+    reader
+        .by_ref()
+        .take(size)
+        .read_to_end(&mut payload)
+        .map_err(|err| OpsError::Archive(format!("Failed reading tar entry {context}: {err}")))?;
+    if (payload.len() as u64) != size {
+        return Err(OpsError::Archive(format!(
+            "Truncated tar entry {context}: expected {size} bytes, got {}",
+            payload.len()
+        )));
+    }
+    Ok(payload)
+}
+
 fn extract_binary_from_tar_gz(
     archive_bytes: &[u8],
     expected_names: &[&str],
@@ -370,6 +411,7 @@ fn extract_binary_from_tar_gz(
     let mut gz = GzDecoder::new(Cursor::new(archive_bytes));
     let mut header = [0u8; 512];
     let mut long_name: Option<String> = None;
+    let mut total_uncompressed: u64 = 0;
 
     loop {
         match gz.read_exact(&mut header) {
@@ -396,32 +438,48 @@ fn extract_binary_from_tar_gz(
             format!("{prefix_part}/{name_part}")
         };
 
-        let size_usize = usize::try_from(size)
-            .map_err(|_| OpsError::Archive("Tar entry size exceeds platform usize".to_string()))?;
-        let mut payload = vec![0u8; size_usize];
-        gz.read_exact(&mut payload)
-            .map_err(|err| OpsError::Archive(format!("Truncated tar entry {entry_name}: {err}")))?;
-
-        let rem = size_usize % 512;
-        if rem != 0 {
-            let mut pad = vec![0u8; 512 - rem];
-            gz.read_exact(&mut pad)
-                .map_err(|err| OpsError::Archive(format!("Truncated tar padding: {err}")))?;
-        }
+        let padding = (512 - (size % 512)) % 512;
+        total_uncompressed = total_uncompressed
+            .checked_add(512)
+            .and_then(|t| t.checked_add(size))
+            .and_then(|t| t.checked_add(padding))
+            .filter(|&t| t <= MAX_TAR_TOTAL_UNCOMPRESSED_BYTES)
+            .ok_or_else(|| {
+                OpsError::Archive(format!(
+                    "Tar archive uncompressed size exceeds maximum limit ({MAX_TAR_TOTAL_UNCOMPRESSED_BYTES} bytes)"
+                ))
+            })?;
 
         if typeflag == b'L' {
-            long_name = Some(trim_cstr(&payload));
+            if size > MAX_TAR_LONG_NAME_BYTES {
+                return Err(OpsError::Archive(format!(
+                    "Tar GNU longname size {size} exceeds maximum limit ({MAX_TAR_LONG_NAME_BYTES} bytes)"
+                )));
+            }
+            let name_bytes = read_bounded_tar_payload(&mut gz, size, "GNU longname")?;
+            skip_exact_bytes(&mut gz, padding, "tar longname padding")?;
+            long_name = Some(trim_cstr(&name_bytes));
             continue;
         }
 
-        if (typeflag == b'0' || typeflag == 0) && matches_target_binary_name(&entry_name, expected_names) {
-            if payload.is_empty() {
+        if (typeflag == b'0' || typeflag == 0)
+            && matches_target_binary_name(&entry_name, expected_names)
+        {
+            if size == 0 {
                 return Err(OpsError::Archive(format!(
                     "Extracted binary {entry_name} is empty"
                 )));
             }
-            return Ok(payload);
+            if size > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(OpsError::Archive(format!(
+                    "Tar entry {entry_name} size {size} exceeds maximum extracted binary limit ({MAX_EXTRACTED_BINARY_BYTES} bytes)"
+                )));
+            }
+            return read_bounded_tar_payload(&mut gz, size, &entry_name);
         }
+
+        skip_exact_bytes(&mut gz, size, &format!("tar entry {entry_name}"))?;
+        skip_exact_bytes(&mut gz, padding, "tar padding")?;
     }
 
     Err(OpsError::Archive(format!(
@@ -437,7 +495,7 @@ fn extract_binary_from_zip(
     let mut zip = ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|err| OpsError::Archive(format!("Invalid .zip archive: {err}")))?;
     for idx in 0..zip.len() {
-        let mut file = zip
+        let file = zip
             .by_index(idx)
             .map_err(|err| OpsError::Archive(format!("Zip entry read error: {err}")))?;
         if file.is_dir() {
@@ -445,9 +503,21 @@ fn extract_binary_from_zip(
         }
         let name = file.name().to_string();
         if matches_target_binary_name(&name, expected_names) {
+            if file.size() > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(OpsError::Archive(format!(
+                    "Zip entry {name} declares size {} exceeding maximum extracted binary limit ({MAX_EXTRACTED_BINARY_BYTES} bytes)",
+                    file.size()
+                )));
+            }
             let mut buf = Vec::new();
-            file.read_to_end(&mut buf)
+            file.take(MAX_EXTRACTED_BINARY_BYTES + 1)
+                .read_to_end(&mut buf)
                 .map_err(|err| OpsError::Archive(format!("Failed reading {name} from zip: {err}")))?;
+            if (buf.len() as u64) > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(OpsError::Archive(format!(
+                    "Zip entry {name} uncompressed size exceeds maximum limit ({MAX_EXTRACTED_BINARY_BYTES} bytes)"
+                )));
+            }
             if buf.is_empty() {
                 return Err(OpsError::Archive(format!("Extracted binary {name} is empty")));
             }
@@ -560,4 +630,143 @@ pub(super) fn perform_self_update(force: bool) -> Result<SelfUpdateReport, OpsEr
         target_version: resolved_target,
         asset_name,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    fn make_tar_header(name: &str, typeflag: u8, size: u64) -> [u8; 512] {
+        let mut header = [0u8; 512];
+        let name_bytes = name.as_bytes();
+        let copy_len = name_bytes.len().min(100);
+        header[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        header[100..108].copy_from_slice(b"0000755\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        let size_str = format!("{size:011o}\0");
+        header[124..136].copy_from_slice(size_str.as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].copy_from_slice(b"        ");
+        header[156] = typeflag;
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let cksum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+        let cksum_str = format!("{cksum:06o}\0 ");
+        header[148..156].copy_from_slice(cksum_str.as_bytes());
+        header
+    }
+
+    fn gzip_bytes(raw: &[u8]) -> Vec<u8> {
+        let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(raw).expect("gzip write");
+        enc.finish().expect("gzip finish")
+    }
+
+    #[test]
+    fn tar_gz_rejects_oversized_longname_entry_before_allocating() {
+        let header = make_tar_header("././@LongLink", b'L', MAX_TAR_LONG_NAME_BYTES + 1);
+        let mut tar = Vec::from(header);
+        tar.resize(tar.len() + 1024, 0);
+        let err = extract_binary_from_tar_gz(&gzip_bytes(&tar), &["agy-pulse"])
+            .expect_err("oversized GNU longname must fail");
+        assert!(matches!(err, OpsError::Archive(_)), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn tar_gz_rejects_oversized_target_binary_before_allocating() {
+        let header = make_tar_header("agy-pulse", b'0', MAX_EXTRACTED_BINARY_BYTES + 1);
+        let mut tar = Vec::from(header);
+        tar.resize(tar.len() + 1024, 0);
+        let err = extract_binary_from_tar_gz(&gzip_bytes(&tar), &["agy-pulse"])
+            .expect_err("oversized target binary must fail");
+        assert!(matches!(err, OpsError::Archive(_)), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn tar_gz_rejects_cumulative_non_target_entries_exceeding_total_limit() {
+        // Two non-target files of 300 MiB each exceed MAX_TAR_TOTAL_UNCOMPRESSED_BYTES (512 MiB)
+        let h1 = make_tar_header("docs/a.bin", b'0', 300 * 1024 * 1024);
+        let h2 = make_tar_header("docs/b.bin", b'0', 300 * 1024 * 1024);
+        let mut tar = Vec::new();
+        tar.extend_from_slice(&h1);
+        tar.extend_from_slice(&h2);
+        tar.resize(tar.len() + 1024, 0);
+        let err = extract_binary_from_tar_gz(&gzip_bytes(&tar), &["agy-pulse"])
+            .expect_err("cumulative tar size exceeding limit must fail");
+        assert!(matches!(err, OpsError::Archive(_)), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn tar_gz_streams_non_target_entries_and_extracts_target_with_longname() {
+        let long_path = format!("{}/agy-pulse", "nested/dir".repeat(12));
+        let mut long_payload = long_path.as_bytes().to_vec();
+        long_payload.push(0);
+
+        let non_target_payload = vec![b'x'; 200_000];
+        let target_payload = b"#!/bin/sh\necho ok\n".to_vec();
+
+        let mut tar = Vec::new();
+        // 1. Large non-target file
+        tar.extend_from_slice(&make_tar_header("share/big-readme.txt", b'0', non_target_payload.len() as u64));
+        tar.extend_from_slice(&non_target_payload);
+        let rem1 = non_target_payload.len() % 512;
+        if rem1 != 0 {
+            tar.resize(tar.len() + (512 - rem1), 0);
+        }
+        // 2. GNU longname for target
+        tar.extend_from_slice(&make_tar_header("././@LongLink", b'L', long_payload.len() as u64));
+        tar.extend_from_slice(&long_payload);
+        let rem2 = long_payload.len() % 512;
+        if rem2 != 0 {
+            tar.resize(tar.len() + (512 - rem2), 0);
+        }
+        // 3. Target binary
+        tar.extend_from_slice(&make_tar_header("truncated-name", b'0', target_payload.len() as u64));
+        tar.extend_from_slice(&target_payload);
+        let rem3 = target_payload.len() % 512;
+        if rem3 != 0 {
+            tar.resize(tar.len() + (512 - rem3), 0);
+        }
+        tar.resize(tar.len() + 1024, 0);
+
+        let extracted = extract_binary_from_tar_gz(&gzip_bytes(&tar), &["agy-pulse"])
+            .expect("should stream-skip non-target and extract longname target");
+        assert_eq!(extracted, target_payload);
+    }
+
+    #[test]
+    fn zip_rejects_zip_bomb_even_when_header_lies_about_uncompressed_size() {
+        // Build a zip containing (MAX_EXTRACTED_BINARY_BYTES + 1024) zero bytes,
+        // then patch the uncompressed size in local file header and central directory to 16 bytes
+        // so `file.size()` lies and only bounded `take()` prevents unbounded decompression.
+        let payload = vec![0u8; (MAX_EXTRACTED_BINARY_BYTES as usize) + 1024];
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("agy-pulse", opts).expect("start_file");
+            zip.write_all(&payload).expect("write zip bomb payload");
+            zip.finish().expect("finish zip");
+        }
+        let mut zip_bytes = cursor.into_inner();
+
+        // Patch local file header uncompressed size (offset 22..26 for standard local header `PK\x03\x04`)
+        assert_eq!(&zip_bytes[0..4], b"PK\x03\x04");
+        zip_bytes[22..26].copy_from_slice(&16u32.to_le_bytes());
+
+        // Patch central directory header uncompressed size (`PK\x01\x02` + 24..28)
+        if let Some(cd_pos) = zip_bytes.windows(4).position(|w| w == b"PK\x01\x02") {
+            zip_bytes[cd_pos + 24..cd_pos + 28].copy_from_slice(&16u32.to_le_bytes());
+        }
+
+        let err = extract_binary_from_zip(&zip_bytes, &["agy-pulse"])
+            .expect_err("zip bomb with spoofed uncompressed size must be rejected");
+        assert!(matches!(err, OpsError::Archive(_)), "unexpected error: {err}");
+    }
 }

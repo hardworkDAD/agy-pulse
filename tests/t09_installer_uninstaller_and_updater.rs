@@ -437,6 +437,47 @@ fn install_registers_statusline_repairs_corrupt_settings_and_never_touches_offic
 }
 
 #[test]
+fn install_preserves_existing_keys_in_jsonc_settings_with_comments_and_trailing_commas() {
+    let env = IsolatedEnv::new();
+    let jsonc_payload = "\u{FEFF}// Host editor settings\n{\n  \"theme\": \"tokyo-night\",\n  /* Multi-line\n     block comment */\n  \"editor.fontSize\": 14,\n  \"customUrls\": [\n    \"https://example.com//not-a-comment\",\n    \"value /* keep */ with \\\"escaped // quote\\\", trailing\", // inline comment\n  ],\n  \"mcpServers\": {\n    \"alpha\": { \"url\": \"http://localhost:8080/a/*b*/\", },\n  },\n  \"statusLine\": {\n    \"stack_with_default\": true,\n    \"command\": \"old-cmd\",\n  },\n}\n";
+    fs::write(env.settings_path(), jsonc_payload).unwrap();
+
+    let out = env.cmd(&agypl_bin()).arg("install").output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "install with JSONC settings failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bak_path = env.cli_data_dir.join("settings.json.bak");
+    assert!(bak_path.is_file(), "JSONC settings must be backed up to .bak before rewriting");
+    assert_eq!(fs::read_to_string(&bak_path).unwrap(), jsonc_payload);
+
+    let parsed: Value =
+        serde_json::from_str(&fs::read_to_string(env.settings_path()).unwrap()).unwrap();
+    assert_eq!(parsed["theme"], "tokyo-night");
+    assert_eq!(parsed["editor.fontSize"], 14);
+    assert_eq!(parsed["customUrls"][0], "https://example.com//not-a-comment");
+    assert_eq!(
+        parsed["customUrls"][1],
+        "value /* keep */ with \"escaped // quote\", trailing"
+    );
+    assert_eq!(parsed["mcpServers"]["alpha"]["url"], "http://localhost:8080/a/*b*/");
+    assert_eq!(parsed["statusLine"]["stack_with_default"], true);
+    assert_eq!(parsed["statusLine"]["type"], "command");
+    let deployed_primary = env
+        .bin_dir
+        .join(format!("agy-pulse{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        parsed["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains(&deployed_primary.to_string_lossy().to_string())
+    );
+}
+
+#[test]
 fn background_update_check_writes_status_and_statusline_renders_prompt() {
     let env = IsolatedEnv::new();
     let server = LocalHttpServer::start(|path| {
@@ -745,6 +786,84 @@ fn manual_update_verifies_sha256_rejects_downgrade_and_atomically_replaces_binar
 }
 
 #[test]
+fn manual_update_rejects_oversized_tar_header_without_oom() {
+    let env = IsolatedEnv::new();
+    let target_bin = env
+        .bin_dir
+        .join(format!("agypl{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(agypl_bin(), &target_bin).unwrap();
+    agy_pulse::platform::set_executable_0755(&target_bin).unwrap();
+    let original_bytes = fs::read(&target_bin).unwrap();
+
+    // Craft a tar.gz whose first entry is a non-target README claiming an 8 GiB - 1 size.
+    let mut header = [0u8; 512];
+    let name_bytes = b"README.md";
+    header[..name_bytes.len()].copy_from_slice(name_bytes);
+    header[100..108].copy_from_slice(b"0000644\0");
+    header[108..116].copy_from_slice(b"0000000\0");
+    header[116..124].copy_from_slice(b"0000000\0");
+    header[124..136].copy_from_slice(b"77777777777\0");
+    header[136..148].copy_from_slice(b"00000000000\0");
+    header[148..156].copy_from_slice(b"        ");
+    header[156] = b'0';
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+    let cksum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+    let cksum_str = format!("{cksum:06o}\0 ");
+    header[148..156].copy_from_slice(cksum_str.as_bytes());
+
+    let mut tar_bytes = Vec::with_capacity(1536);
+    tar_bytes.extend_from_slice(&header);
+    tar_bytes.resize(tar_bytes.len() + 1024, 0);
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&tar_bytes).unwrap();
+    let gz_bytes = encoder.finish().unwrap();
+
+    let asset_name = current_asset_name();
+    let expected_sha = sha256_hex(&gz_bytes);
+    let sums = format!("{expected_sha}  {asset_name}\n");
+    let server = LocalHttpServer::start(move |path| {
+        if path == "/latest.json" {
+            MockResponse::json(200, r#"{"tag_name":"v99.9.0"}"#)
+        } else if path == "/releases/SHA256SUMS" {
+            MockResponse::bytes(200, sums.as_bytes().to_vec())
+        } else if path == format!("/releases/{asset_name}") {
+            MockResponse::bytes(200, gz_bytes.clone())
+        } else {
+            MockResponse::json(404, "{}")
+        }
+    });
+
+    if asset_name.ends_with(".tar.gz") {
+        let out = env
+            .cmd(&target_bin)
+            .arg("update")
+            .env(
+                "AGY_PULSE_UPDATE_URL",
+                format!("{}/latest.json", server.base_url),
+            )
+            .env(
+                "AGY_PULSE_RELEASE_BASE_URL",
+                format!("{}/releases", server.base_url),
+            )
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "oversized tar header must fail gracefully with exit code 1 (not OOM abort), stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Release archive extraction failed") && stderr.contains("exceeds"),
+            "expected archive size limit error before reading payload, got: {stderr}"
+        );
+        assert_eq!(fs::read(&target_bin).unwrap(), original_bytes);
+    }
+}
+
+#[test]
 fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_by_default() {
     let env = IsolatedEnv::new();
 
@@ -943,5 +1062,124 @@ fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_b
         );
         assert!(!deployed_primary.exists());
         assert!(ledger_db.is_file(), "uninstall.sh without --purge-ledger preserves ledger");
+    }
+}
+
+#[test]
+fn uninstall_cleans_runtime_dir_artifacts_without_following_symlinks_and_preserves_ledger() {
+    let env = IsolatedEnv::new();
+    let xdg_runtime = env.workspace_dir.join("xdg_runtime");
+    let xdg_pulse_dir = xdg_runtime.join("agy-pulse");
+    let xdg_fast_tmp = xdg_runtime.join("agy-pulse-tmp");
+    let data_runtime_dir = env.cli_data_dir.join("runtime");
+    fs::create_dir_all(&xdg_pulse_dir).unwrap();
+    fs::create_dir_all(&xdg_fast_tmp).unwrap();
+    fs::create_dir_all(&data_runtime_dir).unwrap();
+
+    // Seed runtime artifacts in XDG_RUNTIME_DIR/agy-pulse and AGY_PULSE_DATA_DIR/runtime
+    let xdg_collector_json = xdg_pulse_dir.join("collector.json");
+    let xdg_collector_lock = xdg_pulse_dir.join("collector.lock");
+    let xdg_collector_sock = xdg_pulse_dir.join("collector.sock");
+    let xdg_snap_global = xdg_pulse_dir.join("snap-global.json");
+    let xdg_snap_conv = xdg_pulse_dir.join("snap-0123456789abcdef.json");
+    let xdg_short_sock = xdg_runtime.join("agyp-0123456789abcdef.sock");
+    let xdg_fast_db = xdg_fast_tmp.join("agy-pulse-db-stale");
+    fs::create_dir_all(&xdg_fast_db).unwrap();
+    fs::write(xdg_fast_db.join("state.db"), b"tmp").unwrap();
+
+    for f in [
+        &xdg_collector_json,
+        &xdg_collector_lock,
+        &xdg_snap_global,
+        &xdg_snap_conv,
+    ] {
+        fs::write(f, b"{}").unwrap();
+    }
+    #[cfg(unix)]
+    {
+        let _listener = std::os::unix::net::UnixListener::bind(&xdg_collector_sock).unwrap();
+        let _short_listener = std::os::unix::net::UnixListener::bind(&xdg_short_sock).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&xdg_collector_sock, b"").unwrap();
+        fs::write(&xdg_short_sock, b"").unwrap();
+    }
+
+    let data_collector_json = data_runtime_dir.join("collector.json");
+    let data_snap_global = data_runtime_dir.join("snap-global.json");
+    fs::write(&data_collector_json, b"{}").unwrap();
+    fs::write(&data_snap_global, b"{}").unwrap();
+
+    // Seed ledger file (must be preserved by default)
+    let ledger_db = env.cli_data_dir.join("agy-pulse-ledger.sqlite");
+    fs::write(&ledger_db, b"ledger-keep").unwrap();
+
+    // Seed symlinked file inside data_runtime_dir pointing to a victim file outside
+    let victim_file = env.workspace_dir.join("victim-secret.txt");
+    fs::write(&victim_file, b"do-not-delete").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&victim_file, data_runtime_dir.join("snap-symlink.json"))
+            .unwrap();
+    }
+
+    let out = env
+        .cmd(&agypl_bin())
+        .arg("uninstall")
+        .env("XDG_RUNTIME_DIR", &xdg_runtime)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "uninstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(!xdg_collector_json.exists(), "XDG collector.json must be removed");
+    assert!(!xdg_collector_lock.exists(), "XDG collector.lock must be removed");
+    assert!(!xdg_collector_sock.exists(), "XDG collector.sock must be removed");
+    assert!(!xdg_snap_global.exists(), "XDG snap-global.json must be removed");
+    assert!(!xdg_snap_conv.exists(), "XDG snap-*.json must be removed");
+    assert!(!xdg_short_sock.exists(), "XDG agyp-*.sock must be removed");
+    assert!(!xdg_fast_db.exists(), "XDG agy-pulse-tmp db dir must be removed");
+    assert!(!data_collector_json.exists(), "data runtime collector.json must be removed");
+    assert!(!data_snap_global.exists(), "data runtime snap-global.json must be removed");
+    assert_eq!(
+        fs::read_to_string(&victim_file).unwrap(),
+        "do-not-delete",
+        "symlink target file must never be deleted or modified"
+    );
+    assert!(ledger_db.is_file(), "ledger must be preserved by default");
+
+    // Subcase: XDG_RUNTIME_DIR/agy-pulse itself is a symlink to a victim directory
+    #[cfg(unix)]
+    {
+        if xdg_pulse_dir.exists() {
+            let _ = fs::remove_dir_all(&xdg_pulse_dir);
+        }
+        let victim_dir = env.workspace_dir.join("victim-dir");
+        fs::create_dir_all(&victim_dir).unwrap();
+        fs::write(victim_dir.join("keep.txt"), b"keep").unwrap();
+        fs::write(victim_dir.join("collector.json"), b"foreign").unwrap();
+        std::os::unix::fs::symlink(&victim_dir, &xdg_pulse_dir).unwrap();
+
+        let out2 = env
+            .cmd(&agypl_bin())
+            .arg("uninstall")
+            .env("XDG_RUNTIME_DIR", &xdg_runtime)
+            .output()
+            .unwrap();
+        assert_eq!(out2.status.code(), Some(0));
+        assert!(victim_dir.is_dir(), "symlink target dir must remain intact");
+        assert!(
+            victim_dir.join("keep.txt").is_file(),
+            "victim dir contents must not be traversed"
+        );
+        assert!(
+            victim_dir.join("collector.json").is_file(),
+            "uninstall must not traverse symlinked runtime dir"
+        );
     }
 }
