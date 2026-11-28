@@ -235,8 +235,8 @@ fn render_provider_quota_table(
 
     let plain_row_width = ansi_display_width(&rows[0]).saturating_sub(2);
     let base_divider_width = plain_row_width.max(67);
-    let (final_rows, divider_width) = match explicit_cols {
-        Some(cols) if cols < 69 => {
+    let (final_rows, divider_indent, divider_width) = match explicit_cols {
+        Some(cols) if cols < 2 + base_divider_width => {
             let clipped = rows
                 .into_iter()
                 .map(|r| {
@@ -247,13 +247,21 @@ fn render_provider_quota_table(
                     }
                 })
                 .collect();
-            let div_w = base_divider_width.min(cols.saturating_sub(2).max(10));
-            (clipped, div_w)
+            if cols <= 2 {
+                (clipped, "", cols)
+            } else {
+                let div_w = base_divider_width.min(cols - 2);
+                (clipped, "  ", div_w)
+            }
         }
-        _ => (rows, base_divider_width),
+        _ => (rows, "  ", base_divider_width),
     };
 
-    let divider_line = format!("  {}{}{RESET}", palette.secondary, glyph.hbar.repeat(divider_width));
+    let divider_line = format!(
+        "{divider_indent}{}{}{RESET}",
+        palette.secondary,
+        glyph.hbar.repeat(divider_width)
+    );
     format!("{divider_line}\n{}", final_rows.join("\n"))
 }
 

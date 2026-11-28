@@ -891,3 +891,76 @@ fn e2e_stdin_email_and_username_priority_rendering() {
         "Line 1 must not show stdin username/email when display.username is configured:\n{plain_ovr}"
     );
 }
+
+#[test]
+fn quota_table_divider_never_exceeds_ultra_narrow_terminal_columns() {
+    let now_ms = 1_760_000_000_000_i64;
+    let snapshot = PulseSnapshot {
+        has_conversation_identity: true,
+        observed_at_ms: now_ms,
+        host: HostIdentity {
+            plan_tier: Some("Pro".to_string()),
+            ..Default::default()
+        },
+        quota: Some(ProviderQuotaSummary {
+            google: ProviderQuota {
+                five_hour: Some(QuotaWindow {
+                    remaining_fraction: 0.85,
+                    reset_time_ms: Some(now_ms + 3_600_000),
+                }),
+                weekly: None,
+            },
+            claude: ProviderQuota {
+                five_hour: Some(QuotaWindow {
+                    remaining_fraction: 0.50,
+                    reset_time_ms: Some(now_ms + 3_600_000),
+                }),
+                weekly: None,
+            },
+            argon: ProviderQuota::default(),
+            extras: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let cfg = PulseConfig {
+        display: DisplayConfig {
+            show_current_dir: Some(false),
+            show_context_monitor: Some(false),
+            show_model_cache: Some(false),
+            quota_style: QuotaStyle::Table,
+            ..DisplayConfig::builtin_defaults()
+        },
+        language: LanguageSetting::En,
+        ..Default::default()
+    };
+
+    for unicode in [true, false] {
+        for cols in [1u16, 2, 3, 5, 8, 11, 12, 40, 68, 69] {
+            let rendered = render_statusline(
+                &snapshot,
+                &cfg,
+                &TerminalCaps {
+                    unicode,
+                    columns: Some(cols),
+                },
+                LanguageSetting::En,
+            );
+            for (idx, line) in rendered.lines().enumerate() {
+                let width = ansi_display_width(line);
+                assert!(
+                    width <= cols as usize,
+                    "unicode={unicode} cols={cols} line[{idx}] exceeded columns: width={width}, plain={:?}",
+                    strip_ansi(line)
+                );
+            }
+            let plain_lines: Vec<&str> = rendered.lines().collect();
+            let divider_line = plain_lines[1];
+            let expected_char = if unicode { '─' } else { '-' };
+            assert!(
+                strip_ansi(divider_line).contains(expected_char),
+                "unicode={unicode} cols={cols} divider must still render horizontal rule: {:?}",
+                strip_ansi(divider_line)
+            );
+        }
+    }
+}

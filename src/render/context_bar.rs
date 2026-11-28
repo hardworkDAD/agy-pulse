@@ -261,19 +261,15 @@ pub(super) fn render_context_monitor_line(
         0.0
     };
 
-    let warn_pct = if (config.thresholds.warning - 0.7).abs() > f64::EPSILON
-        && config.thresholds.warning.is_finite()
-    {
-        config.thresholds.warning * 100.0
+    let warn_pct = if config.thresholds.warning.is_finite() {
+        (config.thresholds.warning * 100.0).clamp(0.0, 100.0)
     } else {
-        65.0
+        70.0
     };
-    let crit_pct = if (config.thresholds.critical - 0.9).abs() > f64::EPSILON
-        && config.thresholds.critical.is_finite()
-    {
-        config.thresholds.critical * 100.0
+    let crit_pct = if config.thresholds.critical.is_finite() {
+        (config.thresholds.critical * 100.0).clamp(0.0, 100.0)
     } else {
-        85.0
+        90.0
     };
 
     let bar_color = if real_pct >= crit_pct {

@@ -156,7 +156,7 @@ pub struct PulseSnapshot {
     pub quota: Option<ProviderQuotaSummary>,
 }
 
-const MODEL_DISPLAY_NAMES: &[(&str, &str)] = &[
+pub(super) const MODEL_DISPLAY_NAMES: &[(&str, &str)] = &[
     ("gemini-3-flash-agent", "Gemini 3.5 Flash (High)"),
     ("gemini-3.5-flash-low", "Gemini 3.5 Flash (Medium)"),
     ("gemini-3.5-flash-extra-low", "Gemini 3.5 Flash (Low)"),
@@ -196,6 +196,14 @@ const MODEL_DISPLAY_NAMES: &[(&str, &str)] = &[
     ("claude-sonnet-5-5-thinking", "Claude Sonnet 5.5 (Thinking)"),
     ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
 ];
+
+pub(super) fn lookup_known_display_name(id: &str) -> Option<&'static str> {
+    let trimmed = id.trim();
+    MODEL_DISPLAY_NAMES
+        .iter()
+        .find(|(known_id, _)| known_id.eq_ignore_ascii_case(trimmed))
+        .map(|(_, display)| *display)
+}
 
 /// Resolve an authoritative human-readable model display name from an ID and optional explicit name.
 pub fn resolve_model_display_name(id: &str, explicit_display_name: Option<&str>) -> String {

@@ -10,8 +10,9 @@ use tempfile::TempDir;
 
 use agy_pulse::domain::{
     ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity, ModelTokenTotals,
-    PulseSnapshot, TokenUsage, WorkspaceInfo, WorkspaceMetadata, is_usage_cache_inclusive,
-    model_includes_cache_in_input, resolve_cascade_cost_usd, resolve_native_cost_usd,
+    PulseSnapshot, TokenUsage, WorkspaceInfo, WorkspaceMetadata, calculate_token_cost,
+    is_usage_cache_inclusive, model_includes_cache_in_input, resolve_cascade_cost_usd,
+    resolve_native_cost_usd,
 };
 use agy_pulse::render::{
     ansi_display_width, display_width, render_statusline, strip_ansi,
@@ -19,6 +20,7 @@ use agy_pulse::render::{
 };
 use agy_pulse::config::{
     CacheHitThresholdsConfig, DisplayConfig, LanguageSetting, PulseConfig, ThemeConfig,
+    ThresholdsConfig,
 };
 use agy_pulse::platform::TerminalCaps;
 
@@ -1168,5 +1170,211 @@ fn display_config_none_fallbacks_match_builtin_defaults() {
     assert!(
         out_independent.contains("Session Cache") && !out_independent.contains("Ctx"),
         "showModelCache=None must not depend on showContextMonitor: {out_independent}"
+    );
+}
+
+#[test]
+fn gemini_pro_agent_pricing_matches_display_name() {
+    let usage = TokenUsage {
+        input_tokens: 100_000,
+        output_tokens: 10_000,
+        cache_read_input_tokens: 50_000,
+        cache_creation_input_tokens: 0,
+        cache_exclusive: true,
+    };
+    let cost_by_id = calculate_token_cost("gemini-pro-agent", &usage, false, false).unwrap();
+    let cost_by_display =
+        calculate_token_cost("Gemini 3.1 Pro (High)", &usage, false, false).unwrap();
+    assert!(
+        (cost_by_id - cost_by_display).abs() < 1e-12,
+        "raw ID gemini-pro-agent cost ({cost_by_id}) must match display name Gemini 3.1 Pro (High) ({cost_by_display})"
+    );
+    // Expected at $2.00/M in, $12.00/M out, $0.20/M cache_read: 0.20 + 0.12 + 0.01 = 0.33
+    assert!(
+        (cost_by_id - 0.33).abs() < 1e-12,
+        "expected $0.33 for Gemini 3.1 Pro rates, got {cost_by_id}"
+    );
+
+    let snap_raw = PulseSnapshot {
+        model: Some(ModelIdentity {
+            id: "gemini-pro-agent".to_string(),
+            display_name: String::new(),
+            effort: None,
+        }),
+        context: Some(ContextWindowSnapshot {
+            context_window_size: 512_000,
+            current_usage: Some(usage),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let resolved_raw = resolve_cascade_cost_usd(&snap_raw, false).unwrap();
+    assert!((resolved_raw - 0.33).abs() < 1e-12);
+}
+
+#[test]
+fn cache_exclusive_extrapolation_preserves_cache_create_and_uncached_input() {
+    let make_snap = |total_input_tokens: u64, total_output_tokens: u64| PulseSnapshot {
+        model: Some(ModelIdentity {
+            id: "claude-opus-4-6-thinking".to_string(),
+            display_name: "Claude Opus 4.6 (Thinking)".to_string(),
+            effort: None,
+        }),
+        context: Some(ContextWindowSnapshot {
+            context_window_size: 200_000,
+            has_total_input: true,
+            total_input_tokens,
+            total_output_tokens,
+            total_cache_read_tokens: None,
+            total_cache_creation_tokens: None,
+            current_usage: Some(TokenUsage {
+                input_tokens: 1_000,
+                output_tokens: 200,
+                cache_read_input_tokens: 8_000,
+                cache_creation_input_tokens: 1_000,
+                cache_exclusive: true,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Single turn cost at Opus 4.6 ($5/M in, $25/M out, $0.50/M read, $6.25/M write):
+    // 1k*5 + 200*25 + 8k*0.50 + 1k*6.25 = 0.005 + 0.005 + 0.004 + 0.00625 = $0.02025
+    // 1) total_input_tokens = 100_000 (10x of cur_total_in = 10_000) -> 10x single turn = $0.2025
+    let cost_10x = resolve_cascade_cost_usd(&make_snap(100_000, 2_000), false).unwrap();
+    assert!(
+        (cost_10x - 0.2025).abs() < 1e-9,
+        "expected 10x cache-exclusive extrapolated cost $0.2025, got {cost_10x}"
+    );
+
+    // 2) total_input_tokens = 10_000 (1x of cur_total_in = 10_000) -> $0.02025
+    let cost_1x = resolve_cascade_cost_usd(&make_snap(10_000, 200), false).unwrap();
+    assert!(
+        (cost_1x - 0.02025).abs() < 1e-9,
+        "expected 1x cache-exclusive cost $0.02025, got {cost_1x}"
+    );
+
+    // 3) total_input_tokens = 3_000 (< cur_total_in = 10_000, cumulative uncached = 3x cur.input_tokens) -> 3x = $0.06075
+    let cost_3x_uncached = resolve_cascade_cost_usd(&make_snap(3_000, 600), false).unwrap();
+    assert!(
+        (cost_3x_uncached - 0.06075).abs() < 1e-9,
+        "expected 3x uncached-input extrapolated cost $0.06075, got {cost_3x_uncached}"
+    );
+
+    // 4) Cache-inclusive regression: Gemini 4 Carbon ($2/M in, $10/M out, $0.10/M read, $2/M write)
+    let inclusive_snap = PulseSnapshot {
+        model: Some(ModelIdentity {
+            id: "gemini-4-carbon-high".to_string(),
+            display_name: "Gemini 4 Carbon (High)".to_string(),
+            effort: None,
+        }),
+        context: Some(ContextWindowSnapshot {
+            context_window_size: 500_000,
+            has_total_input: true,
+            total_input_tokens: 40_000,
+            total_output_tokens: 1_000,
+            total_cache_read_tokens: None,
+            total_cache_creation_tokens: None,
+            current_usage: Some(TokenUsage {
+                input_tokens: 20_000,
+                output_tokens: 500,
+                cache_read_input_tokens: 15_000,
+                cache_creation_input_tokens: 2_000,
+                cache_exclusive: false,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let cost_inc = resolve_cascade_cost_usd(&inclusive_snap, false).unwrap();
+    assert!(
+        (cost_inc - 0.033).abs() < 1e-9,
+        "cache-inclusive extrapolation regression: expected $0.033, got {cost_inc}"
+    );
+}
+
+#[test]
+fn context_monitor_thresholds_honor_0_70_and_0_90_continuously() {
+    let make_snap = |input_tokens: u64| PulseSnapshot {
+        has_conversation_identity: true,
+        model: Some(ModelIdentity {
+            id: "gemini-4-carbon-high".to_string(),
+            display_name: "Gemini 4 Carbon (High)".to_string(),
+            effort: None,
+        }),
+        context: Some(ContextWindowSnapshot {
+            context_window_size: 100_000,
+            current_usage: Some(TokenUsage {
+                input_tokens,
+                output_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_exclusive: false,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let caps = TerminalCaps {
+        unicode: true,
+        columns: Some(140),
+    };
+    let make_cfg = |warning: f64, critical: f64| PulseConfig {
+        display: DisplayConfig {
+            show_current_dir: Some(false),
+            show_model_cache: Some(false),
+            show_context_monitor: Some(true),
+            quota_style: agy_pulse::config::QuotaStyle::None,
+            ..DisplayConfig::builtin_defaults()
+        },
+        thresholds: ThresholdsConfig { warning, critical },
+        language: LanguageSetting::En,
+        ..Default::default()
+    };
+
+    // With default 0.70 / 0.90:
+    // - 67% (< 70%) must stay cyan (\x1b[36m), NOT jump to warning (65% magic number)
+    let default_cfg = make_cfg(0.7, 0.9);
+    let out_67 = render_statusline(&make_snap(67_000), &default_cfg, &caps, LanguageSetting::En);
+    assert!(
+        out_67.contains("\x1b[36m") && !out_67.contains("\x1b[33m"),
+        "67% with warning=0.70 must be cyan, not yellow: {out_67:?}"
+    );
+
+    // - 70% (== 70%) must turn warning (\x1b[33m)
+    let out_70 = render_statusline(&make_snap(70_000), &default_cfg, &caps, LanguageSetting::En);
+    assert!(
+        out_70.contains("\x1b[33m"),
+        "70% with warning=0.70 must be yellow: {out_70:?}"
+    );
+
+    // - 87% (< 90%) must stay warning (\x1b[33m), NOT jump to critical (85% magic number)
+    let out_87 = render_statusline(&make_snap(87_000), &default_cfg, &caps, LanguageSetting::En);
+    assert!(
+        out_87.contains("\x1b[33m")
+            && !out_87.contains("\x1b[31m")
+            && !strip_ansi(&out_87).contains("Compaction imminent"),
+        "87% with critical=0.90 must be yellow without Compaction imminent: {out_87:?}"
+    );
+
+    // - 90% (== 90%) must turn critical (\x1b[31m) + Compaction imminent
+    let out_90 = render_statusline(&make_snap(90_000), &default_cfg, &caps, LanguageSetting::En);
+    assert!(
+        out_90.contains("\x1b[31m") && strip_ansi(&out_90).contains("Compaction imminent"),
+        "90% with critical=0.90 must be red with Compaction imminent: {out_90:?}"
+    );
+
+    // Monotonicity check around 0.69 -> 0.70 -> 0.71 at 70% usage:
+    let cfg_69 = make_cfg(0.69, 0.90);
+    let cfg_71 = make_cfg(0.71, 0.90);
+    assert!(
+        render_statusline(&make_snap(70_000), &cfg_69, &caps, LanguageSetting::En).contains("\x1b[33m")
+    );
+    assert!(
+        out_70.contains("\x1b[33m")
+    );
+    assert!(
+        render_statusline(&make_snap(70_000), &cfg_71, &caps, LanguageSetting::En).contains("\x1b[36m")
     );
 }

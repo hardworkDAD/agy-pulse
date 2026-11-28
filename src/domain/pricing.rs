@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::model::TokenUsage;
+use super::model::{TokenUsage, lookup_known_display_name};
 
 /// Per-million-token pricing rates in USD, including optional >200k long-context tiers.
 #[derive(Debug, Clone, Copy)]
@@ -334,7 +334,7 @@ fn pricing_rules() -> &'static [PricingRule] {
                 },
             ),
             (
-                r"(?i)gemini[-_\s]*3\.1[-_\s]*pro",
+                r"(?i)gemini[-_\s]*(?:3\.1[-_\s]*pro|pro[-_\s]*agent)",
                 ModelPricing {
                     input: 2.00,
                     output: 12.00,
@@ -405,9 +405,18 @@ fn pricing_rules() -> &'static [PricingRule] {
 
 /// Look up pricing for a model name or ID, falling back to `DEFAULT_PRICING`.
 pub fn lookup_pricing(model_name_or_id: &str) -> ModelPricing {
+    let trimmed = model_name_or_id.trim();
+    let canonical = lookup_known_display_name(trimmed).unwrap_or(trimmed);
     for rule in pricing_rules() {
-        if rule.regex.is_match(model_name_or_id) {
+        if rule.regex.is_match(canonical) {
             return rule.pricing;
+        }
+    }
+    if canonical != trimmed {
+        for rule in pricing_rules() {
+            if rule.regex.is_match(trimmed) {
+                return rule.pricing;
+            }
         }
     }
     DEFAULT_PRICING
@@ -467,5 +476,47 @@ pub fn calculate_token_cost(
         Some(cost)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_pro_agent_matches_gemini_3_1_pro_rates() {
+        let by_id = lookup_pricing("gemini-pro-agent");
+        let by_name = lookup_pricing("Gemini 3.1 Pro (High)");
+        assert!((by_id.input - by_name.input).abs() < 1e-12);
+        assert!((by_id.output - by_name.output).abs() < 1e-12);
+        assert!((by_id.cache_read - by_name.cache_read).abs() < 1e-12);
+        assert!((by_id.cache_write - by_name.cache_write).abs() < 1e-12);
+        assert_eq!(by_id.long_threshold, by_name.long_threshold);
+    }
+
+    #[test]
+    fn all_mapped_models_match_display_name_pricing() {
+        for &(id, display_name) in crate::domain::model::MODEL_DISPLAY_NAMES {
+            let p_id = lookup_pricing(id);
+            let p_upper = lookup_pricing(&id.to_ascii_uppercase());
+            let p_name = lookup_pricing(display_name);
+            assert!(
+                (p_id.input - p_name.input).abs() < 1e-12
+                    && (p_id.output - p_name.output).abs() < 1e-12
+                    && (p_id.cache_read - p_name.cache_read).abs() < 1e-12
+                    && (p_id.cache_write - p_name.cache_write).abs() < 1e-12
+                    && p_id.long_threshold == p_name.long_threshold
+                    && p_id.long_input == p_name.long_input
+                    && p_id.long_output == p_name.long_output
+                    && p_id.long_cache_read == p_name.long_cache_read
+                    && p_id.long_cache_write == p_name.long_cache_write,
+                "pricing mismatch for mapped model id={id:?} vs display={display_name:?}"
+            );
+            assert!(
+                (p_upper.input - p_name.input).abs() < 1e-12
+                    && (p_upper.output - p_name.output).abs() < 1e-12,
+                "case-insensitive pricing mismatch for id={id:?}"
+            );
+        }
     }
 }

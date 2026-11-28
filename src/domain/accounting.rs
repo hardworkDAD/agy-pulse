@@ -30,6 +30,62 @@ pub fn resolve_native_cost_usd(
     Some(cost)
 }
 
+/// Extrapolate cumulative `(input_tokens, cache_read_tokens, cache_creation_tokens)` when
+/// `has_total_input == true` and explicit `total_cache_*` counters are absent.
+fn extrapolate_cumulative_input_tokens(
+    model_name: &str,
+    total_input_tokens: u64,
+    u: &TokenUsage,
+) -> (u64, u64, u64) {
+    if is_usage_cache_inclusive(model_name, u) {
+        if u.input_tokens > 0 && total_input_tokens > u.input_tokens {
+            let ratio_read = ((u.cache_read_input_tokens as f64 / u.input_tokens as f64)
+                * total_input_tokens as f64)
+                .round() as u64;
+            let read = total_input_tokens.min(ratio_read);
+            let ratio_create = ((u.cache_creation_input_tokens as f64 / u.input_tokens as f64)
+                * total_input_tokens as f64)
+                .round() as u64;
+            let create = total_input_tokens.saturating_sub(read).min(ratio_create);
+            (total_input_tokens, read, create)
+        } else {
+            (
+                total_input_tokens,
+                u.cache_read_input_tokens,
+                u.cache_creation_input_tokens,
+            )
+        }
+    } else {
+        let cur_total_in = u
+            .input_tokens
+            .saturating_add(u.cache_read_input_tokens)
+            .saturating_add(u.cache_creation_input_tokens);
+        if cur_total_in > 0 && total_input_tokens >= cur_total_in {
+            let ratio_read = ((u.cache_read_input_tokens as f64 / cur_total_in as f64)
+                * total_input_tokens as f64)
+                .round() as u64;
+            let read = total_input_tokens.min(ratio_read);
+            let ratio_create = ((u.cache_creation_input_tokens as f64 / cur_total_in as f64)
+                * total_input_tokens as f64)
+                .round() as u64;
+            let create = total_input_tokens.saturating_sub(read).min(ratio_create);
+            let uncached = total_input_tokens.saturating_sub(read.saturating_add(create));
+            (uncached, read, create)
+        } else if u.input_tokens > 0 && total_input_tokens > u.input_tokens {
+            let scale = total_input_tokens as f64 / u.input_tokens as f64;
+            let read = (u.cache_read_input_tokens as f64 * scale).round() as u64;
+            let create = (u.cache_creation_input_tokens as f64 * scale).round() as u64;
+            (total_input_tokens, read, create)
+        } else {
+            (
+                total_input_tokens,
+                u.cache_read_input_tokens,
+                u.cache_creation_input_tokens,
+            )
+        }
+    }
+}
+
 /// Compute single authoritative cascade cost from native cost or token fallback.
 pub fn resolve_cascade_cost_usd(snapshot: &PulseSnapshot, allow_routed_cost: bool) -> Option<f64> {
     let model_id = snapshot
@@ -77,44 +133,27 @@ pub fn resolve_cascade_cost_usd(snapshot: &PulseSnapshot, allow_routed_cost: boo
         })
         .unwrap_or("");
 
-    let input_tokens = if cw.has_total_input {
-        cw.total_input_tokens
-    } else {
-        cur.map(|u| u.input_tokens).unwrap_or(0)
-    };
     let output_tokens = if cw.total_output_tokens > 0 {
         cw.total_output_tokens
     } else {
         cur.map(|u| u.output_tokens).unwrap_or(0)
     };
 
-    let (cache_read_tokens, cache_creation_tokens) = if cw.has_total_input {
+    let (input_tokens, cache_read_tokens, cache_creation_tokens) = if cw.has_total_input {
         if cw.total_cache_read_tokens.is_some() || cw.total_cache_creation_tokens.is_some() {
             (
+                cw.total_input_tokens,
                 cw.total_cache_read_tokens.unwrap_or(0),
                 cw.total_cache_creation_tokens.unwrap_or(0),
             )
-        } else if let Some(u) = cur
-            && u.input_tokens > 0
-            && cw.total_input_tokens > u.input_tokens
-        {
-            let ratio_read = ((u.cache_read_input_tokens as f64 / u.input_tokens as f64)
-                * cw.total_input_tokens as f64)
-                .round() as u64;
-            let read = cw.total_input_tokens.min(ratio_read);
-            let ratio_create = ((u.cache_creation_input_tokens as f64 / u.input_tokens as f64)
-                * cw.total_input_tokens as f64)
-                .round() as u64;
-            let create = cw.total_input_tokens.saturating_sub(read).min(ratio_create);
-            (read, create)
+        } else if let Some(u) = cur {
+            extrapolate_cumulative_input_tokens(model_name, cw.total_input_tokens, u)
         } else {
-            (
-                cur.map(|u| u.cache_read_input_tokens).unwrap_or(0),
-                cur.map(|u| u.cache_creation_input_tokens).unwrap_or(0),
-            )
+            (cw.total_input_tokens, 0, 0)
         }
     } else {
         (
+            cur.map(|u| u.input_tokens).unwrap_or(0),
             cw.total_cache_read_tokens
                 .or_else(|| cur.map(|u| u.cache_read_input_tokens))
                 .unwrap_or(0),
