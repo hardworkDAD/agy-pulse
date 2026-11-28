@@ -1108,43 +1108,38 @@ fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_b
 #[test]
 fn uninstall_cleans_runtime_dir_artifacts_without_following_symlinks_and_preserves_ledger() {
     let env = IsolatedEnv::new();
-    let xdg_runtime = env.workspace_dir.join("xdg_runtime");
-    let xdg_pulse_dir = xdg_runtime.join("agy-pulse");
-    let xdg_fast_tmp = xdg_runtime.join("agy-pulse-tmp");
+    #[cfg(unix)]
+    let xdg_runtime = TempDir::new_in("/tmp").expect("short path for Unix sockets");
+    #[cfg(unix)]
+    let platform_runtime = xdg_runtime.path().join("agy-pulse");
+    #[cfg(windows)]
+    let platform_runtime = env.local_app_data.join("agy-pulse").join("runtime");
     let data_runtime_dir = env.cli_data_dir.join("runtime");
-    fs::create_dir_all(&xdg_pulse_dir).unwrap();
-    fs::create_dir_all(&xdg_fast_tmp).unwrap();
+    fs::create_dir_all(&platform_runtime).unwrap();
     fs::create_dir_all(&data_runtime_dir).unwrap();
 
-    // Seed runtime artifacts in XDG_RUNTIME_DIR/agy-pulse and AGY_PULSE_DATA_DIR/runtime
-    let xdg_collector_json = xdg_pulse_dir.join("collector.json");
-    let xdg_collector_lock = xdg_pulse_dir.join("collector.lock");
-    let xdg_collector_sock = xdg_pulse_dir.join("collector.sock");
-    let xdg_snap_global = xdg_pulse_dir.join("snap-global.json");
-    let xdg_snap_conv = xdg_pulse_dir.join("snap-0123456789abcdef.json");
-    let xdg_short_sock = xdg_runtime.join("agyp-0123456789abcdef.sock");
-    let xdg_fast_db = xdg_fast_tmp.join("agy-pulse-db-stale");
-    fs::create_dir_all(&xdg_fast_db).unwrap();
-    fs::write(xdg_fast_db.join("state.db"), b"tmp").unwrap();
-
-    for f in [
-        &xdg_collector_json,
-        &xdg_collector_lock,
-        &xdg_snap_global,
-        &xdg_snap_conv,
-    ] {
-        fs::write(f, b"{}").unwrap();
+    let runtime_files = [
+        platform_runtime.join("collector.json"),
+        platform_runtime.join("collector.lock"),
+        platform_runtime.join("snap-global.json"),
+        platform_runtime.join("snap-0123456789abcdef.json"),
+    ];
+    for file in &runtime_files {
+        fs::write(file, b"{}").unwrap();
     }
+    let socket = platform_runtime.join("collector.sock");
     #[cfg(unix)]
-    {
-        let _listener = std::os::unix::net::UnixListener::bind(&xdg_collector_sock).unwrap();
-        let _short_listener = std::os::unix::net::UnixListener::bind(&xdg_short_sock).unwrap();
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(&xdg_collector_sock, b"").unwrap();
-        fs::write(&xdg_short_sock, b"").unwrap();
-    }
+    let (short_socket, fast_db) = {
+        let short_socket = xdg_runtime.path().join("agyp-0123456789abcdef.sock");
+        let fast_db = xdg_runtime.path().join("agy-pulse-tmp/agy-pulse-db-stale");
+        fs::create_dir_all(&fast_db).unwrap();
+        fs::write(fast_db.join("state.db"), b"tmp").unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let _short_listener = std::os::unix::net::UnixListener::bind(&short_socket).unwrap();
+        (short_socket, fast_db)
+    };
+    #[cfg(windows)]
+    fs::write(&socket, b"").unwrap();
 
     let data_collector_json = data_runtime_dir.join("collector.json");
     let data_snap_global = data_runtime_dir.join("snap-global.json");
@@ -1164,12 +1159,11 @@ fn uninstall_cleans_runtime_dir_artifacts_without_following_symlinks_and_preserv
             .unwrap();
     }
 
-    let out = env
-        .cmd(&agypl_bin())
-        .arg("uninstall")
-        .env("XDG_RUNTIME_DIR", &xdg_runtime)
-        .output()
-        .unwrap();
+    let mut cmd = env.cmd(&agypl_bin());
+    cmd.arg("uninstall");
+    #[cfg(unix)]
+    cmd.env("XDG_RUNTIME_DIR", xdg_runtime.path());
+    let out = cmd.output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -1177,28 +1171,17 @@ fn uninstall_cleans_runtime_dir_artifacts_without_following_symlinks_and_preserv
         String::from_utf8_lossy(&out.stderr)
     );
 
-    assert!(
-        !xdg_collector_json.exists(),
-        "XDG collector.json must be removed"
-    );
-    assert!(
-        !xdg_collector_lock.exists(),
-        "XDG collector.lock must be removed"
-    );
-    assert!(
-        !xdg_collector_sock.exists(),
-        "XDG collector.sock must be removed"
-    );
-    assert!(
-        !xdg_snap_global.exists(),
-        "XDG snap-global.json must be removed"
-    );
-    assert!(!xdg_snap_conv.exists(), "XDG snap-*.json must be removed");
-    assert!(!xdg_short_sock.exists(), "XDG agyp-*.sock must be removed");
-    assert!(
-        !xdg_fast_db.exists(),
-        "XDG agy-pulse-tmp db dir must be removed"
-    );
+    for file in runtime_files.iter().chain([&socket]) {
+        assert!(!file.exists(), "uninstall should remove {}", file.display());
+    }
+    #[cfg(unix)]
+    {
+        assert!(!short_socket.exists(), "XDG agyp-*.sock must be removed");
+        assert!(
+            !fast_db.exists(),
+            "XDG agy-pulse-tmp db dir must be removed"
+        );
+    }
     assert!(
         !data_collector_json.exists(),
         "data runtime collector.json must be removed"
@@ -1217,19 +1200,19 @@ fn uninstall_cleans_runtime_dir_artifacts_without_following_symlinks_and_preserv
     // Subcase: XDG_RUNTIME_DIR/agy-pulse itself is a symlink to a victim directory
     #[cfg(unix)]
     {
-        if xdg_pulse_dir.exists() {
-            let _ = fs::remove_dir_all(&xdg_pulse_dir);
+        if platform_runtime.exists() {
+            let _ = fs::remove_dir_all(&platform_runtime);
         }
         let victim_dir = env.workspace_dir.join("victim-dir");
         fs::create_dir_all(&victim_dir).unwrap();
         fs::write(victim_dir.join("keep.txt"), b"keep").unwrap();
         fs::write(victim_dir.join("collector.json"), b"foreign").unwrap();
-        std::os::unix::fs::symlink(&victim_dir, &xdg_pulse_dir).unwrap();
+        std::os::unix::fs::symlink(&victim_dir, &platform_runtime).unwrap();
 
         let out2 = env
             .cmd(&agypl_bin())
             .arg("uninstall")
-            .env("XDG_RUNTIME_DIR", &xdg_runtime)
+            .env("XDG_RUNTIME_DIR", xdg_runtime.path())
             .output()
             .unwrap();
         assert_eq!(out2.status.code(), Some(0));

@@ -747,16 +747,26 @@ pub fn ensure_background_dashboard(
         args.push("--no-sync");
     }
 
-    let _child_pid = platform::spawn_detached(&exe_path, &args)
+    let child_pid = platform::spawn_detached(&exe_path, &args)
         .map_err(|err| format!("Failed to spawn background dashboard process: {err}"))?;
 
     let deadline = Instant::now() + DAEMON_START_TIMEOUT;
     loop {
         if let Some(running) = find_running_dashboard(host, port) {
-            return Ok(EnsureDashboardResult {
-                info: running,
-                reused: false,
-            });
+            let reused = running.pid != child_pid;
+            // The health endpoint can answer before the new daemon publishes its discovery file.
+            if reused
+                || read_dashboard_state().is_some_and(|state| {
+                    state.app == DASHBOARD_APP_ID
+                        && state.pid == child_pid
+                        && state.port == running.port
+                })
+            {
+                return Ok(EnsureDashboardResult {
+                    info: running,
+                    reused,
+                });
+            }
         }
         let now = Instant::now();
         if now >= deadline {

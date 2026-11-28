@@ -560,6 +560,10 @@ fn hanging_stdin_respects_1500ms_hard_timeout_and_exits_zero() {
         "expected ~1500ms timeout exit, took {:?}",
         elapsed
     );
+    assert!(
+        !env.data_dir.join("runtime").exists(),
+        "an empty stdin timeout should leave the collector idle"
+    );
 }
 
 #[test]

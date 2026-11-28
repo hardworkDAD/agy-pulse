@@ -233,14 +233,15 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
     let t_stdin = Instant::now();
     let (stdin_text, timed_out) = app::read_stdin_with_timeout(app::STDIN_HARD_TIMEOUT);
     let stdin_ms = t_stdin.elapsed().as_millis() as u64;
-    if timed_out && stdin_text.trim().is_empty() {
+    let empty_stdin_timeout = timed_out && stdin_text.trim().is_empty();
+    if empty_stdin_timeout {
         platform::write_error_log_safely("Statusline stdin read timed out after 1500ms");
     }
 
     let hard_cap = app::resolve_post_stdin_hard_cap(process_start.elapsed());
     let fallback_cwd = env::current_dir().unwrap_or_default();
 
-    if hard_cap <= Duration::from_millis(5) {
+    if empty_stdin_timeout || hard_cap <= Duration::from_millis(5) {
         let output = app::render_hard_timeout_fallback(&stdin_text, &fallback_cwd);
         write_stdout_safely(&output);
         profiler.finish(&format!("stdin={stdin_ms} hard_timeout_fallback=1"));

@@ -813,8 +813,9 @@ fn t11_foreground_state_file_and_background_dedupe() {
         .unwrap();
     assert!(open_out.status.success());
 
-    let state_before: Value =
-        serde_json::from_str(&fs::read_to_string(env_bg.state_file_path()).unwrap()).unwrap();
+    let state_raw =
+        fs::read_to_string(env_bg.state_file_path()).expect("dashboard open published discovery");
+    let state_before: Value = serde_json::from_str(&state_raw).unwrap();
     let pid_before = state_before["pid"].as_u64().unwrap();
 
     fs::write(env_bg.lock_file_path(), r#"{"pid":1,"ts":0}"#).unwrap();
