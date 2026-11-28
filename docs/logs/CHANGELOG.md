@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.1.0] - 2026-11-28
+
+### Added
+- **Multi-Device Object Sync & Ledger Schema v4 (`src/sync/`, `src/ledger/`, ADR-0004)**:
+  - Added single-writer-per-device monthly gzipped chunk sync (`local-dir`, `webdav`, pure-Rust SigV4 `s3`, and `cf-worker` with `deploy/cloudflare-worker/` template), storing credentials exclusively in global `0600` `agy-pulse-sync.json` (never in workspace config).
+  - Added `agypl sync [init|status|prune-device]` and `agypl account assign <email>`, throttled background `--sync-bg` pushes, cross-device **Quota Snapshots**, and Dashboard multi-account/multi-device filters + quota cards + non-blocking `/api/sync-remote`.
+- **Zero-Login Dashboard Config API & Standalone `/settings` Page (`src/dashboard/config_api.rs`, `dashboard.html`, ADR-0005)**:
+  - Redesigned the embedded Web Dashboard with Bento cards, Spend Distribution donut, 3-column Rankings, Core Trends tabs, toast notifications, and a draggable Floating Glass Dock.
+  - Added a dedicated standalone Settings page (`/settings`, `/settings/pulse`, `/settings/sync`) with History API routing, full-width pinnable live ANSI **Statusline** preview rendered directly by the Rust engine, 2×2 Bento config cards, 12 deduplicated statusline toggles (`cacheHitThresholds` wired end-to-end), and a sticky Sync Config sidebar with write-only credentials (`keep`/`set`/`clear`), live connection probe, `409 Conflict` optimistic locking, and safe config deletion.
+  - Protected all `/api/config/*` routes with process-scoped 64-hex CSRF tokens (`X-Agy-Pulse-Token`), strict same-origin checks, JSON `Content-Type` enforcement, and `redact_sync_error_message` error sanitization.
+- **Thin Statusline Client, Resident Collector & In-Memory WAL Merge (`src/collector/`, `src/ingest/sqlite_ro.rs`, ADR-0006)**:
+  - Isolated the hot-path `agy-pulse` statusline as a thin zero-SQLite client backed by a single-instance resident collector (embedded in the background dashboard daemon or standalone `--collector-bg`) with `tmpfs` precomputed snapshots, eliminating Linux D-state 5 s SIGKILL hangs.
+  - Enabled `rusqlite` `serialize` to merge committed WAL frames in memory via `sqlite3_deserialize` (zero `/tmp/agy-pulse-db-*` copies and zero fsync storms), deduplicated active DB reads from 3× to 1× per refresh, and added stale temp-dir sweeping.
+
+### Changed & Fixed
+- **Performance & Reliability**:
+  - Accelerated `>8 MB` two-pass transcript scanning with chunk-level Horspool & `memchr`, bounded statusline SQLite busy retries by wall-clock budget, enforced end-to-end statusline exit deadlines, and coalesced small HTTP responses with graceful half-close on early `400`/`413` rejections.
+  - Deduplicated 17 legacy display toggles down to 12 canonical segments and moved the local Dashboard URL onto its own dedicated bottom line.
+  - Fixed a collector `worker_busy` release ordering race so immediate sequential statusline invocations never receive spurious `Busy` fallbacks, and added a single retry on idle-shutdown disconnects (`tests/t12`–`tests/t16`).
+
 ## [2.0.0] - 2026-11-21
 
 ### Breaking Changes & Architecture Overhaul

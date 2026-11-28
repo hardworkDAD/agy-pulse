@@ -1,6 +1,6 @@
 # agy-pulse Module Reference
 
-> **Version:** 2.0.0 — Deep-Module Contracts (`src/lib.rs` enforces `#![deny(clippy::unwrap_used, clippy::expect_used)]`)
+> **Version:** 2.1.0 — Deep-Module Contracts (`src/lib.rs` enforces `#![deny(clippy::unwrap_used, clippy::expect_used)]`)
 
 ---
 

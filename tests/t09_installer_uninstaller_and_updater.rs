@@ -383,7 +383,7 @@ fn install_registers_statusline_repairs_corrupt_settings_and_never_touches_offic
 
     let ver_out = env.cmd(&deployed_alias).arg("--version").output().unwrap();
     assert_eq!(ver_out.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&ver_out.stdout).contains("2.0.0"));
+    assert!(String::from_utf8_lossy(&ver_out.stdout).contains(env!("CARGO_PKG_VERSION")));
 
     // Verify settings.json preserved unrelated keys & stack_with_default
     let settings: Value =
@@ -441,7 +441,7 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
     let env = IsolatedEnv::new();
     let server = LocalHttpServer::start(|path| {
         if path == "/latest.json" {
-            MockResponse::json(200, r#"{"version":"2.1.0"}"#)
+            MockResponse::json(200, r#"{"version":"99.1.0"}"#)
         } else {
             MockResponse::json(404, "{}")
         }
@@ -459,8 +459,8 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
     let status_val: Value =
         serde_json::from_str(&fs::read_to_string(env.update_status_path()).unwrap()).unwrap();
     assert_eq!(status_val["updateAvailable"], true);
-    assert_eq!(status_val["latestVersion"], "2.1.0");
-    assert_eq!(status_val["localVersion"], "2.0.0");
+    assert_eq!(status_val["latestVersion"], "99.1.0");
+    assert_eq!(status_val["localVersion"], env!("CARGO_PKG_VERSION"));
     assert!(status_val["lastCheck"].as_i64().unwrap() > 0);
 
     // 2. Statusline hot path reads local update status and renders quiet update prompt
@@ -488,14 +488,14 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
     assert_eq!(statusline_out.status.code(), Some(0));
     let rendered = String::from_utf8_lossy(&statusline_out.stdout);
     assert!(
-        rendered.contains("v2.1.0") && !rendered.contains("vv2.1.0"),
-        "statusline must render v2.1.0 update hint cleanly, got: {rendered}"
+        rendered.contains("v99.1.0") && !rendered.contains("vv99.1.0"),
+        "statusline must render v99.1.0 update hint cleanly, got: {rendered}"
     );
 
     // 3. After 24h cooldown expires, statusline spawns detached --check-update-bg asynchronously
     let server2 = LocalHttpServer::start(|path| {
         if path == "/latest.json" {
-            MockResponse::json(200, r#"{"tag_name":"v2.2.0"}"#)
+            MockResponse::json(200, r#"{"tag_name":"v99.2.0"}"#)
         } else {
             MockResponse::json(404, "{}")
         }
@@ -510,8 +510,8 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
         serde_json::to_string_pretty(&serde_json::json!({
             "lastCheck": stale_ms,
             "updateAvailable": false,
-            "latestVersion": "2.0.0",
-            "localVersion": "2.0.0"
+            "latestVersion": env!("CARGO_PKG_VERSION"),
+            "localVersion": env!("CARGO_PKG_VERSION")
         }))
         .unwrap(),
     )
@@ -540,23 +540,23 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
         "statusline must not block on background update check"
     );
 
-    // Wait up to 3s for detached child to finish writing 2.2.0
+    // Wait up to 3s for detached child to finish writing 99.2.0
     let deadline = Instant::now() + Duration::from_secs(3);
-    let mut observed_2_2_0 = false;
+    let mut observed_99_2_0 = false;
     while Instant::now() < deadline {
         if let Ok(raw) = fs::read_to_string(env.update_status_path())
             && let Ok(val) = serde_json::from_str::<Value>(&raw)
-            && val["latestVersion"] == "2.2.0"
+            && val["latestVersion"] == "99.2.0"
             && val["updateAvailable"] == true
         {
-            observed_2_2_0 = true;
+            observed_99_2_0 = true;
             break;
         }
         thread::sleep(Duration::from_millis(25));
     }
     assert!(
-        observed_2_2_0,
-        "detached --check-update-bg must update agy-pulse-update-status.json to 2.2.0"
+        observed_99_2_0,
+        "detached --check-update-bg must update agy-pulse-update-status.json to 99.2.0"
     );
 }
 
@@ -640,13 +640,13 @@ fn manual_update_verifies_sha256_rejects_downgrade_and_atomically_replaces_binar
     // Prepare updated binary payload for archive
     #[cfg(unix)]
     let updated_bin_bytes: Vec<u8> =
-        b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"agy-pulse v2.1.0\"; exit 0; fi\necho \"updated-v2.1.0\"\n"
+        b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"agy-pulse v99.1.0\"; exit 0; fi\necho \"updated-v99.1.0\"\n"
             .to_vec();
     #[cfg(windows)]
     let updated_bin_bytes: Vec<u8> = {
         let mut buf = fs::read(agypl_bin()).unwrap();
         // Append benign trailing padding so SHA-256 & byte comparison verify replacement while PE executes
-        buf.extend_from_slice(b"\nAGY_PULSE_TEST_2_1_0\n");
+        buf.extend_from_slice(b"\nAGY_PULSE_TEST_99_1_0\n");
         buf
     };
 
@@ -658,7 +658,7 @@ fn manual_update_verifies_sha256_rejects_downgrade_and_atomically_replaces_binar
     let bad_archive = archive_bytes.clone();
     let bad_server = LocalHttpServer::start(move |path| {
         if path == "/latest.json" {
-            MockResponse::json(200, r#"{"tag_name":"v2.1.0"}"#)
+            MockResponse::json(200, r#"{"tag_name":"v99.1.0"}"#)
         } else if path == "/releases/SHA256SUMS" {
             MockResponse::bytes(
                 200,
@@ -700,7 +700,7 @@ fn manual_update_verifies_sha256_rejects_downgrade_and_atomically_replaces_binar
     let good_sum = format!("{valid_sha256}  {asset_name}\n");
     let good_server = LocalHttpServer::start(move |path| {
         if path == "/latest.json" {
-            MockResponse::json(200, r#"{"tag_name":"v2.1.0"}"#)
+            MockResponse::json(200, r#"{"tag_name":"v99.1.0"}"#)
         } else if path == "/releases/SHA256SUMS" {
             MockResponse::bytes(200, good_sum.as_bytes().to_vec())
         } else if path == format!("/releases/{asset_name}") {
@@ -739,7 +739,7 @@ fn manual_update_verifies_sha256_rejects_downgrade_and_atomically_replaces_binar
     assert_eq!(new_ver_out.status.code(), Some(0));
     #[cfg(unix)]
     assert!(
-        String::from_utf8_lossy(&new_ver_out.stdout).contains("2.1.0"),
+        String::from_utf8_lossy(&new_ver_out.stdout).contains("99.1.0"),
         "replaced binary must execute new version"
     );
 }

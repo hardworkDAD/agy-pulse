@@ -1,7 +1,7 @@
 # agy-pulse Architecture
 
-> **Version:** 2.0.0  
-> **Last updated:** aligned to single-binary native Rust architecture ([ADR-0001](./adr/0001-rust-single-binary-v2.md), [ADR-0002](./adr/0002-remove-cloud-quota-requests.md), [ADR-0003](./adr/0003-deep-module-single-crate.md), [ADR-0004](./adr/0004-multi-device-object-sync.md), [ADR-0005](./adr/0005-dashboard-local-config-management.md))
+> **Version:** 2.1.0  
+> **Last updated:** aligned to single-binary native Rust architecture ([ADR-0001](./adr/0001-rust-single-binary-v2.md), [ADR-0002](./adr/0002-remove-cloud-quota-requests.md), [ADR-0003](./adr/0003-deep-module-single-crate.md), [ADR-0004](./adr/0004-multi-device-object-sync.md), [ADR-0005](./adr/0005-dashboard-local-config-management.md), [ADR-0006](./adr/0006-thin-statusline-collector-and-inmem-wal.md))
 
 ## Overview
 
@@ -16,7 +16,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  HOST PLUGIN MANIFESTS (staged by `agy plugin install`)                 │
-│   plugin.json · gemini-extension.json (2.0.0) · skills/pulse-config/    │
+│   plugin.json · gemini-extension.json (2.1.0) · skills/pulse-config/    │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │  scripts/install.sh (.ps1) / deploy-local.sh
 ┌────────────────────────────────────▼────────────────────────────────────┐

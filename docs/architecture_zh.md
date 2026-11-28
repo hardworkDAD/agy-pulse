@@ -1,7 +1,7 @@
 # agy-pulse 系统架构与数据流
 
-> **版本：** 2.0.0  
-> **更新说明：** 对齐单一原生 Rust 二进制深模块架构（[ADR-0001](./adr/0001-rust-single-binary-v2.md)、[ADR-0002](./adr/0002-remove-cloud-quota-requests.md)、[ADR-0003](./adr/0003-deep-module-single-crate.md)、[ADR-0004](./adr/0004-multi-device-object-sync.md)、[ADR-0005](./adr/0005-dashboard-local-config-management.md)）
+> **版本：** 2.1.0  
+> **更新说明：** 对齐单一原生 Rust 二进制深模块架构（[ADR-0001](./adr/0001-rust-single-binary-v2.md)、[ADR-0002](./adr/0002-remove-cloud-quota-requests.md)、[ADR-0003](./adr/0003-deep-module-single-crate.md)、[ADR-0004](./adr/0004-multi-device-object-sync.md)、[ADR-0005](./adr/0005-dashboard-local-config-management.md)、[ADR-0006](./adr/0006-thin-statusline-collector-and-inmem-wal.md)）
 
 ## 概览
 

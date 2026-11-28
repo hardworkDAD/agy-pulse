@@ -152,7 +152,7 @@ bash uninstall.sh        # macOS / Linux
 - [完整参考手册 (中文)](./docs/reference_zh.md) · [Reference Manual (English)](./docs/reference.md) — 全量 CLI 参数、配置项、环境变量与目录树
 - [系统架构 (中文)](./docs/architecture_zh.md) · [Architecture (English)](./docs/architecture.md) — Rust 深模块架构、数据流与 ADR 决策记录
 - [模块参考](./docs/module-reference.md) — 各模块公开接口、不变量与行为契约
-- [变更日志](./docs/logs/CHANGELOG.md) · [文档索引](./docs/README.md) — `v2.0.0` 变更明细与维护者索引
+- [变更日志](./docs/logs/CHANGELOG.md) · [文档索引](./docs/README.md) — 版本变更明细与维护者索引
 
 ## 参考项目与致谢
 

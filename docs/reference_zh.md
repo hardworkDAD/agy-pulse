@@ -2,7 +2,7 @@
 
 [English](./reference.md) · [返回主页](../README_zh.md) · [文档索引](./README.md)
 
-本文档提供 `agy-pulse` v2.0.0 完整的 CLI 命令与参数全表、统一 SQLite WAL **账本**与本地**网页看板**机制、全量配置项、环境变量、自建 Fork 安装、本地开发与完整源码目录结构。
+本文档提供 `agy-pulse` v2.1.0 完整的 CLI 命令与参数全表、统一 SQLite WAL **账本**与本地**网页看板**机制、全量配置项、环境变量、自建 Fork 安装、本地开发与完整源码目录结构。
 
 ---
 
@@ -499,7 +499,7 @@ agy-pulse/
 ├── LICENSE                            # MIT 开源许可证
 ├── NOTICE                             # 开源项目归属与致谢声明
 ├── plugin.json                        # {"name":"agy-pulse"}
-├── gemini-extension.json              # agy 插件清单元数据 (v2.0.0)
+├── gemini-extension.json              # agy 插件清单元数据 (v2.1.0)
 ├── release.sh                         # 校验、本地打包与 Tag 发版脚本
 ├── uninstall.sh / uninstall.ps1       # 零 Node 跨端卸载脚本
 ├── .github/workflows/

@@ -2,7 +2,7 @@
 
 [简体中文](./reference_zh.md) · [Back to README](../README.md) · [Docs Index](./README.md)
 
-Complete technical reference for `agy-pulse` v2.0.0 CLI commands, flags, unified SQLite WAL **Ledger**, local Web **Dashboard**, configuration schema, environment variables, custom forks, local development, and repository layout.
+Complete technical reference for `agy-pulse` v2.1.0 CLI commands, flags, unified SQLite WAL **Ledger**, local Web **Dashboard**, configuration schema, environment variables, custom forks, local development, and repository layout.
 
 ---
 
@@ -497,7 +497,7 @@ agy-pulse/
 ├── LICENSE                            # Standard MIT License
 ├── NOTICE                             # Open-source attribution & reference notices
 ├── plugin.json                        # {"name":"agy-pulse"}
-├── gemini-extension.json              # agy plugin manifest (v2.0.0)
+├── gemini-extension.json              # agy plugin manifest (v2.1.0)
 ├── release.sh                         # Official local & tag release helper
 ├── uninstall.sh / uninstall.ps1       # Zero-Node cross-platform uninstallers
 ├── .github/workflows/

@@ -126,9 +126,10 @@ fn cli_supports_version_and_help_on_both_binaries() {
         let ver_out = env.cmd(&bin).arg("--version").output().unwrap();
         assert_eq!(ver_out.status.code(), Some(0));
         let ver_text = String::from_utf8_lossy(&ver_out.stdout);
+        let expected_ver = env!("CARGO_PKG_VERSION");
         assert!(
-            ver_text.contains("2.0.0"),
-            "version output must contain 2.0.0, got: {ver_text}"
+            ver_text.contains(expected_ver),
+            "version output must contain {expected_ver}, got: {ver_text}"
         );
 
         let help_out = env.cmd(&bin).arg("--help").output().unwrap();

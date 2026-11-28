@@ -1059,7 +1059,7 @@ mod unix_packaging_e2e {
                 MockResponse {
                     status: 200,
                     headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-                    body: br#"{"tag_name":"v2.1.0"}"#.to_vec(),
+                    body: br#"{"tag_name":"v99.0.0"}"#.to_vec(),
                 }
             } else if path == "/SHA256SUMS" {
                 MockResponse {
