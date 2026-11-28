@@ -151,7 +151,7 @@ fn connect_or_spawn_collector(wait_budget: Duration) -> Option<(IpcStream, Strin
     }
 
     let poll_cap = SPAWN_WAIT_CAP
-        .min(remaining / 2)
+        .min(remaining.saturating_mul(3) / 4)
         .max(Duration::from_millis(50))
         .min(remaining);
     let poll_deadline = Instant::now() + poll_cap;
@@ -173,6 +173,16 @@ fn connect_or_spawn_collector(wait_budget: Duration) -> Option<(IpcStream, Strin
         }
         backoff_ms = (backoff_ms * 2).min(10);
     }
+}
+
+fn is_retryable_disconnect(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+    )
 }
 
 fn write_stdout_safely(output: &str) {
@@ -257,10 +267,25 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
     let env_overrides = collect_forwarded_env_overrides();
 
     let rpc_deadline = Instant::now() + wait_budget;
-    let summary = if let Some((mut stream, token)) = connect_or_spawn_collector(wait_budget)
-        && let Some(remaining) = rpc_deadline.checked_duration_since(Instant::now())
-        && !remaining.is_zero()
-    {
+    let mut ready_summary: Option<String> = None;
+
+    for attempt in 0..2 {
+        let Some(connect_budget) = rpc_deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        if connect_budget.is_zero() {
+            break;
+        }
+        let Some((mut stream, token)) = connect_or_spawn_collector(connect_budget) else {
+            break;
+        };
+        let Some(remaining) = rpc_deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        if remaining.is_zero() {
+            break;
+        }
+
         let _ = stream.set_write_timeout(Some(remaining.min(Duration::from_millis(200))));
         let _ = stream.set_read_timeout(Some(remaining));
         let req = CollectorWireRequest::Collect(CollectorRequest {
@@ -268,16 +293,17 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
             stdin_text: stdin_text.clone(),
             fallback_cwd: fallback_cwd.clone(),
             stdin_ms,
-            conversation_key,
+            conversation_key: conversation_key.clone(),
             has_warm_snapshot,
             wait_ms: remaining.as_millis() as u64,
             soft_budget_ms,
-            env_overrides,
+            env_overrides: env_overrides.clone(),
         });
-        if write_frame(&mut stream, &req).is_ok() {
-            match read_frame::<_, CollectorWireResponse>(&mut stream) {
+
+        let retryable = match write_frame(&mut stream, &req) {
+            Ok(()) => match read_frame::<_, CollectorWireResponse>(&mut stream) {
                 Ok(CollectorWireResponse::Ready(payload)) => {
-                    if !payload.enabled {
+                    ready_summary = Some(if !payload.enabled {
                         payload.summary
                     } else {
                         let (output, render_ms) = crate::render_snapshot_for_terminal(
@@ -286,35 +312,29 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
                         );
                         write_stdout_safely(&output);
                         format!("{} render={render_ms}", payload.summary)
-                    }
+                    });
+                    break;
                 }
-                Ok(CollectorWireResponse::Busy | CollectorWireResponse::Error(_)) | Err(_) => {
-                    render_fallback(
-                        warm_snap.as_ref(),
-                        global_snap.as_ref(),
-                        &stdin_text,
-                        &fallback_cwd,
-                        stdin_ms,
-                    )
-                }
-                Ok(_) => render_fallback(
-                    warm_snap.as_ref(),
-                    global_snap.as_ref(),
-                    &stdin_text,
-                    &fallback_cwd,
-                    stdin_ms,
-                ),
-            }
-        } else {
-            render_fallback(
-                warm_snap.as_ref(),
-                global_snap.as_ref(),
-                &stdin_text,
-                &fallback_cwd,
-                stdin_ms,
-            )
+                Ok(CollectorWireResponse::Error(msg)) if msg == "shutting down" => true,
+                Err(err) if is_retryable_disconnect(&err) => true,
+                Ok(_) | Err(_) => false,
+            },
+            Err(err) => is_retryable_disconnect(&err),
+        };
+
+        if !retryable || attempt > 0 {
+            break;
         }
-    } else {
+        if let Some(left) = rpc_deadline.checked_duration_since(Instant::now())
+            && left > Duration::from_millis(25)
+        {
+            thread::sleep(Duration::from_millis(10));
+        } else {
+            break;
+        }
+    }
+
+    let summary = ready_summary.unwrap_or_else(|| {
         render_fallback(
             warm_snap.as_ref(),
             global_snap.as_ref(),
@@ -322,7 +342,7 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
             &fallback_cwd,
             stdin_ms,
         )
-    };
+    });
 
     profiler.finish(&summary);
 }

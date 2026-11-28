@@ -885,3 +885,73 @@ fn t16_unified_dashboard_takes_over_headless_collector() {
         "unified dashboard PID {pid2} and collector.json must clean up after dashboard stop"
     );
 }
+
+#[test]
+fn t16_sequential_warm_statusline_requests_never_get_spurious_busy() {
+    let env = IsolatedEnv::new();
+    let _cleanup = CollectorCleanup {
+        runtime_dir: env.runtime_dir.clone(),
+        data_dir: env.data_dir.clone(),
+    };
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showContextMonitor": true,
+                "showModelCache": true,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let transcript_path = env.workspace_dir.join("rapid-seq.jsonl");
+    let stdin_payload = serde_json::json!({
+        "conversation_id": "conv-t16-rapid-seq",
+        "transcript_path": transcript_path.to_string_lossy(),
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" }
+    })
+    .to_string();
+
+    for turn in 1..=12u64 {
+        let entry = serde_json::json!({
+            "step_index": turn,
+            "type": "PLANNER_RESPONSE",
+            "created_at": format!("2026-11-28T00:00:{turn:02}Z"),
+            "model": "gemini-4-carbon-high",
+            "context_window": {
+                "context_window_size": 500_000,
+                "current_usage": {
+                    "input_tokens": 10_000,
+                    "output_tokens": 75,
+                    "cache_read_input_tokens": 5_000,
+                    "cache_creation_input_tokens": 0
+                }
+            }
+        });
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&transcript_path)
+            .unwrap();
+        writeln!(f, "{entry}").unwrap();
+        drop(f);
+
+        let (code, stdout, stderr, _) = env.run_statusline(
+            &stdin_payload,
+            &[
+                ("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1"),
+                ("COLUMNS", "140"),
+            ],
+        );
+        assert_eq!(code, 0, "turn {turn} stderr: {stderr}");
+        let plain = strip_ansi(&stdout);
+        let expected_out = format!("Out {}", turn * 75);
+        assert!(
+            plain.contains(&expected_out),
+            "turn {turn} must not fall back to stale warm snapshot (expected {expected_out}):\n{plain}"
+        );
+    }
+}

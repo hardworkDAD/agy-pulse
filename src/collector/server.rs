@@ -608,16 +608,9 @@ fn run_worker_loop(
             res
         });
 
-        let response = CollectorWireResponse::Ready(Box::new(CollectorReadyPayload {
-            enabled: enrichment.enabled,
-            snapshot: enrichment.snapshot,
-            config: enrichment.config,
-            summary: enrichment.summary,
-        }));
-        for tx in job.waiters {
-            let _ = tx.send(response.clone());
-        }
-
+        // Clear `worker_busy` BEFORE waking waiters so an immediate sequential
+        // statusline invocation never observes a stale `worker_busy == true`
+        // and receives a spurious `Busy` fallback.
         let should_cleanup_now = {
             let (lock, _) = &*queue;
             let Ok(mut guard) = lock.lock() else {
@@ -632,6 +625,16 @@ fn run_worker_loop(
                 false
             }
         };
+
+        let response = CollectorWireResponse::Ready(Box::new(CollectorReadyPayload {
+            enabled: enrichment.enabled,
+            snapshot: enrichment.snapshot,
+            config: enrichment.config,
+            summary: enrichment.summary,
+        }));
+        for tx in job.waiters {
+            let _ = tx.send(response.clone());
+        }
 
         if should_cleanup_now {
             spawn_stale_cleanup_thread(last_env);
