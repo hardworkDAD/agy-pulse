@@ -1251,11 +1251,26 @@ mod unix_packaging_e2e {
         sse.flush().unwrap();
         let mut head_buf = [0u8; 256];
         let _ = sse.read(&mut head_buf);
+        let (html_status, html_body) = send_http(dash_port, "GET", "/", &[]).unwrap();
+        assert_eq!(html_status, 200);
+        let csrf_marker = "var CSRF_TOKEN = '";
+        let csrf_start = html_body
+            .find(csrf_marker)
+            .expect("CSRF_TOKEN in dashboard HTML")
+            + csrf_marker.len();
+        let csrf_rest = &html_body[csrf_start..];
+        let csrf_end = csrf_rest.find('\'').expect("closing quote for CSRF_TOKEN");
+        let csrf_token = csrf_rest[..csrf_end].to_string();
+
         let (disc_status, _) = send_http(
             dash_port,
             "POST",
             "/api/disconnect?client=e2e-tab",
-            &[("Origin", &format!("http://127.0.0.1:{dash_port}"))],
+            &[
+                ("Origin", &format!("http://127.0.0.1:{dash_port}")),
+                ("Sec-Fetch-Site", "same-origin"),
+                ("X-Agy-Pulse-Token", &csrf_token),
+            ],
         )
         .unwrap();
         assert_eq!(disc_status, 200);

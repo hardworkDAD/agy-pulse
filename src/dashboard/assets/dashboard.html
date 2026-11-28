@@ -5781,7 +5781,10 @@
         var url = '/api/sync-remote' + (force ? '?force=true' : '');
         var res = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Agy-Pulse-Token': CSRF_TOKEN
+          },
           body: JSON.stringify({ force: !!force }),
           cache: 'no-store'
         });
@@ -5811,7 +5814,11 @@
       btn.disabled = true;
       icon.classList.add('spin');
       try {
-        var res = await fetch('/api/sync', { method: 'POST', cache: 'no-store' });
+        var res = await fetch('/api/sync', {
+          method: 'POST',
+          headers: { 'X-Agy-Pulse-Token': CSRF_TOKEN },
+          cache: 'no-store'
+        });
         var json = await res.json();
         if (!res.ok || !json.ok) {
           throw new Error(json.error || ('HTTP ' + res.status));
@@ -8279,6 +8286,7 @@
     function sendPing() {
       fetch('/api/ping?client=' + encodeURIComponent(clientId), {
         method: 'POST',
+        headers: { 'X-Agy-Pulse-Token': CSRF_TOKEN },
         keepalive: true
       }).catch(function () {});
     }
@@ -8291,13 +8299,12 @@
         keepaliveSource = null;
       }
       var url = '/api/disconnect?client=' + encodeURIComponent(clientId);
-      if (navigator && typeof navigator.sendBeacon === 'function') {
-        try {
-          if (navigator.sendBeacon(url)) return;
-        } catch (e) {}
-      }
       try {
-        fetch(url, { method: 'POST', keepalive: true }).catch(function () {});
+        fetch(url, {
+          method: 'POST',
+          headers: { 'X-Agy-Pulse-Token': CSRF_TOKEN },
+          keepalive: true
+        }).catch(function () {});
       } catch (e) {}
     }
 

@@ -19,7 +19,7 @@ use crate::sync::{
 };
 
 use super::http_wire::{
-    HttpRequest, constant_time_eq, is_json_content_type, is_strict_same_origin,
+    HttpRequest, has_valid_csrf_token, is_json_content_type, is_strict_same_origin,
 };
 use super::server::{ServerSharedState, refresh_sync_identity_hints, send_json_value};
 
@@ -76,10 +76,7 @@ pub(super) fn check_config_security(
     shared: &ServerSharedState,
     require_json_body: bool,
 ) -> bool {
-    let valid_csrf = req.header("x-agy-pulse-token").is_some_and(|token| {
-        constant_time_eq(token.as_bytes(), shared.csrf_token.as_bytes())
-    });
-    if !valid_csrf {
+    if !has_valid_csrf_token(req, &shared.csrf_token) {
         send_config_error(stream, 403, "invalid or missing CSRF token", None);
         return false;
     }

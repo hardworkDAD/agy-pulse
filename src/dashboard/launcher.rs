@@ -141,6 +141,23 @@ pub fn read_dashboard_state() -> Option<DashboardStateFile> {
     Some(parsed)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardStateWithCsrf<'a> {
+    #[serde(flatten)]
+    state: &'a DashboardStateFile,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    csrf_token: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardStateTokenView {
+    port: u16,
+    #[serde(default)]
+    csrf_token: Option<String>,
+}
+
 /// Atomically persist `agy-pulse-dashboard.json` with `0600` permissions.
 pub fn write_dashboard_state(state: &DashboardStateFile) -> io::Result<PathBuf> {
     let path = dashboard_state_path();
@@ -148,6 +165,34 @@ pub fn write_dashboard_state(state: &DashboardStateFile) -> io::Result<PathBuf> 
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     platform::write_atomic_0600(&path, &bytes)?;
     Ok(path)
+}
+
+/// Atomically persist `agy-pulse-dashboard.json` (`0600`) including the process CSRF token.
+pub(super) fn write_dashboard_state_with_csrf(
+    state: &DashboardStateFile,
+    csrf_token: &str,
+) -> io::Result<PathBuf> {
+    let path = dashboard_state_path();
+    let wrapped = DashboardStateWithCsrf {
+        state,
+        csrf_token: Some(csrf_token).filter(|t| !t.trim().is_empty()),
+    };
+    let bytes = serde_json::to_vec_pretty(&wrapped)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    platform::write_atomic_0600(&path, &bytes)?;
+    Ok(path)
+}
+
+fn read_dashboard_csrf_token(port: u16) -> Option<String> {
+    let path = dashboard_state_path();
+    let raw = fs::read_to_string(path).ok()?;
+    let view: DashboardStateTokenView = serde_json::from_str(&raw).ok()?;
+    if view.port != port {
+        return None;
+    }
+    view.csrf_token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 /// Remove `agy-pulse-dashboard.json` only if its `pid` matches `owner_pid`.
@@ -415,6 +460,61 @@ pub fn resolve_dashboard_url_for_statusline(
     })
 }
 
+fn fetch_csrf_token_from_index(
+    addr: SocketAddr,
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Option<String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    let mut stream = TcpStream::connect_timeout(&addr, remaining).ok()?;
+    let rem = deadline.saturating_duration_since(Instant::now());
+    if rem.is_zero() {
+        return None;
+    }
+    let _ = stream.set_read_timeout(Some(rem));
+    let _ = stream.set_write_timeout(Some(rem));
+    let req = format!("GET / HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).ok()?;
+    stream.flush().ok()?;
+
+    let mut raw = Vec::with_capacity(16 * 1024);
+    let mut buf = [0u8; 4096];
+    let marker = "var CSRF_TOKEN = '";
+    loop {
+        if raw.len() >= 1024 * 1024 {
+            break;
+        }
+        let rem = deadline.saturating_duration_since(Instant::now());
+        if rem.is_zero() {
+            break;
+        }
+        let _ = stream.set_read_timeout(Some(rem));
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw);
+                if let Some(idx) = text.find(marker) {
+                    let rest = &text[idx + marker.len()..];
+                    if let Some(end) = rest.find('\'') {
+                        let tok = rest[..end].trim();
+                        if !tok.is_empty() {
+                            return Some(tok.to_string());
+                        }
+                        return None;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    None
+}
+
 /// Send a short-timeout `POST /api/ping` keep-alive to a loopback dashboard server.
 pub fn ping_dashboard(host: &str, port: u16, timeout_ms: u64) -> bool {
     if port == 0 {
@@ -431,15 +531,37 @@ pub fn ping_dashboard(host: &str, port: u16, timeout_ms: u64) -> bool {
     };
 
     let timeout = Duration::from_millis(timeout_ms.max(1));
+    let deadline = Instant::now() + timeout;
     let addr = SocketAddr::new(ip, port);
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, timeout) else {
+
+    let csrf_token = read_dashboard_csrf_token(port)
+        .or_else(|| fetch_csrf_token_from_index(addr, host, port, deadline));
+    let Some(csrf_token) = csrf_token else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return false;
+    }
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, remaining) else {
+        return false;
+    };
+    let io_timeout = deadline.saturating_duration_since(Instant::now());
+    if io_timeout.is_zero() {
+        return false;
+    }
+    let _ = stream.set_read_timeout(Some(io_timeout));
+    let _ = stream.set_write_timeout(Some(io_timeout));
 
     let req = format!(
-        "POST /api/ping HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "POST /api/ping HTTP/1.1\r\n\
+         Host: {host}:{port}\r\n\
+         Origin: http://{host}:{port}\r\n\
+         Sec-Fetch-Site: same-origin\r\n\
+         X-Agy-Pulse-Token: {csrf_token}\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\r\n"
     );
     if stream.write_all(req.as_bytes()).is_err() || stream.flush().is_err() {
         return false;
@@ -1213,5 +1335,54 @@ pub fn get_desktop_shortcut_status() -> ShortcutStatus {
                 path: None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static STATE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct StateEnvGuard(Option<std::ffi::OsString>);
+
+    impl Drop for StateEnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                // SAFETY: serialized via `STATE_ENV_LOCK`.
+                Some(v) => unsafe { env::set_var("AGY_PULSE_DATA_DIR", v) },
+                None => unsafe { env::remove_var("AGY_PULSE_DATA_DIR") },
+            }
+        }
+    }
+
+    #[test]
+    fn state_file_persists_csrf_token_and_remains_backward_compatible() {
+        let _lock = STATE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(tmp) = TempDir::new() else {
+            panic!("tempdir");
+        };
+        let _guard = StateEnvGuard(env::var_os("AGY_PULSE_DATA_DIR"));
+        // SAFETY: serialized via `STATE_ENV_LOCK`.
+        unsafe { env::set_var("AGY_PULSE_DATA_DIR", tmp.path()) };
+
+        let state = DashboardStateFile {
+            app: DASHBOARD_APP_ID.to_string(),
+            pid: std::process::id(),
+            port: 4123,
+            host: LOOPBACK_HOST.to_string(),
+            url: "http://127.0.0.1:4123".to_string(),
+            idle_timeout_ms: 60_000,
+            started_at: "2026-01-01T00:00:00.000Z".to_string(),
+        };
+        let Ok(path) = write_dashboard_state_with_csrf(&state, "abcd1234") else {
+            panic!("write_dashboard_state_with_csrf failed");
+        };
+        assert!(path.exists());
+        assert_eq!(read_dashboard_state(), Some(state));
+        assert_eq!(read_dashboard_csrf_token(4123).as_deref(), Some("abcd1234"));
+        assert_eq!(read_dashboard_csrf_token(9999), None);
     }
 }

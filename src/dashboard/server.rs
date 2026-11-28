@@ -1,14 +1,13 @@
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::config::LanguageSetting;
 use crate::ledger::{
@@ -21,7 +20,8 @@ use crate::render::resolve_language_from_locale;
 use crate::sync::{SyncOutcomeKind, build_remote, load_sync_config, sync_both};
 
 use super::http_wire::{
-    HttpParseError, HttpRequest, finish_early_error_response, is_allowed_host, is_allowed_origin,
+    HttpParseError, HttpRequest, finish_early_error_response, has_valid_csrf_token,
+    is_allowed_host, is_strict_same_origin, is_strict_same_origin_with_required_origin,
     parse_query_params, query_param, read_http_request, write_http_response,
 };
 use super::keepalive::{
@@ -37,6 +37,9 @@ const REMOTE_SYNC_THROTTLE_MS: u64 = 30_000;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(15);
 const SSE_EOF_POLL_TIMEOUT: Duration = Duration::from_millis(50);
 const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const OVERLOAD_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+pub const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+pub const MAX_SSE_CONNECTIONS: usize = 32;
 const DASHBOARD_CSP: &str = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:;";
 
 /// Errors returned when configuring or starting the local dashboard server.
@@ -64,6 +67,8 @@ pub struct DashboardServerConfig {
     pub ledger_path: Option<PathBuf>,
     pub source_roots: Option<Vec<SourceRoot>>,
     pub enable_collector: bool,
+    pub max_concurrent_connections: usize,
+    pub max_sse_connections: usize,
 }
 
 impl Default for DashboardServerConfig {
@@ -80,6 +85,8 @@ impl Default for DashboardServerConfig {
             ledger_path: None,
             source_roots: None,
             enable_collector: false,
+            max_concurrent_connections: MAX_CONCURRENT_CONNECTIONS,
+            max_sse_connections: MAX_SSE_CONNECTIONS,
         }
     }
 }
@@ -106,37 +113,8 @@ pub(super) fn refresh_sync_identity_hints(sync_options: &mut LedgerSyncOptions) 
     sync_options.device_name = device_name;
 }
 
-fn generate_csrf_token() -> String {
-    #[cfg(unix)]
-    {
-        if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
-            let mut buf = [0u8; 32];
-            if file.read_exact(&mut buf).is_ok() {
-                return hex::encode(buf);
-            }
-        }
-    }
-
-    static CSRF_COUNTER: AtomicU64 = AtomicU64::new(1);
-    let mut hasher = Sha256::new();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    hasher.update(nanos.to_le_bytes());
-    hasher.update(std::process::id().to_le_bytes());
-    hasher.update(CSRF_COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
-    let stack_marker = 0u64;
-    let stack_addr = (&stack_marker as *const u64) as usize;
-    hasher.update(stack_addr.to_le_bytes());
-    let heap_marker = Box::new(nanos ^ (stack_addr as u128));
-    let heap_addr = (&*heap_marker as *const u128) as usize;
-    hasher.update(heap_addr.to_le_bytes());
-    hasher.update(format!("{:?}", thread::current().id()).as_bytes());
-    if let Some(host) = platform::current_hostname() {
-        hasher.update(host.as_bytes());
-    }
-    hex::encode(hasher.finalize())
+fn generate_csrf_token() -> io::Result<String> {
+    platform::random_hex(32)
 }
 
 pub(super) struct ServerSharedState {
@@ -154,9 +132,47 @@ pub(super) struct ServerSharedState {
     pub(super) keepalive: Arc<KeepaliveState>,
     shutdown: AtomicBool,
     collector_shutdown: Arc<AtomicBool>,
+    max_concurrent_connections: usize,
+    max_sse_connections: usize,
+    active_connections: Arc<AtomicUsize>,
+    active_sse_connections: Arc<AtomicUsize>,
     sync_remote_in_progress: Arc<AtomicBool>,
     last_remote_sync_instant: Mutex<Option<Instant>>,
     pub(super) ledger: Mutex<LedgerRuntime>,
+}
+
+struct AtomicSlotGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl AtomicSlotGuard {
+    fn try_acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        let mut current = counter.load(Ordering::Acquire);
+        loop {
+            if current >= limit {
+                return None;
+            }
+            match counter.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(Self {
+                        counter: Arc::clone(counter),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+impl Drop for AtomicSlotGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl ServerSharedState {
@@ -248,7 +264,7 @@ impl DashboardServer {
             started_instant,
         ));
 
-        let csrf_token = generate_csrf_token();
+        let csrf_token = generate_csrf_token()?;
         let collector_shutdown = Arc::new(AtomicBool::new(false));
 
         let shared = Arc::new(ServerSharedState {
@@ -266,6 +282,10 @@ impl DashboardServer {
             keepalive,
             shutdown: AtomicBool::new(false),
             collector_shutdown: Arc::clone(&collector_shutdown),
+            max_concurrent_connections: config.max_concurrent_connections.max(1),
+            max_sse_connections: config.max_sse_connections.max(1),
+            active_connections: Arc::new(AtomicUsize::new(0)),
+            active_sse_connections: Arc::new(AtomicUsize::new(0)),
             sync_remote_in_progress: Arc::new(AtomicBool::new(false)),
             last_remote_sync_instant: Mutex::new(None),
             ledger: Mutex::new(LedgerRuntime {
@@ -370,10 +390,30 @@ fn run_accept_loop(listener: TcpListener, shared: Arc<ServerSharedState>) {
         match listener.accept() {
             Ok((mut stream, _addr)) => {
                 let _ = stream.set_nonblocking(false);
+                let Some(conn_guard) = AtomicSlotGuard::try_acquire(
+                    &shared.active_connections,
+                    shared.max_concurrent_connections,
+                ) else {
+                    let _ = stream.set_write_timeout(Some(OVERLOAD_WRITE_TIMEOUT));
+                    send_error_json(
+                        &mut stream,
+                        503,
+                        "Service Unavailable: too many concurrent connections",
+                    );
+                    finish_early_error_response(&mut stream);
+                    continue;
+                };
                 let conn_shared = Arc::clone(&shared);
-                thread::spawn(move || {
-                    handle_connection(&mut stream, &conn_shared);
-                });
+                if let Err(err) = thread::Builder::new()
+                    .name("agy-pulse-http".to_string())
+                    .spawn(move || {
+                        handle_connection(&mut stream, &conn_shared, conn_guard);
+                    })
+                {
+                    platform::write_error_log_safely(&format!(
+                        "Dashboard connection thread spawn failed: {err}"
+                    ));
+                }
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(ACCEPT_POLL_INTERVAL);
@@ -468,7 +508,19 @@ fn serve_sse_keepalive(
     stream: &mut TcpStream,
     shared: &ServerSharedState,
     client_id: Option<&str>,
+    conn_guard: Option<AtomicSlotGuard>,
 ) {
+    let Some(_sse_slot_guard) = AtomicSlotGuard::try_acquire(
+        &shared.active_sse_connections,
+        shared.max_sse_connections,
+    ) else {
+        let _ = stream.set_write_timeout(Some(OVERLOAD_WRITE_TIMEOUT));
+        send_error_json(stream, 503, "Service Unavailable: too many SSE connections");
+        finish_early_error_response(stream);
+        return;
+    };
+    drop(conn_guard);
+
     let conn_id = shared.keepalive.register_sse(client_id);
     let _guard = SseConnectionGuard {
         keepalive: Arc::clone(&shared.keepalive),
@@ -554,6 +606,26 @@ fn send_error_json(stream: &mut TcpStream, status: u16, msg: &str) {
     send_json_value(stream, status, &ErrorPayload { ok: false, error: msg }, &[]);
 }
 
+fn check_mutating_route_security(
+    stream: &mut TcpStream,
+    req: &HttpRequest,
+    shared: &ServerSharedState,
+) -> bool {
+    if !has_valid_csrf_token(req, &shared.csrf_token) {
+        send_error_json(stream, 403, "Forbidden: invalid or missing CSRF token");
+        return false;
+    }
+    if !is_strict_same_origin_with_required_origin(req, shared.port) {
+        send_error_json(
+            stream,
+            403,
+            "Forbidden: invalid or missing Origin / cross-origin request rejected",
+        );
+        return false;
+    }
+    true
+}
+
 fn parse_overview_filter(params: &[(String, String)]) -> (LedgerQueryFilter, String) {
     let range = query_param(params, "range")
         .and_then(LedgerTimeRange::from_raw)
@@ -633,7 +705,12 @@ fn current_epoch_ms_u64() -> u64 {
         .unwrap_or(0)
 }
 
-fn handle_connection(stream: &mut TcpStream, shared: &ServerSharedState) {
+fn handle_connection(
+    stream: &mut TcpStream,
+    shared: &ServerSharedState,
+    conn_guard: AtomicSlotGuard,
+) {
+    let mut conn_guard = Some(conn_guard);
     let _ = stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT));
 
@@ -650,6 +727,10 @@ fn handle_connection(stream: &mut TcpStream, shared: &ServerSharedState) {
             finish_early_error_response(stream);
             return;
         }
+        Err(HttpParseError::TimedOut) => {
+            send_error_json(stream, 408, "request timeout");
+            return;
+        }
         Err(HttpParseError::Io) => return,
     };
 
@@ -658,7 +739,7 @@ fn handle_connection(stream: &mut TcpStream, shared: &ServerSharedState) {
         return;
     }
 
-    dispatch_request(stream, &req, shared);
+    dispatch_request(stream, &req, shared, &mut conn_guard);
 }
 
 fn read_sync_status_standalone(
@@ -744,6 +825,34 @@ fn handle_sync_remote(
         }
     };
 
+    if !force
+        && let Ok(last_guard) = shared.last_remote_sync_instant.lock()
+        && let Some(prev) = *last_guard
+        && (prev.elapsed().as_millis() as u64) < REMOTE_SYNC_THROTTLE_MS
+    {
+        drop(last_guard);
+        let in_progress = shared.sync_remote_in_progress.load(Ordering::Acquire);
+        let sync_status = read_sync_status_standalone(shared, Some(&cfg), in_progress);
+        send_json_value(
+            stream,
+            200,
+            &SyncRemotePayload {
+                ok: true,
+                enabled: true,
+                changed: false,
+                throttled: true,
+                in_progress,
+                pulled_chunks: 0,
+                pushed_chunks: 0,
+                steps_imported: 0,
+                error: None,
+                sync_status,
+            },
+            &[],
+        );
+        return;
+    }
+
     if shared
         .sync_remote_in_progress
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -773,34 +882,6 @@ fn handle_sync_remote(
     let guard = RemoteSyncGuard {
         flag: &shared.sync_remote_in_progress,
     };
-
-    if !force
-        && let Ok(last_guard) = shared.last_remote_sync_instant.lock()
-        && let Some(prev) = *last_guard
-        && (prev.elapsed().as_millis() as u64) < REMOTE_SYNC_THROTTLE_MS
-    {
-        drop(last_guard);
-        drop(guard);
-        let sync_status = read_sync_status_standalone(shared, Some(&cfg), false);
-        send_json_value(
-            stream,
-            200,
-            &SyncRemotePayload {
-                ok: true,
-                enabled: true,
-                changed: false,
-                throttled: true,
-                in_progress: false,
-                pulled_chunks: 0,
-                pushed_chunks: 0,
-                steps_imported: 0,
-                error: None,
-                sync_status,
-            },
-            &[],
-        );
-        return;
-    }
 
     let store = match LedgerStore::open_at(&shared.ledger_path) {
         Ok(s) => s,
@@ -917,7 +998,12 @@ fn handle_sync_remote(
     }
 }
 
-fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSharedState) {
+fn dispatch_request(
+    stream: &mut TcpStream,
+    req: &HttpRequest,
+    shared: &ServerSharedState,
+    conn_guard: &mut Option<AtomicSlotGuard>,
+) {
     let method = req.method.as_str();
     let params = parse_query_params(&req.query);
 
@@ -960,19 +1046,23 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            if !is_allowed_origin(req.header("origin"), shared.port) {
-                send_error_json(stream, 403, "Forbidden: invalid Origin header");
+            if !is_strict_same_origin(req, shared.port) {
+                send_error_json(stream, 403, "Forbidden: cross-origin keepalive rejected");
                 return;
             }
-            serve_sse_keepalive(stream, shared, query_param(&params, "client"));
+            serve_sse_keepalive(
+                stream,
+                shared,
+                query_param(&params, "client"),
+                conn_guard.take(),
+            );
         }
         "/api/ping" => {
             if method != "POST" {
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            if !is_allowed_origin(req.header("origin"), shared.port) {
-                send_error_json(stream, 403, "Forbidden: invalid Origin header");
+            if !check_mutating_route_security(stream, req, shared) {
                 return;
             }
             let active_clients = shared.keepalive.record_ping(query_param(&params, "client"));
@@ -993,8 +1083,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            if !is_allowed_origin(req.header("origin"), shared.port) {
-                send_error_json(stream, 403, "Forbidden: invalid Origin header");
+            if !check_mutating_route_security(stream, req, shared) {
                 return;
             }
             let active_clients = shared
@@ -1100,8 +1189,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            if !is_allowed_origin(req.header("origin"), shared.port) {
-                send_error_json(stream, 403, "Forbidden: invalid Origin header");
+            if !check_mutating_route_security(stream, req, shared) {
                 return;
             }
             shared.keepalive.touch_activity();
@@ -1124,8 +1212,7 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
                 send_error_json(stream, 405, "Method Not Allowed");
                 return;
             }
-            if !is_allowed_origin(req.header("origin"), shared.port) {
-                send_error_json(stream, 403, "Forbidden: invalid Origin header");
+            if !check_mutating_route_security(stream, req, shared) {
                 return;
             }
             shared.keepalive.touch_activity();
@@ -1191,5 +1278,142 @@ fn dispatch_request(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSh
         _ => {
             send_error_json(stream, 404, "Not Found");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static SYNC_CFG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct SyncCfgEnvGuard(Option<std::ffi::OsString>);
+
+    impl Drop for SyncCfgEnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                // SAFETY: guarded by `SYNC_CFG_ENV_LOCK`.
+                Some(v) => unsafe { std::env::set_var("AGY_PULSE_SYNC_CONFIG", v) },
+                None => unsafe { std::env::remove_var("AGY_PULSE_SYNC_CONFIG") },
+            }
+        }
+    }
+
+    #[test]
+    fn csrf_token_uses_csprng_64_hex_chars() {
+        let Ok(t1) = generate_csrf_token() else {
+            panic!("generate_csrf_token failed");
+        };
+        let Ok(t2) = generate_csrf_token() else {
+            panic!("generate_csrf_token failed");
+        };
+        assert_eq!(t1.len(), 64);
+        assert_eq!(t2.len(), 64);
+        assert_ne!(t1, t2);
+        assert!(t1.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+    }
+
+    #[test]
+    fn throttled_sync_remote_does_not_flip_in_progress_flag() {
+        let _lock = SYNC_CFG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(temp) = TempDir::new() else {
+            panic!("tempdir");
+        };
+        let sync_cfg_path = temp.path().join("sync-cfg.json");
+        let remote_dir = temp.path().join("remote");
+        let _ = std::fs::create_dir_all(&remote_dir);
+        let cfg = crate::sync::SyncConfig {
+            enabled: true,
+            device_id: None,
+            device_name: Some("dev-test".to_string()),
+            default_account: None,
+            push_interval_sec: 300,
+            prefix: "agy-pulse-sync".to_string(),
+            remote: crate::sync::RemoteConfig::LocalDir {
+                path: remote_dir.to_string_lossy().into_owned(),
+            },
+        };
+        let _ = crate::sync::save_sync_config_to(&sync_cfg_path, &cfg);
+        let _env_guard = SyncCfgEnvGuard(std::env::var_os("AGY_PULSE_SYNC_CONFIG"));
+        // SAFETY: serialized via SYNC_CFG_ENV_LOCK.
+        unsafe { std::env::set_var("AGY_PULSE_SYNC_CONFIG", &sync_cfg_path) };
+
+        let Ok(mut server) = DashboardServer::start(DashboardServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            no_sync: true,
+            defer_initial_sync: true,
+            ledger_path: Some(temp.path().join("ledger.sqlite")),
+            ..Default::default()
+        }) else {
+            panic!("start server");
+        };
+
+        if let Ok(mut last) = server.shared.last_remote_sync_instant.lock() {
+            *last = Some(Instant::now());
+        }
+
+        let stop_observer = Arc::new(AtomicBool::new(false));
+        let observed_true = Arc::new(AtomicBool::new(false));
+        let obs_flag = Arc::clone(&server.shared.sync_remote_in_progress);
+        let obs_stop = Arc::clone(&stop_observer);
+        let obs_hit = Arc::clone(&observed_true);
+        let observer = thread::spawn(move || {
+            while !obs_stop.load(Ordering::Acquire) {
+                if obs_flag.load(Ordering::Acquire) {
+                    obs_hit.store(true, Ordering::Release);
+                }
+            }
+        });
+
+        let port = server.info().port;
+        let origin = format!("http://127.0.0.1:{port}");
+        let token = server.csrf_token().to_string();
+        for _ in 0..80 {
+            if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
+                let req = format!(
+                    "POST /api/sync-remote HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nX-Agy-Pulse-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = s.write_all(req.as_bytes());
+                let _ = s.flush();
+                let mut sink = Vec::new();
+                let _ = s.read_to_end(&mut sink);
+            }
+        }
+
+        stop_observer.store(true, Ordering::Release);
+        let _ = observer.join();
+        server.shutdown();
+
+        assert!(
+            !observed_true.load(Ordering::Acquire),
+            "throttled POST /api/sync-remote must never flip sync_remote_in_progress to true"
+        );
+    }
+
+    #[test]
+    fn atomic_slot_guard_releases_quota_on_normal_drop_and_panic() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let Some(g1) = AtomicSlotGuard::try_acquire(&counter, 2) else {
+            panic!("slot 1");
+        };
+        let Some(g2) = AtomicSlotGuard::try_acquire(&counter, 2) else {
+            panic!("slot 2");
+        };
+        assert!(AtomicSlotGuard::try_acquire(&counter, 2).is_none());
+        assert_eq!(counter.load(Ordering::Acquire), 2);
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = g2;
+            panic!("simulated handler panic");
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(counter.load(Ordering::Acquire), 1);
+
+        drop(g1);
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+        assert!(AtomicSlotGuard::try_acquire(&counter, 2).is_some());
     }
 }

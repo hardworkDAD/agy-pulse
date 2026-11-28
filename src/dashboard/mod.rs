@@ -542,7 +542,7 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
                 idle_timeout_ms,
                 started_at: info.started_at.clone(),
             };
-            if let Err(err) = launcher::write_dashboard_state(&state)
+            if let Err(err) = launcher::write_dashboard_state_with_csrf(&state, server.csrf_token())
                 && args.background_serve
             {
                 eprintln!("agy-pulse dashboard warning: failed to write state file: {err}");

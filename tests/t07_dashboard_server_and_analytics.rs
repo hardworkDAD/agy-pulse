@@ -320,6 +320,20 @@ fn send_raw_http(
     }
 }
 
+fn extract_html_csrf_token(port: u16) -> String {
+    let html_res = send_raw_http(port, "GET", "/", &[]);
+    assert_eq!(html_res.status, 200);
+    let marker = "var CSRF_TOKEN = '";
+    let start = html_res
+        .body
+        .find(marker)
+        .expect("dashboard HTML must contain CSRF_TOKEN")
+        + marker.len();
+    let rest = &html_res.body[start..];
+    let end = rest.find('\'').expect("closing quote for CSRF_TOKEN");
+    rest[..end].to_string()
+}
+
 fn current_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -471,13 +485,25 @@ fn t07_loopback_binding_port_fallback_security_headers_and_403_405_404() {
     );
     assert_eq!(ok_host_res.status, 200);
 
-    // 6. Origin header validation on POST /api/ping and POST /api/sync -> 403 for cross-site
+    // 6. Origin + CSRF token validation on POST /api/ping and POST /api/sync -> 403 for cross-site or missing CSRF
+    let csrf_token = extract_html_csrf_token(info.port);
     for path in ["/api/ping", "/api/sync"] {
+        let missing_csrf = send_raw_http(
+            info.port,
+            "POST",
+            path,
+            &[("Origin", &format!("http://localhost:{}", info.port))],
+        );
+        assert_eq!(missing_csrf.status, 403, "{path} must reject missing CSRF token");
+
         let bad_origin = send_raw_http(
             info.port,
             "POST",
             path,
-            &[("Origin", "https://evil.com")],
+            &[
+                ("Origin", "https://evil.com"),
+                ("X-Agy-Pulse-Token", &csrf_token),
+            ],
         );
         assert_eq!(bad_origin.status, 403, "{path} must reject evil Origin");
 
@@ -486,7 +512,10 @@ fn t07_loopback_binding_port_fallback_security_headers_and_403_405_404() {
             info.port,
             "POST",
             path,
-            &[("Origin", &wrong_port_origin)],
+            &[
+                ("Origin", &wrong_port_origin),
+                ("X-Agy-Pulse-Token", &csrf_token),
+            ],
         );
         assert_eq!(bad_port.status, 403, "{path} must reject wrong port Origin");
 
@@ -495,9 +524,12 @@ fn t07_loopback_binding_port_fallback_security_headers_and_403_405_404() {
             info.port,
             "POST",
             path,
-            &[("Origin", &good_origin)],
+            &[
+                ("Origin", &good_origin),
+                ("X-Agy-Pulse-Token", &csrf_token),
+            ],
         );
-        assert_eq!(ok_origin.status, 200, "{path} must allow localhost Origin");
+        assert_eq!(ok_origin.status, 200, "{path} must allow localhost Origin with valid CSRF token");
     }
 
     // 7. 405 Method Not Allowed & 404 Not Found
@@ -956,7 +988,14 @@ fn t07_csv_json_exports_static_routes_and_sync_api() {
     assert_eq!(health_json["idleTimeoutMs"], 30_000);
 
     // POST /api/sync ingests exp-cli.db
-    let sync_res = send_raw_http(port, "POST", "/api/sync", &[]);
+    let csrf_token = server.csrf_token().to_string();
+    let origin = format!("http://127.0.0.1:{port}");
+    let sync_res = send_raw_http(
+        port,
+        "POST",
+        "/api/sync",
+        &[("Origin", &origin), ("X-Agy-Pulse-Token", &csrf_token)],
+    );
     assert_eq!(sync_res.status, 200);
     let sync_json: Value = serde_json::from_str(&sync_res.body).unwrap();
     assert_eq!(sync_json["ok"], true);
@@ -1635,6 +1674,8 @@ fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
 
     // 1. HTML contains multi-account/device UI hooks and sync endpoint
     let html = send_raw_http(port, "GET", "/?lang=zh", &[]).body;
+    let csrf_token = extract_html_csrf_token(port);
+    let origin = format!("http://127.0.0.1:{port}");
     for hook in [
         "/api/sync-remote",
         "id=\"account-pills\"",
@@ -1658,7 +1699,12 @@ fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
     assert_eq!(before_ov["sessions"].as_array().unwrap().len(), 0);
 
     // 3. POST /api/sync-remote pulls Device A's chunk and sets changed=true
-    let sync1 = send_raw_http(port, "POST", "/api/sync-remote", &[]);
+    let sync1 = send_raw_http(
+        port,
+        "POST",
+        "/api/sync-remote",
+        &[("Origin", &origin), ("X-Agy-Pulse-Token", &csrf_token)],
+    );
     assert_eq!(sync1.status, 200);
     let sync1_json: Value = serde_json::from_str(&sync1.body).unwrap();
     assert_eq!(sync1_json["ok"], true);
@@ -1680,8 +1726,16 @@ fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
     );
 
     // 4. Repeat POST /api/sync-remote within 30s without force hits throttle
-    let sync2_json: Value =
-        serde_json::from_str(&send_raw_http(port, "POST", "/api/sync-remote", &[]).body).unwrap();
+    let sync2_json: Value = serde_json::from_str(
+        &send_raw_http(
+            port,
+            "POST",
+            "/api/sync-remote",
+            &[("Origin", &origin), ("X-Agy-Pulse-Token", &csrf_token)],
+        )
+        .body,
+    )
+    .unwrap();
     assert_eq!(sync2_json["ok"], true);
     assert_eq!(sync2_json["throttled"], true);
     assert_eq!(sync2_json["changed"], false);
@@ -1692,7 +1746,11 @@ fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
             port,
             "POST",
             "/api/sync-remote",
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Origin", &origin),
+                ("X-Agy-Pulse-Token", &csrf_token),
+            ],
             r#"{"force":true}"#,
         )
         .body,
@@ -1705,7 +1763,12 @@ fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
     fs::remove_dir_all(&remote_dir).unwrap();
     fs::write(&remote_dir, b"simulated-offline-mount").unwrap();
 
-    let sync_offline_res = send_raw_http(port, "POST", "/api/sync-remote?force=true", &[]);
+    let sync_offline_res = send_raw_http(
+        port,
+        "POST",
+        "/api/sync-remote?force=true",
+        &[("Origin", &origin), ("X-Agy-Pulse-Token", &csrf_token)],
+    );
     assert_eq!(sync_offline_res.status, 200);
     let sync_offline_json: Value = serde_json::from_str(&sync_offline_res.body).unwrap();
     assert_eq!(sync_offline_json["ok"], false);
@@ -1740,7 +1803,12 @@ fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
     };
     save_sync_config_to(&sync_cfg_path, &bad_cfg).unwrap();
 
-    let sync_err_res = send_raw_http(port, "POST", "/api/sync-remote?force=true", &[]);
+    let sync_err_res = send_raw_http(
+        port,
+        "POST",
+        "/api/sync-remote?force=true",
+        &[("Origin", &origin), ("X-Agy-Pulse-Token", &csrf_token)],
+    );
     assert_eq!(sync_err_res.status, 200);
     let sync_err_json: Value = serde_json::from_str(&sync_err_res.body).unwrap();
     assert_eq!(sync_err_json["ok"], false);
@@ -1873,12 +1941,17 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
     assert_eq!(err_json["error"], "request body too large");
 
     // 2b. POST /api/sync-remote parses JSON body > 4 KiB cleanly (no peek limit)
+    let origin = format!("http://127.0.0.1:{port}");
     let padded_force_body = format!("{}{{\"force\":true}}", " ".repeat(5 * 1024));
     let padded_res = send_raw_http_with_body(
         port,
         "POST",
         "/api/sync-remote",
-        &[("Content-Type", "application/json")],
+        &[
+            ("Content-Type", "application/json"),
+            ("Origin", &origin),
+            ("X-Agy-Pulse-Token", token),
+        ],
         &padded_force_body,
     );
     assert_eq!(padded_res.status, 200);
@@ -1925,7 +1998,12 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
         &[(0, gen2)],
     );
 
-    let sync_res = send_raw_http(port, "POST", "/api/sync", &[]);
+    let sync_res = send_raw_http(
+        port,
+        "POST",
+        "/api/sync",
+        &[("Origin", &origin), ("X-Agy-Pulse-Token", token)],
+    );
     assert_eq!(sync_res.status, 200);
 
     let ov2: Value = serde_json::from_str(
@@ -1940,4 +2018,231 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
         .expect("hint-conv-2 session present");
     assert_eq!(conv2_session["accountId"], "beta@example.com");
     assert_eq!(conv2_session["deviceName"], "studio-beta");
+}
+
+#[test]
+fn t07_http_wire_rejects_malformed_content_length_and_transfer_encoding_with_400() {
+    let env = IsolatedEnv::new();
+    let mut server = DashboardServer::start(DashboardServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        no_sync: true,
+        ledger_path: Some(env.ledger_path()),
+        ..Default::default()
+    })
+    .unwrap();
+    let port = server.info().port;
+
+    for raw_req in [
+        format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: abc\r\nConnection: close\r\n\r\n"),
+        format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: -1\r\nConnection: close\r\n\r\n"),
+        format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 2\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"),
+        format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"),
+    ] {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream.write_all(raw_req.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        let mut raw_resp = Vec::new();
+        let _ = stream.read_to_end(&mut raw_resp);
+        let text = String::from_utf8_lossy(&raw_resp);
+        let status_line = text.lines().next().unwrap_or_default();
+        assert!(
+            status_line.starts_with("HTTP/1.1 400"),
+            "expected 400 Bad Request for {raw_req:?}, got {text:?}"
+        );
+    }
+
+    server.shutdown();
+}
+
+#[test]
+fn t07_bounded_concurrency_and_sse_limits_return_503() {
+    let env = IsolatedEnv::new();
+    let mut server = DashboardServer::start(DashboardServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        no_sync: true,
+        ledger_path: Some(env.ledger_path()),
+        max_concurrent_connections: 2,
+        max_sse_connections: 2,
+        ..Default::default()
+    })
+    .unwrap();
+    let port = server.info().port;
+
+    // 1. Hold 2 incomplete normal connections -> 3rd connection receives 503 Service Unavailable
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(b"GET /api/health HTTP/1.1\r\n").unwrap();
+        s.flush().unwrap();
+        held.push(s);
+    }
+    std::thread::sleep(Duration::from_millis(80));
+
+    let overloaded = send_raw_http(port, "GET", "/api/health", &[]);
+    assert_eq!(overloaded.status, 503, "expected 503 when saturated: {}", overloaded.body);
+    let overloaded_json: Value = serde_json::from_str(&overloaded.body).unwrap();
+    assert_eq!(overloaded_json["ok"], false);
+
+    // Drop held connections -> slots release cleanly via RAII guard
+    drop(held);
+    let mut recovered = false;
+    for _ in 0..20 {
+        if send_raw_http(port, "GET", "/api/health", &[]).status == 200 {
+            recovered = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(recovered, "server must recover after held connections close");
+
+    // 2. Open 2 SSE connections -> normal /api/health still works, 3rd SSE gets 503
+    let mut sse_streams = Vec::new();
+    for idx in 0..2 {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let req = format!(
+            "GET /api/keepalive?client=c-{idx} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        s.flush().unwrap();
+        let mut buf = [0u8; 512];
+        let n = s.read(&mut buf).unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]);
+        assert!(head.starts_with("HTTP/1.1 200"), "SSE {idx} failed: {head}");
+        sse_streams.push(s);
+    }
+
+    assert_eq!(send_raw_http(port, "GET", "/api/health", &[]).status, 200);
+
+    let sse_3rd = send_raw_http(
+        port,
+        "GET",
+        "/api/keepalive?client=c-overflow",
+        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+    );
+    assert_eq!(sse_3rd.status, 503, "expected 503 on 3rd SSE: {}", sse_3rd.body);
+    let sse_json: Value = serde_json::from_str(&sse_3rd.body).unwrap();
+    assert_eq!(sse_json["ok"], false);
+
+    // Dropping one SSE stream releases SSE quota cleanly
+    sse_streams.pop();
+    let mut sse_recovered = false;
+    for _ in 0..30 {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let req = format!(
+            "GET /api/keepalive?client=c-retry HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        s.flush().unwrap();
+        let mut buf = [0u8; 256];
+        let n = s.read(&mut buf).unwrap_or(0);
+        if String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200") {
+            sse_recovered = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(sse_recovered, "SSE slot must be released after SSE client closes");
+
+    drop(sse_streams);
+    server.shutdown();
+}
+
+#[test]
+fn t07_mutating_routes_require_csrf_and_origin_and_keepalive_checks_same_origin() {
+    let env = IsolatedEnv::new();
+    let mut server = DashboardServer::start(DashboardServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        no_sync: true,
+        ledger_path: Some(env.ledger_path()),
+        ..Default::default()
+    })
+    .unwrap();
+    let port = server.info().port;
+    let token = server.csrf_token().to_string();
+    let good_origin = format!("http://127.0.0.1:{port}");
+
+    for path in ["/api/sync", "/api/sync-remote", "/api/ping", "/api/disconnect"] {
+        // Missing CSRF token even with valid Origin -> 403
+        let no_csrf = send_raw_http(port, "POST", path, &[("Origin", &good_origin)]);
+        assert_eq!(no_csrf.status, 403, "{path} must reject missing CSRF token");
+
+        // Wrong CSRF token -> 403
+        let bad_csrf = send_raw_http(
+            port,
+            "POST",
+            path,
+            &[("Origin", &good_origin), ("X-Agy-Pulse-Token", "0000")],
+        );
+        assert_eq!(bad_csrf.status, 403, "{path} must reject wrong CSRF token");
+
+        // Missing Origin even with valid CSRF token -> 403
+        let no_origin = send_raw_http(port, "POST", path, &[("X-Agy-Pulse-Token", &token)]);
+        assert_eq!(no_origin.status, 403, "{path} must reject missing Origin");
+
+        // Sec-Fetch-Site: cross-site even with valid Origin & CSRF -> 403
+        let cross_site = send_raw_http(
+            port,
+            "POST",
+            path,
+            &[
+                ("Origin", &good_origin),
+                ("X-Agy-Pulse-Token", &token),
+                ("Sec-Fetch-Site", "cross-site"),
+            ],
+        );
+        assert_eq!(cross_site.status, 403, "{path} must reject cross-site Sec-Fetch-Site");
+
+        // Valid Origin + valid CSRF + same-origin -> 200
+        let ok = send_raw_http(
+            port,
+            "POST",
+            path,
+            &[
+                ("Origin", &good_origin),
+                ("X-Agy-Pulse-Token", &token),
+                ("Sec-Fetch-Site", "same-origin"),
+            ],
+        );
+        assert_eq!(ok.status, 200, "{path} must allow valid Origin + CSRF: {}", ok.body);
+    }
+
+    // GET /api/keepalive rejects bad Sec-Fetch-Site & evil Origin, allows same-origin without Origin
+    let ka_cross = send_raw_http(
+        port,
+        "GET",
+        "/api/keepalive?client=bad-sec",
+        &[("Sec-Fetch-Site", "cross-site")],
+    );
+    assert_eq!(ka_cross.status, 403);
+
+    let ka_evil = send_raw_http(
+        port,
+        "GET",
+        "/api/keepalive?client=bad-org",
+        &[("Origin", "https://evil.example")],
+    );
+    assert_eq!(ka_evil.status, 403);
+
+    let mut sse = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    sse.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    sse.write_all(
+        format!(
+            "GET /api/keepalive?client=same-site HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\nAccept: text/event-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    sse.flush().unwrap();
+    let mut sse_buf = [0u8; 256];
+    let n = sse.read(&mut sse_buf).unwrap();
+    assert!(String::from_utf8_lossy(&sse_buf[..n]).starts_with("HTTP/1.1 200"));
+    drop(sse);
+
+    server.shutdown();
 }

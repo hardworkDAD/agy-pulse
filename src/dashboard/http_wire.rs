@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
+pub(super) const REQUEST_READ_TOTAL_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub(super) struct HttpRequest {
@@ -29,12 +30,38 @@ pub(super) enum HttpParseError {
     EmptyOrEof,
     PayloadTooLarge,
     InvalidRequest(&'static str),
+    TimedOut,
     Io,
 }
 
 impl From<io::Error> for HttpParseError {
     fn from(_err: io::Error) -> Self {
         Self::Io
+    }
+}
+
+fn read_with_deadline(
+    stream: &mut TcpStream,
+    buf: &mut [u8],
+    deadline: Instant,
+) -> Result<usize, HttpParseError> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(HttpParseError::TimedOut);
+        }
+        let _ = stream.set_read_timeout(Some(remaining));
+        match stream.read(buf) {
+            Ok(n) => return Ok(n),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if err.kind() == io::ErrorKind::TimedOut
+                    || err.kind() == io::ErrorKind::WouldBlock =>
+            {
+                return Err(HttpParseError::TimedOut);
+            }
+            Err(_) => return Err(HttpParseError::Io),
+        }
     }
 }
 
@@ -49,6 +76,14 @@ fn find_header_end(buf: &[u8]) -> Option<(usize, usize)> {
 }
 
 pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpParseError> {
+    read_http_request_with_deadline(stream, REQUEST_READ_TOTAL_DEADLINE)
+}
+
+pub(super) fn read_http_request_with_deadline(
+    stream: &mut TcpStream,
+    total_deadline: Duration,
+) -> Result<HttpRequest, HttpParseError> {
+    let deadline = Instant::now() + total_deadline;
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 1024];
 
@@ -59,7 +94,7 @@ pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, H
         if buf.len() >= MAX_HEADER_BYTES {
             return Err(HttpParseError::InvalidRequest("request headers too large"));
         }
-        let n = stream.read(&mut tmp)?;
+        let n = read_with_deadline(stream, &mut tmp, deadline)?;
         if n == 0 {
             if buf.is_empty() {
                 return Err(HttpParseError::EmptyOrEof);
@@ -99,7 +134,7 @@ pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, H
     let pathname = percent_decode_str(raw_path);
 
     let mut headers = Vec::new();
-    let mut content_length: usize = 0;
+    let mut content_length: Option<usize> = None;
     for line in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -108,14 +143,27 @@ pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, H
         if let Some((k, v)) = trimmed.split_once(':') {
             let key = k.trim().to_ascii_lowercase();
             let val = v.trim().to_string();
-            if key == "content-length"
-                && let Ok(len) = val.parse::<usize>()
-            {
-                content_length = len;
+            if key == "transfer-encoding" {
+                return Err(HttpParseError::InvalidRequest(
+                    "unsupported Transfer-Encoding",
+                ));
+            }
+            if key == "content-length" {
+                if content_length.is_some() {
+                    return Err(HttpParseError::InvalidRequest("duplicate Content-Length"));
+                }
+                if val.is_empty() || !val.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(HttpParseError::InvalidRequest("invalid Content-Length"));
+                }
+                let len = val
+                    .parse::<usize>()
+                    .map_err(|_| HttpParseError::InvalidRequest("invalid Content-Length"))?;
+                content_length = Some(len);
             }
             headers.push((key, val));
         }
     }
+    let content_length = content_length.unwrap_or(0);
 
     if content_length > MAX_BODY_BYTES {
         return Err(HttpParseError::PayloadTooLarge);
@@ -129,7 +177,7 @@ pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, H
 
         while body.len() < content_length {
             let to_read = (content_length - body.len()).min(tmp.len());
-            let n = stream.read(&mut tmp[..to_read])?;
+            let n = read_with_deadline(stream, &mut tmp[..to_read], deadline)?;
             if n == 0 {
                 return Err(HttpParseError::InvalidRequest("incomplete request body"));
             }
@@ -268,6 +316,24 @@ pub(super) fn is_strict_same_origin(req: &HttpRequest, actual_port: u16) -> bool
     true
 }
 
+/// Enforce strict same-origin with a mandatory valid loopback `Origin` header.
+pub(super) fn is_strict_same_origin_with_required_origin(
+    req: &HttpRequest,
+    actual_port: u16,
+) -> bool {
+    let Some(origin) = req.header("origin").map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    is_allowed_origin(Some(origin), actual_port) && is_strict_same_origin(req, actual_port)
+}
+
+/// Constant-time check for the `X-Agy-Pulse-Token` CSRF request header.
+pub(super) fn has_valid_csrf_token(req: &HttpRequest, expected_token: &str) -> bool {
+    req.header("x-agy-pulse-token").is_some_and(|token| {
+        constant_time_eq(token.as_bytes(), expected_token.as_bytes())
+    })
+}
+
 /// Constant-time byte slice comparison (returns `false` immediately on length mismatch).
 pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -296,6 +362,7 @@ fn reason_phrase(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         409 => "Conflict",
         413 => "Payload Too Large",
         422 => "Unprocessable Entity",
@@ -455,9 +522,24 @@ mod tests {
 
         let req_bad_ct = HttpRequest {
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
-            ..req_ok
+            ..req_ok.clone()
         };
         assert!(!is_json_content_type(&req_bad_ct));
+
+        assert!(is_strict_same_origin_with_required_origin(&req_ok, 3789));
+        let req_missing_origin = HttpRequest {
+            headers: vec![("sec-fetch-site".to_string(), "same-origin".to_string())],
+            ..req_ok.clone()
+        };
+        assert!(is_strict_same_origin(&req_missing_origin, 3789));
+        assert!(!is_strict_same_origin_with_required_origin(&req_missing_origin, 3789));
+
+        let req_csrf = HttpRequest {
+            headers: vec![("x-agy-pulse-token".to_string(), "secret-token".to_string())],
+            ..req_ok
+        };
+        assert!(has_valid_csrf_token(&req_csrf, "secret-token"));
+        assert!(!has_valid_csrf_token(&req_csrf, "wrong-token"));
 
         assert_eq!(reason_phrase(409), "Conflict");
         assert_eq!(reason_phrase(413), "Payload Too Large");
@@ -541,6 +623,90 @@ mod tests {
                 server_handle.join().is_ok(),
                 "iter {iter}: server thread panicked"
             );
+        }
+    }
+
+    #[test]
+    fn http_wire_rejects_malformed_duplicate_content_length_and_transfer_encoding() {
+        for bad_cl in ["abc", "-1", "+5", "", "99999999999999999999999999999"] {
+            let raw = format!(
+                "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:3789\r\nContent-Length: {bad_cl}\r\n\r\n"
+            );
+            let err = send_on_loopback(raw.into_bytes());
+            assert!(
+                matches!(err, Err(HttpParseError::InvalidRequest(_))),
+                "expected InvalidRequest for Content-Length '{bad_cl}', got {err:?}"
+            );
+        }
+
+        for dup in [
+            "Content-Length: 2\r\nContent-Length: 2",
+            "Content-Length: 2\r\nContent-Length: 5",
+        ] {
+            let raw = format!(
+                "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:3789\r\n{dup}\r\n\r\nhi"
+            );
+            let err = send_on_loopback(raw.into_bytes());
+            assert!(
+                matches!(err, Err(HttpParseError::InvalidRequest("duplicate Content-Length"))),
+                "expected duplicate Content-Length error for {dup:?}, got {err:?}"
+            );
+        }
+
+        for te in ["Transfer-Encoding: chunked", "transfer-encoding: gzip"] {
+            let raw = format!(
+                "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:3789\r\n{te}\r\n\r\n0\r\n\r\n"
+            );
+            let err = send_on_loopback(raw.into_bytes());
+            assert!(
+                matches!(err, Err(HttpParseError::InvalidRequest("unsupported Transfer-Encoding"))),
+                "expected Transfer-Encoding rejection for {te:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_wire_enforces_slowloris_total_deadline_across_headers_and_body() {
+        for send_header_first in [false, true] {
+            let Ok(listener) = TcpListener::bind(("127.0.0.1", 0)) else {
+                panic!("bind loopback failed");
+            };
+            let Ok(addr) = listener.local_addr() else {
+                panic!("local_addr failed");
+            };
+            let client_handle = thread::spawn(move || {
+                if let Ok(mut client) = TcpStream::connect(addr) {
+                    if send_header_first {
+                        let _ = client.write_all(
+                            b"POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:3789\r\nContent-Length: 20\r\n\r\n",
+                        );
+                        let _ = client.flush();
+                    }
+                    // Trickle 1 byte every 40ms (each individual read < 120ms, total > 120ms)
+                    for _ in 0..8 {
+                        if client.write_all(b"x").is_err() || client.flush().is_err() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(40));
+                    }
+                }
+            });
+            let Ok((mut server_stream, _)) = listener.accept() else {
+                panic!("accept failed");
+            };
+            let started = Instant::now();
+            let res = read_http_request_with_deadline(&mut server_stream, Duration::from_millis(120));
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(res, Err(HttpParseError::TimedOut)),
+                "expected TimedOut for Slowloris trickle (send_header_first={send_header_first}), got {res:?}"
+            );
+            assert!(
+                elapsed < Duration::from_millis(400),
+                "Slowloris deadline took too long: {elapsed:?}"
+            );
+            drop(server_stream);
+            let _ = client_handle.join();
         }
     }
 }

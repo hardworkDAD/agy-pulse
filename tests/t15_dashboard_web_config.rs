@@ -2149,7 +2149,10 @@ fn t15_sync_config_conflict_corrupt_delete_and_identity_sync_integration() {
         port,
         "POST",
         "/api/sync",
-        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+        &[
+            ("Origin", &format!("http://127.0.0.1:{port}")),
+            ("X-Agy-Pulse-Token", &token),
+        ],
         "",
     );
     assert_eq!(sync_res.status, 200, "{}", sync_res.body);

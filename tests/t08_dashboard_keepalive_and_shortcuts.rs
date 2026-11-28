@@ -397,7 +397,7 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
         String::from_utf8_lossy(&open_out.stderr)
     );
 
-    // Verify rendered HTML removes the old `visibilityState !== 'hidden'` limit and wires SSE + sendBeacon.
+    // Verify rendered HTML removes the old `visibilityState !== 'hidden'` limit and wires SSE + keepalive fetch with CSRF.
     let html_res = send_http(port, "GET", "/", &[]).expect("GET /");
     assert_eq!(html_res.status, 200);
     assert!(
@@ -407,7 +407,19 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
     assert!(html_res.body.contains("/api/keepalive"));
     assert!(html_res.body.contains("/api/disconnect"));
     assert!(html_res.body.contains("pagehide"));
-    assert!(html_res.body.contains("sendBeacon"));
+    assert!(!html_res.body.contains("sendBeacon"));
+    assert!(html_res.body.contains("X-Agy-Pulse-Token"));
+    assert!(html_res.body.contains("keepalive: true"));
+
+    let marker = "var CSRF_TOKEN = '";
+    let start = html_res
+        .body
+        .find(marker)
+        .expect("CSRF_TOKEN declaration in HTML")
+        + marker.len();
+    let rest = &html_res.body[start..];
+    let end = rest.find('\'').expect("closing quote for CSRF_TOKEN");
+    let csrf_token = rest[..end].to_string();
 
     // 1. Connect SSE keepalive (simulating minimized / background tab) and hold > 1s startup idle.
     let sse_tab1 = open_sse_stream(port, "tab-1");
@@ -423,19 +435,34 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
         port,
         "POST",
         "/api/ping?client=tab-ping",
-        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+        &[
+            ("Origin", &format!("http://127.0.0.1:{port}")),
+            ("X-Agy-Pulse-Token", &csrf_token),
+        ],
     )
     .expect("ping lease");
     assert_eq!(ping_res.status, 200);
     let ping_json: Value = serde_json::from_str(&ping_res.body).unwrap();
     assert_eq!(ping_json["activeClients"], 3);
 
-    // 2. Origin check on /api/disconnect must block cross-origin beacons (403).
+    // 2. Origin + CSRF check on /api/disconnect must block cross-origin and missing-token requests (403).
+    let missing_csrf = send_http(
+        port,
+        "POST",
+        "/api/disconnect?client=tab-1",
+        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+    )
+    .expect("missing CSRF disconnect response");
+    assert_eq!(missing_csrf.status, 403);
+
     let bad_origin = send_http(
         port,
         "POST",
         "/api/disconnect?client=tab-1",
-        &[("Origin", "https://evil.example")],
+        &[
+            ("Origin", "https://evil.example"),
+            ("X-Agy-Pulse-Token", &csrf_token),
+        ],
     )
     .expect("cross-origin disconnect response");
     assert_eq!(bad_origin.status, 403);
@@ -445,7 +472,10 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
         port,
         "POST",
         "/api/disconnect?client=tab-1",
-        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+        &[
+            ("Origin", &format!("http://127.0.0.1:{port}")),
+            ("X-Agy-Pulse-Token", &csrf_token),
+        ],
     )
     .expect("same-origin disconnect");
     assert_eq!(disc1.status, 200);
@@ -455,7 +485,10 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
         port,
         "POST",
         "/api/disconnect?client=tab-extra",
-        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+        &[
+            ("Origin", &format!("http://127.0.0.1:{port}")),
+            ("X-Agy-Pulse-Token", &csrf_token),
+        ],
     )
     .expect("disconnect tab-extra");
     assert_eq!(disc_extra.status, 200);
@@ -471,7 +504,10 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
         port,
         "POST",
         "/api/disconnect?client=tab-ping",
-        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+        &[
+            ("Origin", &format!("http://127.0.0.1:{port}")),
+            ("X-Agy-Pulse-Token", &csrf_token),
+        ],
     )
     .expect("disconnect tab-ping");
     assert_eq!(disc_ping.status, 200);
@@ -488,7 +524,10 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
         port,
         "POST",
         "/api/disconnect?client=tab-2",
-        &[("Origin", &format!("http://127.0.0.1:{port}"))],
+        &[
+            ("Origin", &format!("http://127.0.0.1:{port}")),
+            ("X-Agy-Pulse-Token", &csrf_token),
+        ],
     )
     .expect("disconnect tab-2");
     assert_eq!(disc2.status, 200);
