@@ -5,8 +5,10 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static ATOMIC_TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn detect_unicode_from_os() -> bool {
     let locale = super::env_var("LC_ALL")
@@ -109,10 +111,10 @@ impl Drop for RawTerminalGuardImpl {
 }
 
 pub(super) fn write_file_0600_no_symlink(path: &Path, message: &str) {
-    if let Some(parent) = path.parent() {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        let _ = builder.create(parent);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = ensure_dir_0700(parent);
     }
     if let Ok(meta) = fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
@@ -127,6 +129,7 @@ pub(super) fn write_file_0600_no_symlink(path: &Path, message: &str) {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path);
     if let Ok(mut file) = open_res {
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
         let _ = file.write_all(message.as_bytes());
     }
 }
@@ -149,6 +152,7 @@ pub(super) fn append_file_0600_no_symlink(path: &Path, message: &str) {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path);
     if let Ok(mut file) = open_res {
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
         let _ = file.write_all(message.as_bytes());
     }
 }
@@ -164,14 +168,15 @@ pub(super) fn ensure_dir_0700(path: &Path) -> std::io::Result<()> {
 }
 
 pub(super) fn set_file_0600(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_mode(0o600);
     fs::set_permissions(path, perms)
 }
 
 pub(super) fn create_exclusive_file_0600(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         ensure_dir_0700(parent)?;
     }
     match OpenOptions::new()
@@ -181,6 +186,7 @@ pub(super) fn create_exclusive_file_0600(path: &Path, bytes: &[u8]) -> std::io::
         .open(path)
     {
         Ok(mut file) => {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
             file.write_all(bytes)?;
             Ok(true)
         }
@@ -198,20 +204,21 @@ pub(super) fn write_cache_atomic_0600(path: &Path, bytes: &[u8]) -> std::io::Res
 }
 
 fn write_atomic_0600_inner(path: &Path, bytes: &[u8], sync_disk: bool) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        builder.create(parent)?;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        ensure_dir_0700(parent)?;
     }
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let seq = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("cache");
-    let tmp_name = format!(".{file_name}.{}.{nanos}.tmp", std::process::id());
+    let tmp_name = format!(".{file_name}.{}.{nanos}.{seq}.tmp", std::process::id());
     let tmp_path = path.with_file_name(tmp_name);
 
     let write_res = (|| -> std::io::Result<()> {
@@ -224,7 +231,13 @@ fn write_atomic_0600_inner(path: &Path, bytes: &[u8], sync_disk: bool) -> std::i
         if sync_disk {
             file.sync_all()?;
         }
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        drop(file);
         fs::rename(&tmp_path, path)?;
+        let mode = fs::symlink_metadata(path)?.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            set_file_0600(path)?;
+        }
         Ok(())
     })();
 
@@ -261,13 +274,11 @@ pub(super) fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-#[cfg(target_os = "linux")]
 pub(super) fn is_owned_dir_no_symlink(path: &Path, euid: u32) -> bool {
     fs::symlink_metadata(path)
         .is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir() && m.uid() == euid)
 }
 
-#[cfg(target_os = "linux")]
 pub(super) fn ensure_owned_dir_0700(path: &Path, euid: u32) -> bool {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != euid {
@@ -276,14 +287,65 @@ pub(super) fn ensure_owned_dir_0700(path: &Path, euid: u32) -> bool {
         if (meta.permissions().mode() & 0o077) != 0 {
             let mut perms = meta.permissions();
             perms.set_mode(0o700);
-            let _ = fs::set_permissions(path, perms);
+            if fs::set_permissions(path, perms).is_err() {
+                return false;
+            }
         }
         return true;
     }
     if ensure_dir_0700(path).is_err() {
         return false;
     }
-    is_owned_dir_no_symlink(path, euid)
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != euid {
+        return false;
+    }
+    if (meta.permissions().mode() & 0o077) != 0 {
+        let mut perms = meta.permissions();
+        perms.set_mode(0o700);
+        if fs::set_permissions(path, perms).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+pub(super) fn resolve_non_linux_runtime_dir() -> PathBuf {
+    let euid = current_euid();
+    if let Some(xdg) = super::env_var("XDG_RUNTIME_DIR") {
+        let trimmed = xdg.trim();
+        if !trimmed.is_empty() {
+            let xdg_path = PathBuf::from(trimmed);
+            if is_owned_dir_no_symlink(&xdg_path, euid) {
+                let candidate = xdg_path.join("agy-pulse");
+                if ensure_owned_dir_0700(&candidate, euid) {
+                    return candidate;
+                }
+            }
+        }
+    }
+    let temp_candidate = super::temp_dir().join(format!("agy-pulse-{euid}"));
+    if ensure_owned_dir_0700(&temp_candidate, euid) {
+        return temp_candidate;
+    }
+    if let Some(home) = super::home_dir() {
+        let private_candidate = home.join(".agy-pulse").join("runtime");
+        if ensure_owned_dir_0700(&private_candidate, euid) {
+            return private_candidate;
+        }
+    }
+    if let Some(root) = super::get_antigravity_roots().first() {
+        let root_candidate = root.join("runtime");
+        if ensure_owned_dir_0700(&root_candidate, euid) {
+            return root_candidate;
+        }
+    }
+    let fallback_suffix = super::random_hex(4).unwrap_or_else(|_| std::process::id().to_string());
+    let unique_temp = super::temp_dir().join(format!("agy-pulse-{euid}-{fallback_suffix}"));
+    let _ = ensure_owned_dir_0700(&unique_temp, euid);
+    unique_temp
 }
 
 #[cfg(target_os = "linux")]
@@ -307,7 +369,7 @@ pub(super) fn resolve_linux_runtime_dir() -> PathBuf {
             return candidate;
         }
     }
-    super::temp_dir().join(format!("agy-pulse-{euid}"))
+    resolve_non_linux_runtime_dir()
 }
 
 #[cfg(target_os = "linux")]

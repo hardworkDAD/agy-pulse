@@ -11,13 +11,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-
-static DEVICE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static THREAD_ENV_OVERRIDES: RefCell<Option<HashMap<String, Option<String>>>> = const { RefCell::new(None) };
@@ -112,33 +109,34 @@ pub fn current_exe_mtime_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Fill `dest` with cryptographically secure random bytes from the OS CSPRNG.
+pub fn fill_random_bytes(dest: &mut [u8]) -> io::Result<()> {
+    if dest.is_empty() {
+        return Ok(());
+    }
+    getrandom::fill(dest).map_err(|err| io::Error::other(format!("OS CSPRNG failed: {err}")))
+}
+
+/// Return a fixed-size array of cryptographically secure random bytes from the OS CSPRNG.
+pub fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
+    let mut buf = [0u8; N];
+    fill_random_bytes(&mut buf)?;
+    Ok(buf)
+}
+
+/// Generate `num_bytes` of OS CSPRNG entropy encoded as lowercase hexadecimal (`2 * num_bytes` chars).
+pub fn random_hex(num_bytes: usize) -> io::Result<String> {
+    if num_bytes == 0 {
+        return Ok(String::new());
+    }
+    let mut buf = vec![0u8; num_bytes];
+    fill_random_bytes(&mut buf)?;
+    Ok(hex::encode(buf))
+}
+
 /// Generate a 128-bit random hexadecimal token suitable for local IPC authentication.
 pub fn random_128bit_hex() -> String {
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        let mut buf = [0u8; 16];
-        if let Ok(mut f) = fs::File::open("/dev/urandom")
-            && f.read_exact(&mut buf).is_ok()
-        {
-            return hex::encode(buf);
-        }
-    }
-
-    let seq = DEVICE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut hasher = Sha256::new();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    hasher.update(nanos.to_le_bytes());
-    hasher.update(std::process::id().to_le_bytes());
-    hasher.update(seq.to_le_bytes());
-    if let Some(host) = current_hostname() {
-        hasher.update(host.as_bytes());
-    }
-    let digest = hasher.finalize();
-    hex::encode(&digest[..16])
+    random_hex(16).unwrap_or_default()
 }
 
 /// Supported desktop operating systems for launcher & shortcut path conventions.
@@ -542,8 +540,7 @@ pub fn resolve_runtime_dir() -> PathBuf {
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let euid = unix::current_euid();
-        temp_dir().join(format!("agy-pulse-{euid}"))
+        unix::resolve_non_linux_runtime_dir()
     }
     #[cfg(windows)]
     {
@@ -696,41 +693,10 @@ pub fn current_hostname() -> Option<String> {
 
 /// Generate an immutable random device identifier formatted as `dev_<16 hex>`.
 pub fn generate_device_id() -> String {
-    let seq = DEVICE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut hasher = Sha256::new();
-
-    #[cfg(unix)]
-    let used_urandom = {
-        use std::io::Read;
-        let mut buf = [0u8; 16];
-        if let Ok(mut f) = fs::File::open("/dev/urandom")
-            && f.read_exact(&mut buf).is_ok()
-        {
-            hasher.update(buf);
-            hasher.update(seq.to_le_bytes());
-            true
-        } else {
-            false
-        }
-    };
-    #[cfg(not(unix))]
-    let used_urandom = false;
-
-    if !used_urandom {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        hasher.update(nanos.to_le_bytes());
-        hasher.update(std::process::id().to_le_bytes());
-        hasher.update(seq.to_le_bytes());
-        if let Some(host) = current_hostname() {
-            hasher.update(host.as_bytes());
-        }
+    match random_hex(8) {
+        Ok(hex_id) => format!("dev_{hex_id}"),
+        Err(_) => String::new(),
     }
-
-    let digest = hasher.finalize();
-    format!("dev_{}", hex::encode(&digest[..8]))
 }
 
 /// Write a diagnostic line to `agy-pulse-error.log` safely without following symlinks.
@@ -1235,14 +1201,36 @@ pub fn detect_app_window_browser_path(os: DesktopOs) -> Option<(String, PathBuf)
     }
 }
 
+/// Validate that `url` uses an `http://` or `https://` scheme, has a host, and contains no control/whitespace characters.
+pub fn is_safe_browser_url(url: &str) -> bool {
+    if url.is_empty() || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
+}
+
 /// Open a URL in the host operating system's default browser without blocking.
 pub fn open_url_default_browser(os: DesktopOs, url: &str) -> bool {
-    let res = match os {
-        DesktopOs::Macos => spawn_detached(Path::new("open"), &[url]),
-        DesktopOs::Windows => spawn_detached(Path::new("cmd"), &["/c", "start", "", url]),
-        DesktopOs::Linux => spawn_detached(Path::new("xdg-open"), &[url]),
-    };
-    res.is_ok()
+    if !is_safe_browser_url(url) {
+        return false;
+    }
+    match os {
+        DesktopOs::Macos => spawn_detached(Path::new("open"), &[url]).is_ok(),
+        DesktopOs::Windows => {
+            #[cfg(windows)]
+            {
+                windows::open_url_default_browser(url)
+            }
+            #[cfg(not(windows))]
+            {
+                false
+            }
+        }
+        DesktopOs::Linux => spawn_detached(Path::new("xdg-open"), &[url]).is_ok(),
+    }
 }
 
 /// Run a non-critical desktop integration helper silently (e.g. `update-desktop-database` or `powershell.exe`).
@@ -1347,5 +1335,151 @@ mod tests {
                 assert_ne!(sock, long_rt.join("collector.sock"));
             });
         }
+    }
+
+    #[test]
+    fn os_csprng_primitives_generate_unique_nonempty_tokens() {
+        let mut buf = [0u8; 24];
+        fill_random_bytes(&mut buf).expect("fill_random_bytes");
+        assert!(buf.iter().any(|&b| b != 0), "expected non-zero CSPRNG bytes");
+
+        let mut empty = [];
+        fill_random_bytes(&mut empty).expect("empty fill_random_bytes");
+
+        let a: [u8; 16] = random_bytes().expect("random_bytes 16");
+        let b: [u8; 16] = random_bytes().expect("random_bytes 16");
+        assert_ne!(a, b);
+
+        assert_eq!(random_hex(0).expect("random_hex 0"), "");
+        let h1 = random_hex(32).expect("random_hex 32");
+        let h2 = random_hex(32).expect("random_hex 32");
+        assert_eq!(h1.len(), 64);
+        assert_eq!(h2.len(), 64);
+        assert_ne!(h1, h2);
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+
+        let t1 = random_128bit_hex();
+        let t2 = random_128bit_hex();
+        assert_eq!(t1.len(), 32);
+        assert_ne!(t1, t2);
+        assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn browser_url_validation_allows_http_https_and_blocks_control_or_non_http_schemes() {
+        assert!(is_safe_browser_url("http://127.0.0.1:4321/"));
+        assert!(is_safe_browser_url(
+            "https://localhost:8443/?a=1&b=%PATH%&c=\"quoted\""
+        ));
+        assert!(is_safe_browser_url("HTTP://127.0.0.1:8080/status"));
+
+        for bad in [
+            "",
+            "   ",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "ms-msdt:/id",
+            "http://",
+            "https://127.0.0.1:8080/\n&calc",
+            "http://127.0.0.1:8080/\0evil",
+            "http://127.0.0.1:8080/ with space",
+        ] {
+            assert!(!is_safe_browser_url(bad), "should reject unsafe URL: {bad:?}");
+        }
+
+        assert!(!open_url_default_browser(DesktopOs::Linux, "javascript:alert(1)"));
+        assert!(!open_url_default_browser(
+            DesktopOs::Windows,
+            "file:///C:/Windows/System32/calc.exe"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_atomic_write_converges_permissive_existing_file_to_0600() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target_atomic = tmp.path().join("atomic.json");
+        let target_cache = tmp.path().join("cache.json");
+
+        fs::write(&target_atomic, b"old").expect("seed atomic");
+        fs::set_permissions(&target_atomic, fs::Permissions::from_mode(0o644))
+            .expect("chmod 0644 atomic");
+        fs::write(&target_cache, b"old").expect("seed cache");
+        fs::set_permissions(&target_cache, fs::Permissions::from_mode(0o644))
+            .expect("chmod 0644 cache");
+
+        write_atomic_0600(&target_atomic, b"new-atomic").expect("write_atomic_0600");
+        write_cache_atomic_0600(&target_cache, b"new-cache").expect("write_cache_atomic_0600");
+
+        let mode_atomic = fs::symlink_metadata(&target_atomic)
+            .expect("meta atomic")
+            .permissions()
+            .mode()
+            & 0o777;
+        let mode_cache = fs::symlink_metadata(&target_cache)
+            .expect("meta cache")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode_atomic, 0o600);
+        assert_eq!(mode_cache, 0o600);
+
+        let decoy = tmp.path().join("decoy.txt");
+        fs::write(&decoy, b"untouched").expect("seed decoy");
+        let link_target = tmp.path().join("symlink-target.json");
+        symlink(&decoy, &link_target).expect("create symlink");
+        write_atomic_0600(&link_target, b"replaced").expect("overwrite symlink atomically");
+        let link_meta = fs::symlink_metadata(&link_target).expect("meta link_target");
+        assert!(!link_meta.file_type().is_symlink());
+        assert_eq!(link_meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read(&decoy).expect("read decoy"), b"untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_linux_unix_runtime_dir_rejects_preempted_symlink_and_falls_back_safely() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake_tmp = tmp.path().join("shared-tmp");
+        let fake_home = tmp.path().join("private-home");
+        let victim = tmp.path().join("victim-dir");
+        fs::create_dir_all(&fake_tmp).expect("create fake_tmp");
+        fs::create_dir_all(&fake_home).expect("create fake_home");
+        fs::create_dir_all(&victim).expect("create victim");
+
+        let euid = unix::current_euid();
+        let preempt_path = fake_tmp.join(format!("agy-pulse-{euid}"));
+        symlink(&victim, &preempt_path).expect("preempt symlink");
+
+        let mut ov = HashMap::new();
+        ov.insert(
+            "TMPDIR".to_string(),
+            Some(fake_tmp.to_string_lossy().into_owned()),
+        );
+        ov.insert(
+            "HOME".to_string(),
+            Some(fake_home.to_string_lossy().into_owned()),
+        );
+        ov.insert("XDG_RUNTIME_DIR".to_string(), None);
+
+        with_env_overrides(&ov, || {
+            let resolved = unix::resolve_non_linux_runtime_dir();
+            assert_ne!(
+                resolved, preempt_path,
+                "must refuse symlink-preempted temp runtime dir"
+            );
+            assert!(
+                resolved.starts_with(&fake_home),
+                "expected fallback under HOME ({}), got {}",
+                fake_home.display(),
+                resolved.display()
+            );
+            let meta = fs::symlink_metadata(&resolved).expect("fallback dir exists");
+            assert!(!meta.file_type().is_symlink() && meta.is_dir());
+            assert_eq!(meta.permissions().mode() & 0o077, 0);
+        });
     }
 }
