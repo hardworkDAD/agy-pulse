@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
+use jiff::civil::{Date, DateTime};
+use jiff::tz::{AmbiguousOffset, TimeZone};
+use jiff::{Timestamp, ToSpan, ZonedDateTime};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -542,40 +544,32 @@ pub struct LedgerOverview {
     pub cascades: Vec<CascadeOverview>,
 }
 
-// --- Local timezone helpers (cross-platform via chrono) ---
+// --- Local timezone helpers ---
 
-pub(super) fn local_datetime_in_tz<Tz: TimeZone>(tz: &Tz, ms: i64) -> DateTime<Tz> {
-    if let Some(dt) = tz.timestamp_millis_opt(ms).earliest() {
-        return dt;
+fn local_datetime_in_tz(tz: &TimeZone, ms: i64) -> ZonedDateTime {
+    Timestamp::from_millisecond(ms)
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .to_zoned_datetime(tz.clone())
+}
+
+fn local_datetime(ms: i64) -> ZonedDateTime {
+    local_datetime_in_tz(&TimeZone::system(), ms)
+}
+
+fn resolve_local_naive_ms(tz: &TimeZone, naive: DateTime, prefer_latest: bool) -> Option<i64> {
+    let candidate = tz.to_ambiguous_timestamp(naive);
+    if matches!(candidate.offset(), AmbiguousOffset::Gap { .. }) {
+        return None;
     }
-    DateTime::from_timestamp_millis(ms)
-        .unwrap_or(DateTime::UNIX_EPOCH)
-        .with_timezone(tz)
-}
-
-pub(super) fn local_datetime(ms: i64) -> DateTime<Local> {
-    local_datetime_in_tz(&Local, ms)
-}
-
-fn resolve_local_naive_ms<Tz: TimeZone>(
-    tz: &Tz,
-    naive: chrono::NaiveDateTime,
-    prefer_latest: bool,
-) -> Option<i64> {
-    let res = tz.from_local_datetime(&naive);
-    let chosen = if prefer_latest {
-        res.latest()
+    let timestamp = if prefer_latest {
+        candidate.later()
     } else {
-        res.earliest()
+        candidate.earlier()
     };
-    chosen.map(|dt| dt.timestamp_millis())
+    Some(timestamp.ok()?.as_millisecond())
 }
 
-fn local_naive_to_ms_in_tz<Tz: TimeZone>(
-    tz: &Tz,
-    naive: chrono::NaiveDateTime,
-    prefer_latest: bool,
-) -> Option<i64> {
+fn local_naive_to_ms_in_tz(tz: &TimeZone, naive: DateTime, prefer_latest: bool) -> Option<i64> {
     if let Some(ms) = resolve_local_naive_ms(tz, naive, prefer_latest) {
         return Some(ms);
     }
@@ -583,8 +577,8 @@ fn local_naive_to_ms_in_tz<Tz: TimeZone>(
     // minute-by-minute up to 3 hours to land on the nearest valid local instant of that day.
     let target_date = naive.date();
     for step_min in 1i64..=180 {
-        let delta = chrono::Duration::minutes(if prefer_latest { -step_min } else { step_min });
-        let candidate = naive + delta;
+        let delta = if prefer_latest { -step_min } else { step_min };
+        let candidate = naive.checked_add(delta.minutes()).ok()?;
         if candidate.date() != target_date {
             break;
         }
@@ -595,18 +589,26 @@ fn local_naive_to_ms_in_tz<Tz: TimeZone>(
     None
 }
 
-pub(super) fn local_ymd_hms_to_ms(
-    year: i32,
-    month: u32,
-    day: u32,
-    hour: u32,
-    min: u32,
-    sec: u32,
-    milli: u32,
+fn local_ymd_hms_to_ms(
+    year: i16,
+    month: i8,
+    day: i8,
+    hour: i8,
+    min: i8,
+    sec: i8,
+    milli: i32,
 ) -> Option<i64> {
-    let date = NaiveDate::from_ymd_opt(year, month, day)?;
-    let naive = date.and_hms_milli_opt(hour, min, sec, milli)?;
-    local_naive_to_ms_in_tz(&Local, naive, false)
+    let naive = DateTime::new(
+        year,
+        month,
+        day,
+        hour,
+        min,
+        sec,
+        milli.checked_mul(1_000_000)?,
+    )
+    .ok()?;
+    local_naive_to_ms_in_tz(&TimeZone::system(), naive, false)
 }
 
 pub(super) fn local_date_key(ms: i64) -> String {
@@ -614,24 +616,21 @@ pub(super) fn local_date_key(ms: i64) -> String {
     format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day())
 }
 
-pub(super) fn local_today_bounds_in_tz<Tz: TimeZone>(tz: &Tz, now_ms: i64) -> (i64, i64) {
+fn local_today_bounds_in_tz(tz: &TimeZone, now_ms: i64) -> (i64, i64) {
     let dt = local_datetime_in_tz(tz, now_ms);
-    let fallback_start = now_ms - i64::from(dt.num_seconds_from_midnight()) * 1000;
-    let date = dt.date_naive();
-    let start = date
-        .and_hms_milli_opt(0, 0, 0, 0)
-        .and_then(|naive| local_naive_to_ms_in_tz(tz, naive, false))
-        .unwrap_or(fallback_start);
-    let end = date
-        .and_hms_milli_opt(23, 59, 59, 999)
-        .and_then(|naive| local_naive_to_ms_in_tz(tz, naive, true))
+    let seconds_from_midnight =
+        i64::from(dt.hour()) * 3600 + i64::from(dt.minute()) * 60 + i64::from(dt.second());
+    let date = dt.date();
+    let start = local_naive_to_ms_in_tz(tz, date.at(0, 0, 0, 0), false)
+        .unwrap_or_else(|| now_ms.saturating_sub(seconds_from_midnight * 1000));
+    let end = local_naive_to_ms_in_tz(tz, date.at(23, 59, 59, 999_000_000), true)
         .unwrap_or_else(|| start.saturating_add(DAY_MS - 1))
         .max(start);
     (start, end)
 }
 
 pub(super) fn local_today_bounds(now_ms: i64) -> (i64, i64) {
-    local_today_bounds_in_tz(&Local, now_ms)
+    local_today_bounds_in_tz(&TimeZone::system(), now_ms)
 }
 
 fn format_local_date_str(ms: i64) -> String {
@@ -649,21 +648,16 @@ fn parse_date_input(raw: Option<&str>, is_end: bool) -> Option<i64> {
         return Some(if trimmed.len() == 10 { num * 1000 } else { num });
     }
     if trimmed.len() == 10 && trimmed.as_bytes()[4] == b'-' && trimmed.as_bytes()[7] == b'-' {
-        let y = trimmed[0..4].parse::<i32>().ok()?;
-        let m = trimmed[5..7].parse::<u32>().ok()?;
-        let d = trimmed[8..10].parse::<u32>().ok()?;
-        let date = NaiveDate::from_ymd_opt(y, m, d)?;
-        return if is_end {
-            let naive = date.and_hms_milli_opt(23, 59, 59, 999)?;
-            local_naive_to_ms_in_tz(&Local, naive, true)
+        let date: Date = trimmed.parse().ok()?;
+        let naive = if is_end {
+            date.at(23, 59, 59, 999_000_000)
         } else {
-            let naive = date.and_hms_milli_opt(0, 0, 0, 0)?;
-            local_naive_to_ms_in_tz(&Local, naive, false)
+            date.at(0, 0, 0, 0)
         };
+        return local_naive_to_ms_in_tz(&TimeZone::system(), naive, is_end);
     }
-    DateTime::parse_from_rfc3339(trimmed)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
+    let timestamp = trimmed.parse::<Timestamp>().ok()?;
+    i64::try_from(timestamp.as_nanosecond().div_euclid(1_000_000)).ok()
 }
 
 struct ResolvedRange {
@@ -1385,8 +1379,8 @@ fn get_bucket_info(ts_ms: i64, granularity: LedgerGranularity) -> BucketInfo {
             }
         }
         LedgerGranularity::Week => {
-            let offset_days = i64::from(dt.weekday().num_days_from_monday());
-            let mon_date = dt.date_naive() - chrono::Duration::days(offset_days);
+            let offset_days = dt.weekday().to_monday_zero_offset();
+            let mon_date = dt.date().saturating_sub(offset_days.days());
             let my = mon_date.year();
             let mm = mon_date.month();
             let md = mon_date.day();
@@ -2790,77 +2784,15 @@ mod tests {
         });
     }
 
-    #[derive(Clone, Copy)]
-    struct MockMidnightDstTz {
-        skip_midnight_hour: bool,
-        skip_eod_hour: bool,
-    }
-
-    impl TimeZone for MockMidnightDstTz {
-        type Offset = chrono::FixedOffset;
-
-        fn from_offset(_offset: &Self::Offset) -> Self {
-            Self {
-                skip_midnight_hour: false,
-                skip_eod_hour: false,
-            }
-        }
-
-        fn offset_from_local_date(
-            &self,
-            _local: &NaiveDate,
-        ) -> chrono::MappedLocalTime<Self::Offset> {
-            let Some(off) = chrono::FixedOffset::east_opt(0) else {
-                return chrono::MappedLocalTime::None;
-            };
-            chrono::MappedLocalTime::Single(off)
-        }
-
-        fn offset_from_local_datetime(
-            &self,
-            local: &chrono::NaiveDateTime,
-        ) -> chrono::MappedLocalTime<Self::Offset> {
-            let h = local.hour();
-            if self.skip_midnight_hour && h == 0 {
-                return chrono::MappedLocalTime::None;
-            }
-            if self.skip_eod_hour && h == 23 {
-                return chrono::MappedLocalTime::None;
-            }
-            let offset_secs = if self.skip_midnight_hour && h >= 1 {
-                3600
-            } else {
-                0
-            };
-            let Some(off) = chrono::FixedOffset::east_opt(offset_secs) else {
-                return chrono::MappedLocalTime::None;
-            };
-            chrono::MappedLocalTime::Single(off)
-        }
-
-        fn offset_from_utc_date(&self, _utc: &NaiveDate) -> Self::Offset {
-            chrono::FixedOffset::east_opt(0).unwrap_or_else(|| unreachable!())
-        }
-
-        fn offset_from_utc_datetime(&self, _utc: &chrono::NaiveDateTime) -> Self::Offset {
-            let off_secs = if self.skip_midnight_hour { 3600 } else { 0 };
-            chrono::FixedOffset::east_opt(off_secs).unwrap_or_else(|| unreachable!())
-        }
-    }
-
     #[test]
     fn local_today_bounds_handles_midnight_and_eod_dst_spring_forward_gaps() {
-        let Some(date) = NaiveDate::from_ymd_opt(2026, 11, 1) else {
-            panic!("valid date");
+        let Ok(noon) = "2026-03-08T12:00:00Z".parse::<Timestamp>() else {
+            panic!("valid timestamp");
         };
-        let Some(noon) = date.and_hms_opt(12, 0, 0) else {
-            panic!("valid noon");
+        let Ok(tz_midnight_gap) = TimeZone::posix("STD0DST,M3.2.0/0,M11.1.0/0") else {
+            panic!("valid midnight transition");
         };
-        let tz_midnight_gap = MockMidnightDstTz {
-            skip_midnight_hour: true,
-            skip_eod_hour: false,
-        };
-        let now_ms = noon.and_utc().timestamp_millis() - 3_600_000;
+        let now_ms = noon.as_millisecond() - HOUR_MS;
         let (start, end) = local_today_bounds_in_tz(&tz_midnight_gap, now_ms);
         assert!(start < end, "expected non-empty window: {start}..{end}");
         assert!(
@@ -2868,17 +2800,12 @@ mod tests {
             "expected now_ms inside window: start={start}, now={now_ms}, end={end}"
         );
         // Nearest valid local start on midnight DST jump is 01:00:00+01:00 == 00:00:00Z
-        let expected_start = date
-            .and_hms_opt(0, 0, 0)
-            .map(|dt| dt.and_utc().timestamp_millis())
-            .unwrap_or(0);
-        assert_eq!(start, expected_start);
+        assert_eq!(start, noon.as_millisecond() - 12 * HOUR_MS);
 
-        let tz_eod_gap = MockMidnightDstTz {
-            skip_midnight_hour: false,
-            skip_eod_hour: true,
+        let Ok(tz_eod_gap) = TimeZone::posix("STD0DST,M3.2.0/23,M11.1.0/0") else {
+            panic!("valid end-of-day transition");
         };
-        let now_eod = noon.and_utc().timestamp_millis();
+        let now_eod = noon.as_millisecond();
         let (start2, end2) = local_today_bounds_in_tz(&tz_eod_gap, now_eod);
         assert!(
             start2 < end2,
@@ -2886,11 +2813,7 @@ mod tests {
         );
         assert!(start2 <= now_eod && now_eod <= end2);
         // Nearest valid local end when 23:00..24:00 is skipped is 22:59:59.999Z
-        let expected_end = date
-            .and_hms_milli_opt(22, 59, 59, 999)
-            .map(|dt| dt.and_utc().timestamp_millis())
-            .unwrap_or(0);
-        assert_eq!(end2, expected_end);
+        assert_eq!(end2, now_eod + 11 * HOUR_MS - 1);
     }
 
     fn explain_plan_details(conn: &Connection, query: &StepsSqlQuery) -> Vec<String> {

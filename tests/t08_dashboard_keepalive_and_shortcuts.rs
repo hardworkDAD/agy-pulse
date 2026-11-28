@@ -78,6 +78,11 @@ impl IsolatedEnv {
         self.cli_data_dir.join(DASHBOARD_STATE_FILENAME)
     }
 
+    fn dashboard_port(&self) -> Option<u16> {
+        let state: Value = serde_json::from_slice(&fs::read(self.state_file_path()).ok()?).ok()?;
+        u16::try_from(state["port"].as_u64()?).ok()
+    }
+
     fn base_cmd(&self) -> Command {
         let mut cmd = Command::new(agypl_bin());
         cmd.current_dir(&self.workspace_dir)
@@ -127,10 +132,19 @@ fn send_http(
     target: &str,
     headers: &[(&str, &str)],
 ) -> Result<HttpResponse, std::io::Error> {
-    let mut stream = TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_millis(500),
-    )?;
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let connect = || TcpStream::connect_timeout(&address, Duration::from_secs(1));
+    let mut stream = match connect() {
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+            ) =>
+        {
+            connect()?
+        }
+        result => result?,
+    };
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
 
@@ -375,7 +389,7 @@ fn t08_background_daemon_single_instance_reuse_status_stop_and_stale_recovery() 
 #[test]
 fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_grace() {
     let env = IsolatedEnv::new();
-    let port = free_loopback_port();
+    let requested_port = free_loopback_port();
 
     // Start background daemon with short startup idle (1s) and short close grace (350ms).
     let open_out = env
@@ -386,7 +400,7 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
             "dashboard",
             "open",
             "--port",
-            &port.to_string(),
+            &requested_port.to_string(),
             "--no-open",
             "--no-sync",
         ])
@@ -397,6 +411,9 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
         "open failed: {}",
         String::from_utf8_lossy(&open_out.stderr)
     );
+    let port = env
+        .dashboard_port()
+        .expect("daemon port from discovery state");
 
     // Verify rendered HTML removes the old `visibilityState !== 'hidden'` limit and wires SSE + keepalive fetch with CSRF.
     let html_res = send_http(port, "GET", "/", &[]).expect("GET /");
@@ -563,9 +580,9 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
     let mut guard = ChildGuard(child);
 
     let ready = wait_until(Duration::from_secs(3), || {
-        send_http(port2, "GET", "/api/health", &[])
-            .map(|r| r.status == 200)
-            .unwrap_or(false)
+        env.dashboard_port()
+            .and_then(|port| send_http(port, "GET", "/api/health", &[]).ok())
+            .is_some_and(|response| response.status == 200)
     });
     assert!(ready, "background serve child did not become ready");
 

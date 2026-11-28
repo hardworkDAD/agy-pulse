@@ -14,8 +14,6 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
-
 pub use crate::domain::TerminalCaps;
 
 thread_local! {
@@ -561,6 +559,8 @@ pub fn resolve_fast_temp_dir() -> PathBuf {
 /// Resolve the collector IPC Unix domain socket path while staying within the 96-byte `sun_path` budget.
 #[cfg(unix)]
 pub fn resolve_ipc_socket_path() -> PathBuf {
+    use sha2::{Digest, Sha256};
+
     let runtime_dir = resolve_runtime_dir();
     let primary = runtime_dir.join("collector.sock");
     if primary.as_os_str().as_encoded_bytes().len() <= 96 {

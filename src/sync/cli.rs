@@ -7,7 +7,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
+use jiff::tz::Offset;
 
 use crate::domain::SyncDeviceRecord;
 use crate::ledger::{LedgerStore, LedgerSyncOptions, validate_and_normalize_account_email};
@@ -203,13 +204,13 @@ fn redact_with_env(msg: &str, cfg: Option<&SyncConfig>) -> String {
 
 fn format_epoch_ms(ts_ms: Option<i64>) -> String {
     match ts_ms {
-        Some(ms) => {
-            if let Some(dt) = DateTime::<Utc>::from_timestamp_millis(ms) {
-                dt.to_rfc3339()
-            } else {
-                ms.to_string()
-            }
-        }
+        Some(ms) => Timestamp::from_millisecond(ms).map_or_else(
+            |_| ms.to_string(),
+            |ts| {
+                let precision = if ms % 1000 == 0 { 0 } else { 3 };
+                format!("{:.precision$}", ts.display_with_offset(Offset::UTC))
+            },
+        ),
         None => "never".to_string(),
     }
 }

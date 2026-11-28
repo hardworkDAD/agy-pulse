@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use chrono::{TimeZone, Utc};
+use jiff::Timestamp;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -663,10 +663,10 @@ fn two_machine_cli_sync_dry_run_push_pull_status_and_prune_device() {
     }
 
     // Seed machine A conversation and quota
-    let ts_a = Utc
-        .with_ymd_and_hms(2026, 11, 10, 10, 0, 0)
+    let ts_a = "2026-11-10T10:00:00Z"
+        .parse::<Timestamp>()
         .unwrap()
-        .timestamp_millis();
+        .as_millisecond();
     seed_conv(
         &machine_a.data_dir,
         "conv-alpha-01",
@@ -774,10 +774,10 @@ fn two_machine_cli_sync_dry_run_push_pull_status_and_prune_device() {
     assert!(pull_b_out.contains("steps imported:     1"));
 
     // Seed machine B conversation and run bidirectional sync on B, then A
-    let ts_b = Utc
-        .with_ymd_and_hms(2026, 11, 11, 12, 0, 0)
+    let ts_b = "2026-11-11T12:00:00Z"
+        .parse::<Timestamp>()
         .unwrap()
-        .timestamp_millis();
+        .as_millisecond();
     seed_conv(
         &machine_b.data_dir,
         "conv-beta-01",
@@ -971,7 +971,7 @@ fn statusline_spawns_sync_bg_respecting_throttle_and_no_autostart_env() {
         .join(&local_device_id)
         .join("manifest.json");
 
-    let now_ts = Utc::now().timestamp_millis();
+    let now_ts = Timestamp::now().as_millisecond();
     seed_conv(
         &env.data_dir,
         "conv-status-bg",
@@ -1146,7 +1146,7 @@ fn bg_ledger_sync_lock_recovers_from_future_timestamp_clock_rollback() {
     )
     .unwrap();
     let lock_path = env.data_dir.join("agy-pulse-ledger-sync.lock");
-    let now_ms = Utc::now().timestamp_millis();
+    let now_ms = Timestamp::now().as_millisecond();
     let future_ms = now_ms + 120_000;
     let fake_lock = serde_json::json!({
         "pid": std::process::id(),

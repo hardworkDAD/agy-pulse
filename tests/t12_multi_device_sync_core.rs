@@ -6,8 +6,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use chrono::{TimeZone, Utc};
 use flate2::{Compression, GzBuilder};
+use jiff::{Timestamp, civil::date, tz::TimeZone};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -195,11 +195,13 @@ impl IsolatedMachine {
     }
 }
 
-fn utc_ms(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> i64 {
-    Utc.with_ymd_and_hms(y, m, d, hh, mm, 0)
-        .single()
+fn utc_ms(y: i16, m: i8, d: i8, hh: i8, mm: i8) -> i64 {
+    date(y, m, d)
+        .at(hh, mm, 0, 0)
+        .to_zoned_datetime(TimeZone::UTC)
         .unwrap()
-        .timestamp_millis()
+        .timestamp()
+        .as_millisecond()
 }
 
 fn sample_quota(frac: f64, reset_ms: i64) -> ProviderQuotaSummary {
@@ -1254,7 +1256,7 @@ fn t12_sync_both_dedup_accounts_incremental_steps_and_clock_skew_clamp() {
 
     // Future clock-skew clamping: a rogue device manifest with updated_at_ms & observed_at_ms
     // 24 hours in the future must be clamped to <= now_ms + 5min.
-    let now_approx = Utc::now().timestamp_millis();
+    let now_approx = Timestamp::now().as_millisecond();
     let far_future = now_approx + 24 * 60 * 60 * 1000;
     let rogue_manifest = DeviceManifest {
         format_version: 1,
@@ -1278,7 +1280,7 @@ fn t12_sync_both_dedup_accounts_incremental_steps_and_clock_skew_clamp() {
         .unwrap();
 
     pull(&store_b, &remote, &cfg_b, false).unwrap();
-    let after_pull_ms = Utc::now().timestamp_millis();
+    let after_pull_ms = Timestamp::now().as_millisecond();
     let max_allowed = after_pull_ms + 5 * 60 * 1000;
 
     let conn_b = Connection::open(&machine_b.ledger_path).unwrap();

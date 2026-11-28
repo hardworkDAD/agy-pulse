@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
-use chrono::{Local, TimeZone};
+use jiff::{Timestamp, civil::date, tz::TimeZone};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -308,12 +308,13 @@ fn write_conv_db(
     }
 }
 
-fn local_ms(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
-    Local
-        .with_ymd_and_hms(y, m, d, hh, mm, ss)
-        .single()
+fn local_ms(y: i16, m: i8, d: i8, hh: i8, mm: i8, ss: i8) -> i64 {
+    date(y, m, d)
+        .at(hh, mm, ss, 0)
+        .to_zoned_datetime(TimeZone::system())
         .expect("valid local datetime")
-        .timestamp_millis()
+        .timestamp()
+        .as_millisecond()
 }
 
 #[test]
@@ -620,7 +621,7 @@ fn t05_rolling_daily_weekly_cost_and_compaction_rollback_protection() {
     .unwrap();
 
     // Pre-existing DB step for today so Turn 1 has immediate DB cost AND zero double-counting
-    let now_ts = Local::now().timestamp_millis();
+    let now_ts = Timestamp::now().as_millisecond();
     let pre_db = env_e2e
         .cli_data_dir
         .join("conversations")
@@ -740,7 +741,7 @@ fn t05_concurrent_statusline_and_stats_processes_have_no_sqlite_busy_failures() 
     )
     .unwrap();
 
-    let now_ts = Local::now().timestamp_millis();
+    let now_ts = Timestamp::now().as_millisecond();
     for i in 0..4 {
         let db_path = env
             .cli_data_dir
@@ -862,7 +863,7 @@ fn t05_concurrent_statusline_and_stats_processes_have_no_sqlite_busy_failures() 
 #[test]
 fn t05_stats_subcommand_cli_ide_json_bilingual_and_exact_metrics() {
     let env = IsolatedEnv::new();
-    let now_ms = Local::now().timestamp_millis();
+    let now_ms = Timestamp::now().as_millisecond();
 
     // CLI DB: Gemini 4 Carbon (High): 100k input + 400k cache_read + 10k output, stream=50s (200.0 tok/s)
     // Pricing for Carbon: input $2.00/M, output $10.00/M, cache_read $0.10/M

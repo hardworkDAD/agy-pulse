@@ -498,6 +498,8 @@ fn extract_binary_from_zip(
 ) -> Result<Vec<u8>, OpsError> {
     let mut zip = ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|err| OpsError::Archive(format!("Invalid .zip archive: {err}")))?;
+    zip.validate_header_consistency()
+        .map_err(|err| OpsError::Archive(format!("Invalid .zip archive headers: {err}")))?;
     for idx in 0..zip.len() {
         let file = zip
             .by_index(idx)
@@ -505,7 +507,10 @@ fn extract_binary_from_zip(
         if file.is_dir() {
             continue;
         }
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .map_err(|err| OpsError::Archive(format!("Invalid zip entry name: {err}")))?
+            .into_owned();
         if matches_target_binary_name(&name, expected_names) {
             if file.size() > MAX_EXTRACTED_BINARY_BYTES {
                 return Err(OpsError::Archive(format!(

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
@@ -1913,8 +1913,10 @@ pub(super) fn assign_unassigned_account(
 }
 
 fn utc_month_key_from_ms(ts_ms: i64) -> String {
-    let dt = DateTime::<Utc>::from_timestamp_millis(ts_ms).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-    dt.format("%Y-%m").to_string()
+    Timestamp::from_millisecond(ts_ms)
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .strftime("%Y-%m")
+        .to_string()
 }
 
 pub(super) fn list_local_sync_accounts(conn: &Connection) -> Result<Vec<String>, LedgerError> {

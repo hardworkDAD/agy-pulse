@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use chrono::{Local, TimeZone};
+use jiff::{Timestamp, civil::date, tz::TimeZone};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
@@ -158,12 +158,13 @@ fn write_conv_db(
     }
 }
 
-fn local_ms(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
-    Local
-        .with_ymd_and_hms(y, m, d, hh, mm, ss)
-        .single()
+fn local_ms(y: i16, m: i8, d: i8, hh: i8, mm: i8, ss: i8) -> i64 {
+    date(y, m, d)
+        .at(hh, mm, ss, 0)
+        .to_zoned_datetime(TimeZone::system())
         .expect("valid local datetime")
-        .timestamp_millis()
+        .timestamp()
+        .as_millisecond()
 }
 
 fn is_valid_device_id(id: &str) -> bool {
@@ -1162,7 +1163,7 @@ fn t06_statusline_e2e_persists_last_observed_email_and_quota_snapshot() {
     fs::write(&sync_cfg, r#"{"deviceName":"e2e-linux-box"}"#).unwrap();
 
     let conv_id = "conv-e2e-quota-1";
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_ms = Timestamp::now().as_millisecond();
     seed_conv(&data_dir, conv_id, "file:///work/e2e", now_ms - 5_000);
 
     let payload = serde_json::json!({

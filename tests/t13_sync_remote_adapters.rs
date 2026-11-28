@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
+use jiff::{civil::date, tz::TimeZone};
 use rusqlite::{Connection, params};
 use sha2::Digest;
 use tempfile::TempDir;
@@ -354,11 +354,13 @@ impl IsolatedMachine {
     }
 }
 
-fn utc_ms(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> i64 {
-    Utc.with_ymd_and_hms(y, m, d, hh, mm, 0)
-        .single()
+fn utc_ms(y: i16, m: i8, d: i8, hh: i8, mm: i8) -> i64 {
+    date(y, m, d)
+        .at(hh, mm, 0, 0)
+        .to_zoned_datetime(TimeZone::UTC)
         .unwrap()
-        .timestamp_millis()
+        .timestamp()
+        .as_millisecond()
 }
 
 fn seed_machine_a_and_sync_roundtrip(remote_cfg: RemoteConfig) {

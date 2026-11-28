@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::{SecondsFormat, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::config::LanguageSetting;
@@ -262,7 +262,7 @@ impl DashboardServer {
 
         let locale = platform::read_locale_env();
         let default_lang = resolve_language_from_locale(config.lang, locale.as_deref());
-        let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let started_at = format!("{:.3}", Timestamp::now());
         let started_instant = Instant::now();
         let close_grace_ms = resolve_close_grace_ms(config.close_grace_ms);
         let ping_lease_ms = resolve_ping_lease_ms();
@@ -566,7 +566,8 @@ fn serve_sse_keepalive(
             Ok(_) => {}
             Err(err)
                 if err.kind() == io::ErrorKind::WouldBlock
-                    || err.kind() == io::ErrorKind::TimedOut => {}
+                    || err.kind() == io::ErrorKind::TimedOut
+                    || err.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
         if last_ping.elapsed() >= shared.sse_ping_interval {

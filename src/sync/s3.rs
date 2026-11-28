@@ -1,4 +1,4 @@
-use chrono::Utc;
+use jiff::Timestamp;
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -272,7 +272,7 @@ impl S3Remote {
     ) -> Result<ureq::http::Response<ureq::Body>, SyncError> {
         let (full_url, canonical_uri, host_header) =
             self.build_request_target(key, query_params)?;
-        let amz_date = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let amz_date = Timestamp::now().strftime("%Y%m%dT%H%M%SZ").to_string();
         let signed = sign_aws_v4_headers(
             method,
             &canonical_uri,

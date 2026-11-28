@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use jiff::ZonedDateTime;
+
 use crate::platform;
 
 #[repr(u8)]
@@ -175,7 +177,7 @@ impl Profiler {
                             }
                             let elapsed = started.elapsed().as_millis() as u64;
                             if elapsed >= cp {
-                                let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+                                let ts = ZonedDateTime::now().strftime("%H:%M:%S%.3f");
                                 let cur =
                                     Stage::from_u8(watch_stage.load(Ordering::Acquire)).as_str();
                                 let line = format!(
@@ -215,7 +217,7 @@ impl Profiler {
         {
             self.stage
                 .store(Stage::WriteProfileLog as u8, Ordering::Release);
-            let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+            let ts = ZonedDateTime::now().strftime("%H:%M:%S%.3f");
             let pid = std::process::id();
             let line = format!("[{ts}] pid={pid} DONE total={total}ms {summary}\n");
             append_line(path, &line);
