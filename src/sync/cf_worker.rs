@@ -24,6 +24,8 @@ struct WorkerListResponse {
     keys: Vec<String>,
     #[serde(default)]
     cursor: Option<String>,
+    #[serde(default)]
+    truncated: Option<bool>,
 }
 
 /// `SyncRemote` adapter backed by the companion `deploy/cloudflare-worker` HTTP API.
@@ -122,6 +124,11 @@ impl CfWorkerRemote {
                 "cf-worker authentication failed (HTTP {status}) at {}",
                 self.display_url
             ))
+        } else if status == 413 {
+            SyncError::Remote(format!(
+                "cf-worker {op} rejected payload as too large (HTTP 413; Cloudflare KV limit is 25 MiB) at {}",
+                self.display_url
+            ))
         } else {
             SyncError::Remote(format!(
                 "cf-worker {op} failed with HTTP {status} at {}",
@@ -200,14 +207,29 @@ impl SyncRemote for CfWorkerRemote {
                 }
             }
 
-            match parsed.cursor.as_deref().map(str::trim) {
-                Some(next_cur) if !next_cur.is_empty() => {
+            let next_cursor = parsed
+                .cursor
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+
+            match (parsed.truncated, next_cursor) {
+                (Some(true), Some(next_cur)) => {
                     cursor = Some(next_cur.to_string());
                 }
-                _ => {
+                (Some(true), None) => {
+                    return Err(SyncError::Protocol(
+                        "cf-worker list returned truncated=true without a continuation cursor"
+                            .to_string(),
+                    ));
+                }
+                (Some(false), _) | (None, None) => {
                     results.sort();
                     results.dedup();
                     return Ok(results);
+                }
+                (None, Some(next_cur)) => {
+                    cursor = Some(next_cur.to_string());
                 }
             }
         }

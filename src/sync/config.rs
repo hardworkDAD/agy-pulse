@@ -35,7 +35,7 @@ fn default_true() -> bool {
 
 fn redact_opt(opt: &Option<String>) -> &'static str {
     match opt.as_deref() {
-        Some(s) if !s.trim().is_empty() => "[REDACTED]",
+        Some(s) if !s.is_empty() => "[REDACTED]",
         _ => "<none>",
     }
 }
@@ -207,8 +207,16 @@ fn non_empty_env(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn non_empty_env_raw(name: &str) -> Option<String> {
+    platform::env_var(name).filter(|v| !v.is_empty())
+}
+
 fn clean_opt_string(opt: Option<String>) -> Option<String> {
     opt.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn non_empty_opt_string(opt: Option<String>) -> Option<String> {
+    opt.filter(|s| !s.is_empty())
 }
 
 impl SyncConfig {
@@ -240,7 +248,7 @@ impl SyncConfig {
             } => {
                 *url = url.trim().to_string();
                 *username = clean_opt_string(username.take());
-                *password = clean_opt_string(password.take());
+                *password = non_empty_opt_string(password.take());
                 *token = clean_opt_string(token.take());
             }
             RemoteConfig::S3 {
@@ -272,7 +280,7 @@ impl SyncConfig {
     /// Override credentials from environment variables when non-empty.
     pub fn apply_env_overrides(&mut self) {
         let env_token = non_empty_env("AGY_PULSE_SYNC_TOKEN");
-        let env_password = non_empty_env("AGY_PULSE_SYNC_PASSWORD");
+        let env_password = non_empty_env_raw("AGY_PULSE_SYNC_PASSWORD");
         let env_s3_access = non_empty_env("AGY_PULSE_S3_ACCESS_KEY");
         let env_s3_secret = non_empty_env("AGY_PULSE_S3_SECRET_KEY");
 
@@ -408,7 +416,7 @@ pub struct SyncEnvOverrides {
 /// Detect which sync credential environment variables are currently active (names only).
 pub fn active_sync_env_overrides() -> SyncEnvOverrides {
     SyncEnvOverrides {
-        password: non_empty_env("AGY_PULSE_SYNC_PASSWORD").map(|_| "AGY_PULSE_SYNC_PASSWORD"),
+        password: non_empty_env_raw("AGY_PULSE_SYNC_PASSWORD").map(|_| "AGY_PULSE_SYNC_PASSWORD"),
         token: non_empty_env("AGY_PULSE_SYNC_TOKEN").map(|_| "AGY_PULSE_SYNC_TOKEN"),
         access_key: non_empty_env("AGY_PULSE_S3_ACCESS_KEY").map(|_| "AGY_PULSE_S3_ACCESS_KEY"),
         secret_key: non_empty_env("AGY_PULSE_S3_SECRET_KEY").map(|_| "AGY_PULSE_S3_SECRET_KEY"),

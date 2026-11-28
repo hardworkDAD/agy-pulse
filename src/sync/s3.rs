@@ -352,11 +352,49 @@ fn xml_local_name(raw_tag: &str) -> &str {
         .map_or(name_part, |(_, local)| local)
 }
 
-fn extract_all_tag_texts(xml: &str, target_local: &str) -> Vec<String> {
+enum XmlSkip {
+    Advance(usize),
+    Unterminated,
+    NotSpecial,
+}
+
+fn skip_xml_special(xml: &str, lt: usize) -> XmlSkip {
+    let rest = &xml[lt..];
+    if let Some(after) = rest.strip_prefix("<!--") {
+        return match after.find("-->") {
+            Some(end) => XmlSkip::Advance(lt + 4 + end + 3),
+            None => XmlSkip::Unterminated,
+        };
+    }
+    if let Some(after) = rest.strip_prefix("<![CDATA[") {
+        return match after.find("]]>") {
+            Some(end) => XmlSkip::Advance(lt + 9 + end + 3),
+            None => XmlSkip::Unterminated,
+        };
+    }
+    if let Some(after) = rest.strip_prefix("<?") {
+        return match after.find("?>") {
+            Some(end) => XmlSkip::Advance(lt + 2 + end + 2),
+            None => XmlSkip::Unterminated,
+        };
+    }
+    XmlSkip::NotSpecial
+}
+
+fn extract_all_tag_inners<'a>(xml: &'a str, target_local: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut cursor = 0;
     while let Some(rel_lt) = xml[cursor..].find('<') {
         let lt = cursor + rel_lt;
+        match skip_xml_special(xml, lt) {
+            XmlSkip::Advance(next) => {
+                cursor = next;
+                continue;
+            }
+            XmlSkip::Unterminated => break,
+            XmlSkip::NotSpecial => {}
+        }
+
         let Some(rel_gt) = xml[lt..].find('>') else {
             break;
         };
@@ -365,37 +403,107 @@ fn extract_all_tag_texts(xml: &str, target_local: &str) -> Vec<String> {
         cursor = gt + 1;
 
         if inside.starts_with('/')
-            || inside.starts_with('?')
             || inside.starts_with('!')
             || inside.ends_with('/')
+            || !xml_local_name(inside).eq_ignore_ascii_case(target_local)
         {
             continue;
         }
-        if !xml_local_name(inside).eq_ignore_ascii_case(target_local) {
-            continue;
-        }
 
+        let inner_start = cursor;
         let mut scan = cursor;
-        while let Some(rel_close_lt) = xml[scan..].find("</") {
-            let close_lt = scan + rel_close_lt;
-            let Some(rel_close_gt) = xml[close_lt..].find('>') else {
+        let mut depth = 1usize;
+        while let Some(rel_next_lt) = xml[scan..].find('<') {
+            let next_lt = scan + rel_next_lt;
+            match skip_xml_special(xml, next_lt) {
+                XmlSkip::Advance(next) => {
+                    scan = next;
+                    continue;
+                }
+                XmlSkip::Unterminated => {
+                    scan = xml.len();
+                    break;
+                }
+                XmlSkip::NotSpecial => {}
+            }
+
+            let Some(rel_next_gt) = xml[next_lt..].find('>') else {
+                scan = xml.len();
                 break;
             };
-            let close_gt = close_lt + rel_close_gt;
-            let close_name = xml[close_lt + 2..close_gt].trim();
-            if xml_local_name(close_name).eq_ignore_ascii_case(target_local) {
-                out.push(xml_unescape(&xml[cursor..close_lt]));
-                cursor = close_gt + 1;
-                break;
+            let next_gt = next_lt + rel_next_gt;
+            let tag_inside = xml[next_lt + 1..next_gt].trim();
+            scan = next_gt + 1;
+
+            if let Some(close_name) = tag_inside.strip_prefix('/') {
+                if xml_local_name(close_name).eq_ignore_ascii_case(target_local) {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push(&xml[inner_start..next_lt]);
+                        cursor = next_gt + 1;
+                        break;
+                    }
+                }
+            } else if !tag_inside.starts_with('!')
+                && !tag_inside.ends_with('/')
+                && xml_local_name(tag_inside).eq_ignore_ascii_case(target_local)
+            {
+                depth += 1;
             }
-            scan = close_gt + 1;
+        }
+        if depth > 0 {
+            cursor = scan;
         }
     }
     out
 }
 
+fn decode_xml_text_content(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut pos = 0;
+    while let Some(rel_lt) = inner[pos..].find('<') {
+        let lt = pos + rel_lt;
+        out.push_str(&xml_unescape(&inner[pos..lt]));
+        let rest = &inner[lt..];
+        if let Some(after) = rest.strip_prefix("<!--") {
+            let Some(end) = after.find("-->") else {
+                return out;
+            };
+            pos = lt + 4 + end + 3;
+        } else if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            let Some(end) = after.find("]]>") else {
+                return out;
+            };
+            out.push_str(&after[..end]);
+            pos = lt + 9 + end + 3;
+        } else if let Some(after) = rest.strip_prefix("<?") {
+            let Some(end) = after.find("?>") else {
+                return out;
+            };
+            pos = lt + 2 + end + 2;
+        } else {
+            let Some(rel_gt) = rest.find('>') else {
+                return out;
+            };
+            pos = lt + rel_gt + 1;
+        }
+    }
+    out.push_str(&xml_unescape(&inner[pos..]));
+    out
+}
+
+fn extract_all_tag_texts(xml: &str, target_local: &str) -> Vec<String> {
+    extract_all_tag_inners(xml, target_local)
+        .into_iter()
+        .map(decode_xml_text_content)
+        .collect()
+}
+
 fn parse_list_objects_v2_xml(xml: &str) -> ListObjectsPage {
-    let keys = extract_all_tag_texts(xml, "Key");
+    let keys = extract_all_tag_inners(xml, "Contents")
+        .into_iter()
+        .flat_map(|contents| extract_all_tag_texts(contents, "Key"))
+        .collect();
     let is_truncated = extract_all_tag_texts(xml, "IsTruncated")
         .into_iter()
         .any(|v| v.trim().eq_ignore_ascii_case("true"));
@@ -445,8 +553,8 @@ impl SyncRemote for S3Remote {
 
         for _page in 0..MAX_S3_LIST_PAGES {
             let mut query: Vec<(&str, &str)> = vec![("list-type", "2")];
-            if !norm_prefix.is_empty() {
-                query.push(("prefix", &norm_prefix));
+            if !match_prefix.is_empty() {
+                query.push(("prefix", &match_prefix));
             }
             if let Some(ref tok) = continuation_token {
                 query.push(("continuation-token", tok.as_str()));

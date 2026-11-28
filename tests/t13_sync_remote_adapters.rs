@@ -824,6 +824,43 @@ fn t13_webdav_mock_e2e_and_two_machine_sync() {
         token: None,
         allow_insecure_http: false,
     });
+
+    // Password leading/trailing whitespace must be preserved consistently across SyncConfig::normalize()
+    // and WebDavRemote Basic auth header encoding.
+    let spaced_pw = "  dav secret with spaces  ";
+    let expected_auth = format!("Basic {}", base64_encode(format!("alice:{spaced_pw}").as_bytes()));
+    let seen_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let seen_auth_srv = Arc::clone(&seen_auth);
+    let pw_srv = MockHttpServer::start(move |req| {
+        *seen_auth_srv.lock().unwrap() = req.headers.get("authorization").cloned();
+        if req.method == "PROPFIND" {
+            return HttpResponseSpec::new(207, "Multi-Status", b"<D:multistatus xmlns:D=\"DAV:\"/>".to_vec());
+        }
+        HttpResponseSpec::new(404, "Not Found", b"")
+    });
+
+    let mut spaced_cfg = SyncConfig {
+        enabled: true,
+        remote: RemoteConfig::WebDav {
+            url: pw_srv.base_url("dav"),
+            username: Some("  alice  ".to_string()),
+            password: Some(spaced_pw.to_string()),
+            token: None,
+            allow_insecure_http: false,
+        },
+        ..Default::default()
+    };
+    spaced_cfg.normalize();
+    match &spaced_cfg.remote {
+        RemoteConfig::WebDav { username, password, .. } => {
+            assert_eq!(username.as_deref(), Some("alice"));
+            assert_eq!(password.as_deref(), Some(spaced_pw));
+        }
+        other => panic!("unexpected remote: {other:?}"),
+    }
+    let spaced_remote = build_remote(&spaced_cfg).unwrap();
+    spaced_remote.probe().unwrap();
+    assert_eq!(seen_auth.lock().unwrap().as_deref(), Some(expected_auth.as_str()));
 }
 
 fn uri_encode_path_for_test(key: &str) -> String {
@@ -1017,6 +1054,67 @@ fn t13_s3_mock_e2e_pagination_and_two_machine_sync() {
     });
 }
 
+#[test]
+fn t13_s3_list_xml_hardening_comments_cdata_contents_scope_and_prefix_boundary() {
+    let seen_prefixes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_prefixes_srv = Arc::clone(&seen_prefixes);
+
+    let server = MockHttpServer::start(move |req| {
+        let (raw_path, params) = split_target(&req.target);
+        let decoded_path = percent_decode(raw_path);
+        if (decoded_path == "/my-bucket" || decoded_path == "/my-bucket/")
+            && req.method == "GET"
+            && params.get("list-type").map(String::as_str) == Some("2")
+        {
+            if let Some(pfx) = params.get("prefix") {
+                seen_prefixes_srv.lock().unwrap().push(pfx.clone());
+            }
+            let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <!-- <Contents><Key>team/alpha/commented-out.json</Key></Contents> -->
+  <!-- comment with > angle bracket <Key>team/alpha/angle-comment.json</Key> -->
+  <IsTruncated><!-- false -->false</IsTruncated>
+  <CommonPrefixes><Prefix>team/alpha/sub/</Prefix><Key>team/alpha/outside-contents.json</Key></CommonPrefixes>
+  <Metadata><Key>team/alpha/metadata-key.json</Key></Metadata>
+  <Contents>
+    <!-- <Key>team/alpha/decoy-inside-contents.json</Key> -->
+    <Key>team/alpha/<!-- inline -->normal&amp;1.json</Key>
+  </Contents>
+  <Contents>
+    <Key><![CDATA[team/alpha/cdata&amp;sub</Key>2.json]]></Key>
+  </Contents>
+</ListBucketResult>"#;
+            return HttpResponseSpec::new(200, "OK", xml);
+        }
+        HttpResponseSpec::new(404, "Not Found", b"not found")
+    });
+
+    let s3 = S3Remote::new(
+        &server.base_url(""),
+        "auto",
+        "my-bucket",
+        Some("AKIA_TEST"),
+        Some("SECRET_TEST"),
+        true,
+        false,
+    )
+    .unwrap();
+
+    let keys = s3.list("team/alpha").unwrap();
+    assert_eq!(
+        seen_prefixes.lock().unwrap().as_slice(),
+        &["team/alpha/".to_string()],
+        "S3 ListObjectsV2 must send trailing '/' directory boundary in prefix query param"
+    );
+    assert_eq!(
+        keys,
+        vec![
+            "team/alpha/cdata&amp;sub</Key>2.json".to_string(),
+            "team/alpha/normal&1.json".to_string(),
+        ]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4. Cloudflare Worker Mock Server End-to-End, Cursor Pagination & Two-Machine Sync
 // ---------------------------------------------------------------------------
@@ -1139,6 +1237,78 @@ fn t13_cf_worker_mock_e2e_and_two_machine_sync() {
         token: Some(token.to_string()),
         allow_insecure_http: false,
     });
+}
+
+#[test]
+fn t13_cf_worker_truncated_without_cursor_subpath_and_413_errors() {
+    let token = "cf-proto-token-123";
+    let expected_auth = format!("Bearer {token}");
+
+    let server = MockHttpServer::start(move |req| {
+        if req.headers.get("authorization").map(String::as_str) != Some(expected_auth.as_str()) {
+            return HttpResponseSpec::new(401, "Unauthorized", br#"{"error":"unauthorized"}"#.to_vec());
+        }
+        let (raw_path, params) = split_target(&req.target);
+        if req.method == "GET" && raw_path == "/pulse/v1/health" {
+            return HttpResponseSpec::new(200, "OK", br#"{"ok":true,"storage":"kv"}"#.to_vec())
+                .with_header("Content-Type", "application/json");
+        }
+        if req.method == "GET" && raw_path == "/pulse/v1/objects" {
+            let prefix = params.get("prefix").map(String::as_str).unwrap_or("");
+            if prefix == "broken-trunc" {
+                let body = br#"{"keys":["broken-trunc/a.json"],"cursor":null,"truncated":true}"#;
+                return HttpResponseSpec::new(200, "OK", body.to_vec())
+                    .with_header("Content-Type", "application/json");
+            }
+            if prefix == "false-trunc" {
+                let body = br#"{"keys":["false-trunc/a.json"],"cursor":"ignored-cursor","truncated":false}"#;
+                return HttpResponseSpec::new(200, "OK", body.to_vec())
+                    .with_header("Content-Type", "application/json");
+            }
+            let body = br#"{"keys":[],"cursor":null,"truncated":false}"#;
+            return HttpResponseSpec::new(200, "OK", body.to_vec())
+                .with_header("Content-Type", "application/json");
+        }
+        if req.method == "PUT" && raw_path == "/pulse/v1/objects/oversized.bin" {
+            return HttpResponseSpec::new(
+                413,
+                "Payload Too Large",
+                br#"{"error":"payload too large for KV storage (max 25 MiB)"}"#.to_vec(),
+            )
+            .with_header("Content-Type", "application/json");
+        }
+        HttpResponseSpec::new(404, "Not Found", b"not found")
+    });
+
+    let sub_url = server.base_url("pulse");
+    let cf = CfWorkerRemote::new(&sub_url, Some(token), false).unwrap();
+
+    // Subpath health check works.
+    let probe = cf.probe().unwrap();
+    assert!(probe.detail.contains("(kv)"), "detail: {}", probe.detail);
+
+    // truncated=true with null/empty cursor MUST return SyncError::Protocol.
+    let trunc_err = cf.list("broken-trunc").unwrap_err();
+    assert!(
+        matches!(trunc_err, SyncError::Protocol(_)),
+        "expected SyncError::Protocol for truncated=true without cursor, got: {trunc_err:?}"
+    );
+
+    // truncated=false terminates even if a leftover cursor string is present.
+    let false_trunc_keys = cf.list("false-trunc").unwrap();
+    assert_eq!(false_trunc_keys, vec!["false-trunc/a.json".to_string()]);
+
+    // HTTP 413 maps to a clear readable error mentioning 413 and size limit, without leaking token.
+    let err_413 = cf
+        .put("oversized.bin", b"data", "application/octet-stream")
+        .unwrap_err();
+    let err_413_msg = format!("{err_413}");
+    assert!(err_413_msg.contains("413"), "unexpected 413 err: {err_413_msg}");
+    assert!(
+        err_413_msg.to_ascii_lowercase().contains("too large") || err_413_msg.contains("25 MiB"),
+        "413 error should clearly explain payload size limit: {err_413_msg}"
+    );
+    assert!(!err_413_msg.contains(token));
 }
 
 // ---------------------------------------------------------------------------

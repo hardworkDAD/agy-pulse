@@ -2231,7 +2231,31 @@ pub(super) fn import_remote_chunk(
                    branch = NULL,
                    source = excluded.source,
                    account_id = excluded.account_id
-                 WHERE telemetry_steps.device_id = excluded.device_id",
+                 WHERE telemetry_steps.device_id = excluded.device_id
+                   AND (
+                     telemetry_steps.conversation_id IS NOT excluded.conversation_id
+                     OR telemetry_steps.gen_idx IS NOT excluded.gen_idx
+                     OR telemetry_steps.entry_idx IS NOT excluded.entry_idx
+                     OR telemetry_steps.step_index IS NOT excluded.step_index
+                     OR telemetry_steps.ts_ms IS NOT excluded.ts_ms
+                     OR telemetry_steps.model IS NOT excluded.model
+                     OR telemetry_steps.raw_model IS NOT excluded.raw_model
+                     OR telemetry_steps.input_tokens IS NOT excluded.input_tokens
+                     OR telemetry_steps.cache_read_tokens IS NOT excluded.cache_read_tokens
+                     OR telemetry_steps.cache_write_tokens IS NOT excluded.cache_write_tokens
+                     OR telemetry_steps.output_tokens IS NOT excluded.output_tokens
+                     OR telemetry_steps.cost_usd IS NOT excluded.cost_usd
+                     OR telemetry_steps.stream_sec IS NOT excluded.stream_sec
+                     OR telemetry_steps.ttft_sec IS NOT excluded.ttft_sec
+                     OR telemetry_steps.valid_stream IS NOT excluded.valid_stream
+                     OR telemetry_steps.valid_ttft IS NOT excluded.valid_ttft
+                     OR telemetry_steps.parent_conversation_id IS NOT excluded.parent_conversation_id
+                     OR telemetry_steps.root_conversation_id IS NOT excluded.root_conversation_id
+                     OR telemetry_steps.workspace IS NOT NULL
+                     OR telemetry_steps.branch IS NOT NULL
+                     OR telemetry_steps.source IS NOT excluded.source
+                     OR telemetry_steps.account_id IS NOT excluded.account_id
+                   )",
             )?;
 
             for step in steps {

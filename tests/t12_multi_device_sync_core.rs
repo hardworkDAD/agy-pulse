@@ -1068,3 +1068,272 @@ fn t12_sync_config_raw_load_env_metadata_and_delete() {
     assert!(!cfg_path.exists());
     assert!(!delete_sync_config_at(&cfg_path).unwrap());
 }
+
+#[test]
+fn t12_sync_both_dedup_accounts_incremental_steps_and_clock_skew_clamp() {
+    let remote_dir = TempDir::new().unwrap();
+    let remote = LocalDirRemote::new(remote_dir.path().to_path_buf());
+    let machine_a = IsolatedMachine::new();
+    let machine_b = IsolatedMachine::new();
+    let ts = utc_ms(2026, 11, 15, 10, 0);
+
+    seed_conv(&machine_a.cli_root, "conv-a-1", "file:///a1", "main", ts, 100, 20);
+    seed_conv(&machine_b.cli_root, "conv-b-1", "file:///b1", "main", ts + 1_000, 150, 30);
+
+    let mut store_a = machine_a.open_store();
+    let mut store_b = machine_b.open_store();
+    store_a
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(vec![SourceRoot {
+                root: machine_a.cli_root.clone(),
+                source: LedgerSource::Cli,
+            }]),
+            now_ms: Some(ts),
+            default_account_id: Some("shared@ex.com".to_string()),
+            device_name: Some("box-a".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    store_b
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(vec![SourceRoot {
+                root: machine_b.cli_root.clone(),
+                source: LedgerSource::Cli,
+            }]),
+            now_ms: Some(ts + 1_000),
+            default_account_id: Some("shared@ex.com".to_string()),
+            device_name: Some("box-b".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let cfg_a = machine_a.sync_config(remote_dir.path(), "box-a", "agy-pulse-sync");
+    let cfg_b = machine_b.sync_config(remote_dir.path(), "box-b", "agy-pulse-sync");
+
+    push(&store_a, &remote, &cfg_a, false).unwrap();
+
+    // sync_both on Machine B touches the same account "shared@ex.com" in both pull and push:
+    // accounts_processed must be deduplicated (1, not 2).
+    let sb1 = sync_both(&store_b, &remote, &cfg_b, false).unwrap();
+    assert_eq!(sb1.accounts_processed, 1, "shared@ex.com must not be double-counted");
+    assert_eq!(sb1.steps_imported, 1);
+
+    // Machine A appends a second step in the SAME month (2026-11) and pushes.
+    seed_conv(&machine_a.cli_root, "conv-a-2", "file:///a2", "main", ts + 2_000, 200, 40);
+    store_a
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(vec![SourceRoot {
+                root: machine_a.cli_root.clone(),
+                source: LedgerSource::Cli,
+            }]),
+            now_ms: Some(ts + 2_000),
+            default_account_id: Some("shared@ex.com".to_string()),
+            device_name: Some("box-a".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    push(&store_a, &remote, &cfg_a, false).unwrap();
+
+    // Machine B pulls the updated 2026-11 chunk (2 steps total, 1 existing + 1 new).
+    // steps_imported must count only the 1 newly added step, not re-count the unchanged existing step.
+    let pull_inc = pull(&store_b, &remote, &cfg_b, false).unwrap();
+    assert_eq!(pull_inc.chunks_downloaded, 1);
+    assert_eq!(pull_inc.steps_imported, 1, "unchanged existing steps must not inflate steps_imported");
+
+    // Future clock-skew clamping: a rogue device manifest with updated_at_ms & observed_at_ms
+    // 24 hours in the future must be clamped to <= now_ms + 5min.
+    let now_approx = Utc::now().timestamp_millis();
+    let far_future = now_approx + 24 * 60 * 60 * 1000;
+    let rogue_manifest = DeviceManifest {
+        format_version: 1,
+        account_id: "shared@ex.com".to_string(),
+        device_id: "dev_future_skew".to_string(),
+        device_name: "future-box".to_string(),
+        plan_tier: Some("Ultra".to_string()),
+        updated_at_ms: far_future,
+        quota_snapshot: Some(agy_pulse::sync::ManifestQuotaSnapshot {
+            observed_at_ms: far_future,
+            quota: sample_quota(0.99, far_future + 3_600_000),
+        }),
+        chunks: Default::default(),
+    };
+    remote
+        .put(
+            "agy-pulse-sync/accounts/shared@ex.com/devices/dev_future_skew/manifest.json",
+            &serde_json::to_vec(&rogue_manifest).unwrap(),
+            "application/json",
+        )
+        .unwrap();
+
+    pull(&store_b, &remote, &cfg_b, false).unwrap();
+    let after_pull_ms = Utc::now().timestamp_millis();
+    let max_allowed = after_pull_ms + 5 * 60 * 1000;
+
+    let conn_b = Connection::open(&machine_b.ledger_path).unwrap();
+    let dev_ts: i64 = conn_b
+        .query_row(
+            "SELECT last_seen_ms FROM sync_devices WHERE device_id = 'dev_future_skew'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let snap_ts: i64 = conn_b
+        .query_row(
+            "SELECT observed_at_ms FROM quota_snapshots WHERE device_id = 'dev_future_skew'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(dev_ts <= max_allowed, "updated_at_ms {dev_ts} exceeded max_allowed {max_allowed}");
+    assert!(snap_ts <= max_allowed, "observed_at_ms {snap_ts} exceeded max_allowed {max_allowed}");
+}
+
+#[test]
+fn t12_pull_concurrent_overwrite_retry_and_persistent_mismatch_isolation() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    // Seed two remote machines: Machine A (retry succeeds after concurrent overwrite)
+    // and Machine C (persistent chunk mismatch, must not abort Machine D!).
+    let remote_dir = TempDir::new().unwrap();
+    let inner_remote = LocalDirRemote::new(remote_dir.path().to_path_buf());
+
+    let machine_a = IsolatedMachine::new();
+    let machine_c = IsolatedMachine::new();
+    let machine_d = IsolatedMachine::new();
+    let machine_b = IsolatedMachine::new();
+    let ts = utc_ms(2026, 11, 18, 9, 0);
+
+    seed_conv(&machine_a.cli_root, "conv-a1", "file:///a", "main", ts, 100, 20);
+    seed_conv(&machine_c.cli_root, "conv-c1", "file:///c", "main", ts, 200, 30);
+    seed_conv(&machine_d.cli_root, "conv-d1", "file:///d", "main", ts, 300, 40);
+
+    let mut store_a = machine_a.open_store();
+    let mut store_c = machine_c.open_store();
+    let mut store_d = machine_d.open_store();
+    let store_b = machine_b.open_store();
+
+    let dev_a = store_a.local_device_id().unwrap();
+    let dev_c = store_c.local_device_id().unwrap();
+
+    store_a
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(vec![SourceRoot {
+                root: machine_a.cli_root.clone(),
+                source: LedgerSource::Cli,
+            }]),
+            now_ms: Some(ts),
+            default_account_id: Some("alpha@ex.com".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    store_c
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(vec![SourceRoot {
+                root: machine_c.cli_root.clone(),
+                source: LedgerSource::Cli,
+            }]),
+            now_ms: Some(ts),
+            default_account_id: Some("charlie@ex.com".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    store_d
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(vec![SourceRoot {
+                root: machine_d.cli_root.clone(),
+                source: LedgerSource::Cli,
+            }]),
+            now_ms: Some(ts),
+            default_account_id: Some("delta@ex.com".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let cfg_a = machine_a.sync_config(remote_dir.path(), "a", "agy-pulse-sync");
+    let cfg_c = machine_c.sync_config(remote_dir.path(), "c", "agy-pulse-sync");
+    let cfg_d = machine_d.sync_config(remote_dir.path(), "d", "agy-pulse-sync");
+    let cfg_b = machine_b.sync_config(remote_dir.path(), "b", "agy-pulse-sync");
+
+    push(&store_a, &inner_remote, &cfg_a, false).unwrap();
+    push(&store_c, &inner_remote, &cfg_c, false).unwrap();
+    push(&store_d, &inner_remote, &cfg_d, false).unwrap();
+
+    // Capture Machine A's v1 manifest, then push v2 on Machine A so remote chunk is v2.
+    let mkey_a = format!("agy-pulse-sync/accounts/alpha@ex.com/devices/{dev_a}/manifest.json");
+    let v1_manifest_a = inner_remote.get(&mkey_a).unwrap().unwrap();
+    seed_conv(&machine_a.cli_root, "conv-a2", "file:///a2", "main", ts + 1_000, 120, 25);
+    store_a
+        .sync_all(&LedgerSyncOptions {
+            source_roots: Some(vec![SourceRoot {
+                root: machine_a.cli_root.clone(),
+                source: LedgerSource::Cli,
+            }]),
+            now_ms: Some(ts + 1_000),
+            default_account_id: Some("alpha@ex.com".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    push(&store_a, &inner_remote, &cfg_a, false).unwrap();
+    let v2_manifest_a = inner_remote.get(&mkey_a).unwrap().unwrap();
+
+    // Corrupt Machine C's chunk bytes permanently so it always fails sha256 even after retry.
+    let ckey_c = format!("agy-pulse-sync/accounts/charlie@ex.com/devices/{dev_c}/chunks/2026-11.jsonl.gz");
+    inner_remote.put(&ckey_c, b"corrupted-gzip-bytes", "application/gzip").unwrap();
+
+    // Custom SyncRemote that serves stale v1_manifest_a on the first manifest read for A,
+    // then v2_manifest_a on retry, simulating concurrent overwrite during pull!
+    struct ConcurrentRemote {
+        inner: LocalDirRemote,
+        mkey_a: String,
+        v1_manifest_a: Vec<u8>,
+        v2_manifest_a: Vec<u8>,
+        manifest_a_reads: AtomicUsize,
+        saw_retry: AtomicBool,
+    }
+
+    impl SyncRemote for ConcurrentRemote {
+        fn probe(&self) -> Result<agy_pulse::sync::RemoteProbeInfo, SyncError> {
+            self.inner.probe()
+        }
+        fn list(&self, prefix: &str) -> Result<Vec<String>, SyncError> {
+            self.inner.list(prefix)
+        }
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, SyncError> {
+            if key == self.mkey_a {
+                let n = self.manifest_a_reads.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return Ok(Some(self.v1_manifest_a.clone()));
+                }
+                self.saw_retry.store(true, Ordering::SeqCst);
+                return Ok(Some(self.v2_manifest_a.clone()));
+            }
+            self.inner.get(key)
+        }
+        fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), SyncError> {
+            self.inner.put(key, bytes, content_type)
+        }
+        fn delete(&self, key: &str) -> Result<(), SyncError> {
+            self.inner.delete(key)
+        }
+    }
+
+    let racing_remote = ConcurrentRemote {
+        inner: inner_remote,
+        mkey_a: mkey_a.clone(),
+        v1_manifest_a,
+        v2_manifest_a,
+        manifest_a_reads: AtomicUsize::new(0),
+        saw_retry: AtomicBool::new(false),
+    };
+
+    let outcome = pull(&store_b, &racing_remote, &cfg_b, false).unwrap();
+    assert!(racing_remote.saw_retry.load(Ordering::SeqCst), "pull must retry fetching manifest on sha mismatch");
+    // Machine A (2 steps after retry) + Machine D (1 step) imported; Machine C isolated with warning!
+    assert_eq!(outcome.steps_imported, 3);
+    assert_eq!(outcome.warnings.len(), 1, "expected 1 warning for persistent mismatch on Machine C: {:?}", outcome.warnings);
+    assert!(
+        outcome.warnings[0].contains(&dev_c),
+        "warning should identify failing device/chunk: {}",
+        outcome.warnings[0]
+    );
+}

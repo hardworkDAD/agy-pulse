@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -17,13 +17,14 @@ use super::SyncError;
 use super::SyncRemote;
 use super::config::SyncConfig;
 use super::protocol::{
-    self, ChunkMeta, ChunkRecord, DeviceManifest, MANIFEST_CHUNK_STATE_KEY,
+    self, ChunkMeta, ChunkRecord, DeviceManifest, MANIFEST_CHUNK_STATE_KEY, ManifestKeyParts,
     ManifestQuotaSnapshot, SYNC_WIRE_FORMAT_VERSION,
 };
 
 const SYNC_LOCK_FILENAME: &str = "agy-pulse-sync.lock";
 const SYNC_LOCK_MAX_TTL_MS: u64 = 10 * 60 * 1000;
 const SYNC_LOCK_FALLBACK_TTL_MS: u64 = 30_000;
+const MAX_FUTURE_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 
 static SYNC_LOCK_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -53,6 +54,8 @@ pub struct SyncOutcome {
     pub steps_imported: usize,
     pub remote_cache_cleared: bool,
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl SyncOutcome {
@@ -215,12 +218,134 @@ fn record_sync_error_best_effort(store: &LedgerStore, err: &SyncError) {
     let _ = store.set_sync_meta_field("last_sync_error", Some(&sanitized));
 }
 
+fn clamp_remote_timestamp_ms(ts_ms: i64, now_ms: i64) -> i64 {
+    let max_allowed = now_ms.saturating_add(MAX_FUTURE_CLOCK_SKEW_MS);
+    ts_ms.clamp(0, max_allowed)
+}
+
+fn validate_remote_manifest(
+    manifest: &DeviceManifest,
+    parts: &ManifestKeyParts,
+    key: &str,
+    local_device_id: &str,
+) -> Result<(), SyncError> {
+    if manifest.format_version != SYNC_WIRE_FORMAT_VERSION {
+        return Err(SyncError::Protocol(format!(
+            "unsupported manifest format_version {} at {key}",
+            manifest.format_version
+        )));
+    }
+
+    let manifest_account = normalize_account_id(&manifest.account_id)
+        .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+    let manifest_account_key = protocol::encode_account_key(&manifest_account)?;
+    if manifest_account_key != parts.account_key || manifest_account != parts.account_id {
+        return Err(SyncError::Protocol(format!(
+            "manifest account_id '{}' does not match path account '{}'",
+            manifest.account_id, parts.account_id
+        )));
+    }
+    if manifest.device_id.trim() != parts.device_id {
+        return Err(SyncError::Protocol(format!(
+            "manifest device_id '{}' does not match path device '{}'",
+            manifest.device_id, parts.device_id
+        )));
+    }
+    if manifest.device_id.trim() == local_device_id {
+        return Err(SyncError::Protocol(
+            "manifest device_id collides with local device_id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+enum ChunkFetchOutcome {
+    Matched { gz_bytes: Vec<u8>, actual_sha: String },
+    Failed(String),
+}
+
+fn fetch_chunk_with_retry(
+    remote: &dyn SyncRemote,
+    manifest_key: &str,
+    parts: &ManifestKeyParts,
+    local_device_id: &str,
+    month_key: &str,
+    chunk_key: &str,
+    expected_sha: &str,
+) -> Result<ChunkFetchOutcome, SyncError> {
+    let first_attempt = remote.get(chunk_key)?;
+    if let Some(gz_bytes) = first_attempt {
+        let actual_sha = protocol::sha256_hex(&gz_bytes);
+        if actual_sha == expected_sha {
+            return Ok(ChunkFetchOutcome::Matched {
+                gz_bytes,
+                actual_sha,
+            });
+        }
+    }
+
+    // Concurrent overwrite or transient mismatch: re-fetch manifest.json + chunk once.
+    let refreshed_manifest = match remote.get(manifest_key) {
+        Ok(Some(mbytes)) => match serde_json::from_slice::<DeviceManifest>(&mbytes) {
+            Ok(m) => {
+                validate_remote_manifest(&m, parts, manifest_key, local_device_id)?;
+                m
+            }
+            Err(err) => {
+                return Ok(ChunkFetchOutcome::Failed(format!(
+                    "failed to parse refreshed manifest {manifest_key} for chunk {chunk_key}: {err}"
+                )));
+            }
+        },
+        Ok(None) => {
+            return Ok(ChunkFetchOutcome::Failed(format!(
+                "manifest {manifest_key} disappeared while retrying chunk {chunk_key}"
+            )));
+        }
+        Err(err) => {
+            return Ok(ChunkFetchOutcome::Failed(format!(
+                "failed to re-fetch manifest {manifest_key} for chunk {chunk_key}: {err}"
+            )));
+        }
+    };
+
+    let Some(refreshed_meta) = refreshed_manifest.chunks.get(month_key) else {
+        return Ok(ChunkFetchOutcome::Failed(format!(
+            "chunk {chunk_key} absent from refreshed manifest {manifest_key}"
+        )));
+    };
+
+    match remote.get(chunk_key) {
+        Ok(Some(retry_bytes)) => {
+            let retry_sha = protocol::sha256_hex(&retry_bytes);
+            if retry_sha == refreshed_meta.sha256 {
+                Ok(ChunkFetchOutcome::Matched {
+                    gz_bytes: retry_bytes,
+                    actual_sha: retry_sha,
+                })
+            } else {
+                Ok(ChunkFetchOutcome::Failed(format!(
+                    "sha256 mismatch for remote chunk {chunk_key} after retry: expected {}, got {retry_sha}",
+                    refreshed_meta.sha256
+                )))
+            }
+        }
+        Ok(None) => Ok(ChunkFetchOutcome::Failed(format!(
+            "missing remote chunk referenced by manifest after retry: {chunk_key}"
+        ))),
+        Err(err) => Ok(ChunkFetchOutcome::Failed(format!(
+            "failed to re-fetch remote chunk {chunk_key} after manifest refresh: {err}"
+        ))),
+    }
+}
+
 fn push_inner(
     store: &LedgerStore,
     remote: &dyn SyncRemote,
     cfg: &SyncConfig,
     dry_run: bool,
     now_ms: i64,
+    processed_accounts: &mut BTreeSet<String>,
     outcome: &mut SyncOutcome,
 ) -> Result<(), SyncError> {
     let local_device_id = store.local_device_id()?;
@@ -229,7 +354,7 @@ fn push_inner(
     let accounts = store.list_local_sync_accounts()?;
 
     for account_id in &accounts {
-        outcome.accounts_processed += 1;
+        processed_accounts.insert(account_id.clone());
         let monthly = store.export_local_account_monthly_chunks(account_id)?;
         let plan_tier = store.read_local_device_plan_tier(account_id)?;
         let quota_snapshot = store
@@ -354,7 +479,9 @@ fn push_inner(
 
     if !dry_run {
         store.set_sync_meta_field("last_sync_push_ms", Some(&now_ms.to_string()))?;
-        store.set_sync_meta_field("last_sync_error", None)?;
+        if outcome.warnings.is_empty() {
+            store.set_sync_meta_field("last_sync_error", None)?;
+        }
     }
 
     Ok(())
@@ -366,6 +493,7 @@ fn pull_inner(
     cfg: &SyncConfig,
     dry_run: bool,
     now_ms: i64,
+    processed_accounts: &mut BTreeSet<String>,
     outcome: &mut SyncOutcome,
 ) -> Result<(), SyncError> {
     let local_device_id = store.local_device_id()?;
@@ -374,8 +502,6 @@ fn pull_inner(
 
     let mut keys = remote.list(&accounts_pfx)?;
     keys.sort();
-
-    let mut accounts_seen = std::collections::BTreeSet::new();
 
     for key in keys {
         let Some(parts) = protocol::parse_manifest_key(&prefix, &key) else {
@@ -389,35 +515,9 @@ fn pull_inner(
             continue;
         };
         let manifest: DeviceManifest = serde_json::from_slice(&manifest_bytes)?;
-        if manifest.format_version != SYNC_WIRE_FORMAT_VERSION {
-            return Err(SyncError::Protocol(format!(
-                "unsupported manifest format_version {} at {key}",
-                manifest.format_version
-            )));
-        }
+        validate_remote_manifest(&manifest, &parts, &key, &local_device_id)?;
 
-        let manifest_account = normalize_account_id(&manifest.account_id)
-            .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
-        let manifest_account_key = protocol::encode_account_key(&manifest_account)?;
-        if manifest_account_key != parts.account_key || manifest_account != parts.account_id {
-            return Err(SyncError::Protocol(format!(
-                "manifest account_id '{}' does not match path account '{}'",
-                manifest.account_id, parts.account_id
-            )));
-        }
-        if manifest.device_id.trim() != parts.device_id {
-            return Err(SyncError::Protocol(format!(
-                "manifest device_id '{}' does not match path device '{}'",
-                manifest.device_id, parts.device_id
-            )));
-        }
-        if manifest.device_id.trim() == local_device_id {
-            return Err(SyncError::Protocol(
-                "manifest device_id collides with local device_id".to_string(),
-            ));
-        }
-
-        accounts_seen.insert(parts.account_id.clone());
+        processed_accounts.insert(parts.account_id.clone());
         outcome.devices_synced += 1;
 
         let effective_device_name = platform::sanitize_device_name(&manifest.device_name)
@@ -429,7 +529,7 @@ fn pull_inner(
                 &parts.device_id,
                 &effective_device_name,
                 false,
-                manifest.updated_at_ms.max(0),
+                clamp_remote_timestamp_ms(manifest.updated_at_ms, now_ms),
                 manifest.plan_tier.as_deref(),
             )?;
 
@@ -439,7 +539,7 @@ fn pull_inner(
                     device_id: parts.device_id.clone(),
                     device_name: effective_device_name.clone(),
                     plan_tier: manifest.plan_tier.clone(),
-                    observed_at_ms: q.observed_at_ms,
+                    observed_at_ms: clamp_remote_timestamp_ms(q.observed_at_ms, now_ms),
                     quota: q.quota.clone(),
                 })?;
             }
@@ -458,25 +558,32 @@ fn pull_inner(
                 continue;
             }
 
-            outcome.chunks_downloaded += 1;
             if dry_run {
+                outcome.chunks_downloaded += 1;
                 continue;
             }
 
             let ckey =
                 protocol::chunk_key(&prefix, &parts.account_id, &parts.device_id, month_key)?;
-            let Some(gz_bytes) = remote.get(&ckey)? else {
-                return Err(SyncError::Protocol(format!(
-                    "missing remote chunk referenced by manifest: {ckey}"
-                )));
+            let (gz_bytes, actual_sha) = match fetch_chunk_with_retry(
+                remote,
+                &key,
+                &parts,
+                &local_device_id,
+                month_key,
+                &ckey,
+                &chunk_meta.sha256,
+            )? {
+                ChunkFetchOutcome::Matched {
+                    gz_bytes,
+                    actual_sha,
+                } => (gz_bytes, actual_sha),
+                ChunkFetchOutcome::Failed(warn_msg) => {
+                    outcome.warnings.push(warn_msg);
+                    continue;
+                }
             };
-            let actual_sha = protocol::sha256_hex(&gz_bytes);
-            if actual_sha != chunk_meta.sha256 {
-                return Err(SyncError::Protocol(format!(
-                    "sha256 mismatch for remote chunk {ckey}: expected {}, got {actual_sha}",
-                    chunk_meta.sha256
-                )));
-            }
+            outcome.chunks_downloaded += 1;
 
             let records = protocol::decode_chunk_gz(&gz_bytes)?;
             let mut convs = Vec::new();
@@ -557,11 +664,20 @@ fn pull_inner(
         }
     }
 
-    outcome.accounts_processed += accounts_seen.len();
-
     if !dry_run {
         store.set_sync_meta_field("last_sync_pull_ms", Some(&now_ms.to_string()))?;
-        store.set_sync_meta_field("last_sync_error", None)?;
+        if outcome.warnings.is_empty() {
+            store.set_sync_meta_field("last_sync_error", None)?;
+        } else {
+            let sanitized = outcome
+                .warnings
+                .join("; ")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(512)
+                .collect::<String>();
+            store.set_sync_meta_field("last_sync_error", Some(&sanitized))?;
+        }
     }
 
     Ok(())
@@ -593,9 +709,18 @@ pub fn push(
         ..Default::default()
     };
 
+    let mut processed_accounts = BTreeSet::new();
     let res = (|| -> Result<(), SyncError> {
         outcome.remote_cache_cleared = ensure_remote_fingerprint(store, cfg, dry_run)?;
-        push_inner(store, remote, cfg, dry_run, now_ms, &mut outcome)
+        push_inner(
+            store,
+            remote,
+            cfg,
+            dry_run,
+            now_ms,
+            &mut processed_accounts,
+            &mut outcome,
+        )
     })();
 
     if let Err(err) = res {
@@ -605,6 +730,7 @@ pub fn push(
         return Err(err);
     }
 
+    outcome.accounts_processed = processed_accounts.len();
     outcome.duration_ms = started.elapsed().as_millis() as u64;
     Ok(outcome)
 }
@@ -635,9 +761,18 @@ pub fn pull(
         ..Default::default()
     };
 
+    let mut processed_accounts = BTreeSet::new();
     let res = (|| -> Result<(), SyncError> {
         outcome.remote_cache_cleared = ensure_remote_fingerprint(store, cfg, dry_run)?;
-        pull_inner(store, remote, cfg, dry_run, now_ms, &mut outcome)
+        pull_inner(
+            store,
+            remote,
+            cfg,
+            dry_run,
+            now_ms,
+            &mut processed_accounts,
+            &mut outcome,
+        )
     })();
 
     if let Err(err) = res {
@@ -647,6 +782,7 @@ pub fn pull(
         return Err(err);
     }
 
+    outcome.accounts_processed = processed_accounts.len();
     outcome.duration_ms = started.elapsed().as_millis() as u64;
     Ok(outcome)
 }
@@ -677,10 +813,27 @@ pub fn sync_both(
         ..Default::default()
     };
 
+    let mut processed_accounts = BTreeSet::new();
     let res = (|| -> Result<(), SyncError> {
         outcome.remote_cache_cleared = ensure_remote_fingerprint(store, cfg, dry_run)?;
-        pull_inner(store, remote, cfg, dry_run, now_ms, &mut outcome)?;
-        push_inner(store, remote, cfg, dry_run, now_ms, &mut outcome)
+        pull_inner(
+            store,
+            remote,
+            cfg,
+            dry_run,
+            now_ms,
+            &mut processed_accounts,
+            &mut outcome,
+        )?;
+        push_inner(
+            store,
+            remote,
+            cfg,
+            dry_run,
+            now_ms,
+            &mut processed_accounts,
+            &mut outcome,
+        )
     })();
 
     if let Err(err) = res {
@@ -690,6 +843,7 @@ pub fn sync_both(
         return Err(err);
     }
 
+    outcome.accounts_processed = processed_accounts.len();
     outcome.duration_ms = started.elapsed().as_millis() as u64;
     Ok(outcome)
 }
