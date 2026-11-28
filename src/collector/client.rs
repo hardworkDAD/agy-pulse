@@ -12,8 +12,8 @@ use crate::profile::{self, Profiler, Stage};
 use super::protocol::{
     COLLECTOR_APP_ID, COLLECTOR_LOCK_TTL_MS, CollectorRequest, CollectorStateFile,
     CollectorWireRequest, CollectorWireResponse, IpcStream, acquire_collector_spawn_lock,
-    connect_to_state, read_collector_state, read_frame, release_collector_spawn_lock_if_owner,
-    send_shutdown_to_state, write_frame,
+    connect_to_state, exe_mtime_matches, read_collector_state, read_frame,
+    release_collector_spawn_lock_if_owner, send_shutdown_to_state, write_frame,
 };
 use super::snapshot::{
     CollectedStatuslineSnapshot, GlobalStatuslineSnapshot, compute_conversation_key,
@@ -107,10 +107,7 @@ fn state_matches_current_binary(state: &CollectorStateFile, exe_mtime_ms: i64) -
     if state.version != crate::VERSION {
         return false;
     }
-    if exe_mtime_ms > 0 && state.exe_mtime_ms > 0 && state.exe_mtime_ms != exe_mtime_ms {
-        return false;
-    }
-    true
+    exe_mtime_matches(state.exe_mtime_ms, exe_mtime_ms)
 }
 
 fn try_connect_ready(
@@ -345,4 +342,38 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
     });
 
     profiler.finish(&summary);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::state_matches_current_binary;
+    use crate::collector::protocol::{COLLECTOR_APP_ID, CollectorStateFile};
+
+    fn sample_state(exe_mtime_ms: i64) -> CollectorStateFile {
+        CollectorStateFile {
+            app: COLLECTOR_APP_ID.to_string(),
+            pid: std::process::id(),
+            version: crate::VERSION.to_string(),
+            exe_mtime_ms,
+            mode: "collector".to_string(),
+            socket_path: None,
+            tcp_port: None,
+            token: "tok".to_string(),
+            started_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    #[test]
+    fn client_state_matches_current_binary_handles_zero_and_mismatch_mtimes() {
+        assert!(state_matches_current_binary(&sample_state(0), 1_700_000_000_000));
+        assert!(state_matches_current_binary(&sample_state(1_700_000_000_000), 0));
+        assert!(state_matches_current_binary(
+            &sample_state(1_700_000_000_123),
+            1_700_000_000_123
+        ));
+        assert!(!state_matches_current_binary(
+            &sample_state(1_700_000_000_123),
+            1_700_000_000_999
+        ));
+    }
 }

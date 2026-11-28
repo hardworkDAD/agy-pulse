@@ -15,16 +15,20 @@ use crate::platform;
 use super::protocol::{
     COLLECTOR_APP_ID, CollectorReadyPayload, CollectorRequest, CollectorStateFile,
     CollectorWireRequest, CollectorWireResponse, IpcStream, clear_collector_state_if_owner,
-    read_collector_state, read_frame, release_collector_spawn_lock, send_shutdown_to_state,
-    write_collector_state, write_frame,
+    exe_mtime_matches, read_collector_state, read_frame, release_collector_spawn_lock,
+    send_shutdown_to_state, write_collector_state, write_frame,
 };
 use super::snapshot::write_snapshots_and_prune;
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(15);
 const STREAM_IO_TIMEOUT: Duration = Duration::from_millis(200);
+const BUSY_OVERLOAD_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 const DATA_DIR_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 const TAKEOVER_WAIT_TIMEOUT: Duration = Duration::from_millis(500);
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(1500);
 const MAX_CONCURRENT_WAITERS: usize = 16;
+const MAX_CONCURRENT_IPC_HANDLERS: usize = 8;
+const MAX_PENDING_JOBS: usize = 64;
 const DEFAULT_PROD_IDLE_SEC: u64 = 300;
 const DEFAULT_TEST_DATA_DIR_IDLE_SEC: u64 = 2;
 
@@ -57,6 +61,7 @@ struct PendingJob {
 
 struct CollectorQueueState {
     worker_busy: bool,
+    max_pending_jobs: usize,
     pending_order: VecDeque<String>,
     pending_jobs: HashMap<String, PendingJob>,
     shutdown: bool,
@@ -65,26 +70,76 @@ struct CollectorQueueState {
 }
 
 impl CollectorQueueState {
+    fn with_capacity(max_pending_jobs: usize) -> Self {
+        Self {
+            worker_busy: false,
+            max_pending_jobs: max_pending_jobs.max(1),
+            pending_order: VecDeque::new(),
+            pending_jobs: HashMap::new(),
+            shutdown: false,
+            last_activity: Instant::now(),
+            last_env_overrides: None,
+        }
+    }
+
+    fn can_accept(&self, conversation_key: &str) -> bool {
+        self.pending_jobs.contains_key(conversation_key)
+            || self.pending_jobs.len() < self.max_pending_jobs
+    }
+
     fn enqueue(
         &mut self,
         req: CollectorRequest,
         waiter: Option<SyncSender<CollectorWireResponse>>,
-    ) {
+    ) -> bool {
         let key = req.conversation_key.clone();
-        self.last_env_overrides = Some(req.env_overrides.clone());
         if let Some(existing) = self.pending_jobs.get_mut(&key) {
+            self.last_env_overrides = Some(req.env_overrides.clone());
             existing.req = req;
             if let Some(tx) = waiter {
                 existing.waiters.push(tx);
             }
-        } else {
-            let mut waiters = Vec::new();
-            if let Some(tx) = waiter {
-                waiters.push(tx);
-            }
-            self.pending_order.push_back(key.clone());
-            self.pending_jobs.insert(key, PendingJob { req, waiters });
+            return true;
         }
+        if self.pending_jobs.len() >= self.max_pending_jobs {
+            return false;
+        }
+        self.last_env_overrides = Some(req.env_overrides.clone());
+        let mut waiters = Vec::new();
+        if let Some(tx) = waiter {
+            waiters.push(tx);
+        }
+        self.pending_order.push_back(key.clone());
+        self.pending_jobs.insert(key, PendingJob { req, waiters });
+        true
+    }
+}
+
+struct AtomicSlotGuard(Arc<AtomicUsize>);
+
+impl AtomicSlotGuard {
+    fn try_acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        let mut cur = counter.load(Ordering::Acquire);
+        loop {
+            if cur >= limit {
+                return None;
+            }
+            match counter.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(Self(Arc::clone(counter))),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+}
+
+impl Drop for AtomicSlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -176,8 +231,19 @@ impl IpcListener {
 pub struct CollectorServerHandle {
     shutdown_flag: Arc<AtomicBool>,
     queue: Arc<(Mutex<CollectorQueueState>, Condvar)>,
+    worker_done: Arc<(Mutex<bool>, Condvar)>,
     ipc_thread: Option<JoinHandle<()>>,
     worker_thread: Option<JoinHandle<()>>,
+}
+
+fn wait_for_flag(state: &(Mutex<bool>, Condvar), timeout: Duration) -> bool {
+    let (lock, cvar) = state;
+    let Ok(guard) = lock.lock() else {
+        return false;
+    };
+    cvar.wait_timeout_while(guard, timeout, |done| !*done)
+        .map(|(g, _)| *g)
+        .unwrap_or(false)
 }
 
 impl CollectorServerHandle {
@@ -188,7 +254,7 @@ impl CollectorServerHandle {
         on_activity: Arc<dyn Fn() + Send + Sync>,
     ) -> io::Result<Self> {
         if let Some(existing) = read_collector_state()
-            && existing.mode == CollectorMode::Headless.as_str()
+            && existing.app == COLLECTOR_APP_ID
             && existing.pid != std::process::id()
             && platform::is_process_alive(existing.pid)
         {
@@ -206,7 +272,7 @@ impl CollectorServerHandle {
         Ok(handle)
     }
 
-    /// Signal the collector IPC and worker threads to stop and join them.
+    /// Signal the collector IPC and worker threads to stop and join them with a bounded worker wait.
     pub fn shutdown(&mut self) {
         EMBEDDED_COLLECTOR_ACTIVE.store(false, Ordering::Release);
         self.shutdown_flag.store(true, Ordering::Release);
@@ -221,7 +287,13 @@ impl CollectorServerHandle {
             let _ = handle.join();
         }
         if let Some(handle) = self.worker_thread.take() {
-            let _ = handle.join();
+            if wait_for_flag(&self.worker_done, WORKER_SHUTDOWN_TIMEOUT) {
+                let _ = handle.join();
+            } else {
+                platform::write_error_log_safely(
+                    "Collector worker thread did not finish within 1500ms during shutdown; detaching",
+                );
+            }
         }
     }
 }
@@ -240,14 +312,29 @@ fn current_epoch_ms() -> i64 {
 }
 
 fn takeover_existing_collector(existing: &CollectorStateFile) {
-    let _ = send_shutdown_to_state(existing, Duration::from_millis(200));
+    let acked = send_shutdown_to_state(existing, Duration::from_millis(200));
+    let is_embedded = existing.mode == CollectorMode::Embedded.as_str();
     let deadline = Instant::now() + TAKEOVER_WAIT_TIMEOUT;
     while Instant::now() < deadline {
         if !platform::is_process_alive(existing.pid) {
             break;
         }
+        if acked
+            && is_embedded
+            && read_collector_state()
+                .as_ref()
+                .is_none_or(|s| s.token != existing.token)
+        {
+            break;
+        }
         thread::sleep(Duration::from_millis(15));
     }
+}
+
+fn is_same_collector_binary(existing: &CollectorStateFile, my_exe_mtime: i64) -> bool {
+    existing.app == COLLECTOR_APP_ID
+        && existing.version == crate::VERSION
+        && exe_mtime_matches(existing.exe_mtime_ms, my_exe_mtime)
 }
 
 fn start_collector_internal(
@@ -278,22 +365,17 @@ fn start_collector_internal(
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let queue = Arc::new((
-        Mutex::new(CollectorQueueState {
-            worker_busy: false,
-            pending_order: VecDeque::new(),
-            pending_jobs: HashMap::new(),
-            shutdown: false,
-            last_activity: Instant::now(),
-            last_env_overrides: None,
-        }),
+        Mutex::new(CollectorQueueState::with_capacity(MAX_PENDING_JOBS)),
         Condvar::new(),
     ));
+    let worker_done = Arc::new((Mutex::new(false), Condvar::new()));
 
     let worker_queue = Arc::clone(&queue);
     let worker_shutdown = Arc::clone(&shutdown_flag);
+    let worker_done_flag = Arc::clone(&worker_done);
     let worker_thread = thread::Builder::new()
         .name("agy-pulse-collector-worker".to_string())
-        .spawn(move || run_worker_loop(worker_queue, worker_shutdown))?;
+        .spawn(move || run_worker_loop(worker_queue, worker_shutdown, worker_done_flag))?;
 
     let ipc_queue = Arc::clone(&queue);
     let ipc_shutdown = Arc::clone(&shutdown_flag);
@@ -317,9 +399,134 @@ fn start_collector_internal(
     Ok(CollectorServerHandle {
         shutdown_flag,
         queue,
+        worker_done,
         ipc_thread: Some(ipc_thread),
         worker_thread: Some(worker_thread),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_ipc_connection(
+    mut stream: IpcStream,
+    ipc_guard: AtomicSlotGuard,
+    mode: CollectorMode,
+    owner_pid: u32,
+    token: &str,
+    on_activity: Option<&Arc<dyn Fn() + Send + Sync>>,
+    queue: &(Mutex<CollectorQueueState>, Condvar),
+    shutdown_flag: &AtomicBool,
+    active_waiters: &Arc<AtomicUsize>,
+) {
+    let _ = stream.set_read_timeout(Some(STREAM_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(STREAM_IO_TIMEOUT));
+    let req: CollectorWireRequest = match read_frame(&mut stream) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    if req.token() != token {
+        let _ = write_frame(
+            &mut stream,
+            &CollectorWireResponse::Error("unauthorized".to_string()),
+        );
+        return;
+    }
+
+    match req {
+        CollectorWireRequest::Ping { .. } => {
+            let busy = queue
+                .0
+                .lock()
+                .map(|g| g.worker_busy)
+                .unwrap_or(false);
+            let _ = write_frame(
+                &mut stream,
+                &CollectorWireResponse::Pong {
+                    pid: owner_pid,
+                    version: crate::VERSION.to_string(),
+                    mode: mode.as_str().to_string(),
+                    worker_busy: busy,
+                },
+            );
+        }
+        CollectorWireRequest::Shutdown { .. } => {
+            shutdown_flag.store(true, Ordering::Release);
+            let (lock, cvar) = queue;
+            if let Ok(mut guard) = lock.lock() {
+                guard.shutdown = true;
+                cvar.notify_all();
+            }
+            let _ = write_frame(&mut stream, &CollectorWireResponse::Ack);
+        }
+        CollectorWireRequest::Collect(collect_req) => {
+            if let Some(cb) = on_activity {
+                cb();
+            }
+            let wait_ms = collect_req.wait_ms;
+            enum EnqueueOutcome {
+                ReplyBusy,
+                ReplyError(&'static str),
+                Wait(mpsc::Receiver<CollectorWireResponse>, AtomicSlotGuard),
+            }
+            let outcome = {
+                let (lock, cvar) = queue;
+                match lock.lock() {
+                    Err(_) => EnqueueOutcome::ReplyError("queue poisoned"),
+                    Ok(mut guard) => {
+                        guard.last_activity = Instant::now();
+                        if guard.shutdown {
+                            EnqueueOutcome::ReplyError("shutting down")
+                        } else if !guard.can_accept(&collect_req.conversation_key) {
+                            EnqueueOutcome::ReplyBusy
+                        } else if (guard.worker_busy && collect_req.has_warm_snapshot)
+                            || wait_ms == 0
+                        {
+                            if guard.enqueue(collect_req, None) {
+                                cvar.notify_one();
+                            }
+                            EnqueueOutcome::ReplyBusy
+                        } else if let Some(waiter_guard) =
+                            AtomicSlotGuard::try_acquire(active_waiters, MAX_CONCURRENT_WAITERS)
+                        {
+                            let (tx, rx) = mpsc::sync_channel::<CollectorWireResponse>(1);
+                            if guard.enqueue(collect_req, Some(tx)) {
+                                cvar.notify_one();
+                                EnqueueOutcome::Wait(rx, waiter_guard)
+                            } else {
+                                EnqueueOutcome::ReplyBusy
+                            }
+                        } else {
+                            if guard.enqueue(collect_req, None) {
+                                cvar.notify_one();
+                            }
+                            EnqueueOutcome::ReplyBusy
+                        }
+                    }
+                }
+            };
+
+            // Release the IPC read slot before blocking for worker completion so slow/waiting
+            // Collect calls do not starve new Ping/Shutdown/Collect connections.
+            drop(ipc_guard);
+
+            match outcome {
+                EnqueueOutcome::ReplyError(msg) => {
+                    let _ = write_frame(
+                        &mut stream,
+                        &CollectorWireResponse::Error(msg.to_string()),
+                    );
+                }
+                EnqueueOutcome::ReplyBusy => {
+                    let _ = write_frame(&mut stream, &CollectorWireResponse::Busy);
+                }
+                EnqueueOutcome::Wait(rx, _waiter_guard) => {
+                    let resp = rx
+                        .recv_timeout(Duration::from_millis(wait_ms))
+                        .unwrap_or(CollectorWireResponse::Busy);
+                    let _ = write_frame(&mut stream, &resp);
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,6 +543,7 @@ fn run_ipc_loop(
     shutdown_flag: Arc<AtomicBool>,
 ) {
     let active_waiters = Arc::new(AtomicUsize::new(0));
+    let active_ipc_handlers = Arc::new(AtomicUsize::new(0));
     let mut last_dir_check = Instant::now();
 
     loop {
@@ -370,124 +578,37 @@ fn run_ipc_loop(
 
         match listener.accept() {
             Ok(mut stream) => {
-                let _ = stream.set_read_timeout(Some(STREAM_IO_TIMEOUT));
-                let _ = stream.set_write_timeout(Some(STREAM_IO_TIMEOUT));
-                let req: CollectorWireRequest = match read_frame(&mut stream) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                if req.token() != token {
-                    let _ = write_frame(
-                        &mut stream,
-                        &CollectorWireResponse::Error("unauthorized".to_string()),
-                    );
+                let Some(ipc_guard) =
+                    AtomicSlotGuard::try_acquire(&active_ipc_handlers, MAX_CONCURRENT_IPC_HANDLERS)
+                else {
+                    let _ = stream.set_write_timeout(Some(BUSY_OVERLOAD_WRITE_TIMEOUT));
+                    let _ = write_frame(&mut stream, &CollectorWireResponse::Busy);
                     continue;
-                }
-
-                match req {
-                    CollectorWireRequest::Ping { .. } => {
-                        let busy = queue
-                            .0
-                            .lock()
-                            .map(|g| g.worker_busy)
-                            .unwrap_or(false);
-                        let _ = write_frame(
-                            &mut stream,
-                            &CollectorWireResponse::Pong {
-                                pid: owner_pid,
-                                version: crate::VERSION.to_string(),
-                                mode: mode.as_str().to_string(),
-                                worker_busy: busy,
-                            },
+                };
+                let conn_token = token.clone();
+                let conn_on_activity = on_activity.clone();
+                let conn_queue = Arc::clone(&queue);
+                let conn_shutdown = Arc::clone(&shutdown_flag);
+                let conn_waiters = Arc::clone(&active_waiters);
+                let spawn_res = thread::Builder::new()
+                    .name("agy-pulse-collector-ipc-conn".to_string())
+                    .spawn(move || {
+                        handle_ipc_connection(
+                            stream,
+                            ipc_guard,
+                            mode,
+                            owner_pid,
+                            &conn_token,
+                            conn_on_activity.as_ref(),
+                            &conn_queue,
+                            &conn_shutdown,
+                            &conn_waiters,
                         );
-                    }
-                    CollectorWireRequest::Shutdown { .. } => {
-                        shutdown_flag.store(true, Ordering::Release);
-                        let (lock, cvar) = &*queue;
-                        if let Ok(mut guard) = lock.lock() {
-                            guard.shutdown = true;
-                            cvar.notify_all();
-                        }
-                        let _ = write_frame(&mut stream, &CollectorWireResponse::Ack);
-                        break;
-                    }
-                    CollectorWireRequest::Collect(collect_req) => {
-                        if let Some(ref cb) = on_activity {
-                            cb();
-                        }
-                        let wait_ms = collect_req.wait_ms;
-                        enum EnqueueOutcome {
-                            ReplyBusy,
-                            ReplyError(&'static str),
-                            Wait(mpsc::Receiver<CollectorWireResponse>),
-                        }
-                        let outcome = {
-                            let (lock, cvar) = &*queue;
-                            match lock.lock() {
-                                Err(_) => EnqueueOutcome::ReplyError("queue poisoned"),
-                                Ok(mut guard) => {
-                                    guard.last_activity = Instant::now();
-                                    if guard.shutdown {
-                                        EnqueueOutcome::ReplyError("shutting down")
-                                    } else if (guard.worker_busy && collect_req.has_warm_snapshot)
-                                        || wait_ms == 0
-                                    {
-                                        guard.enqueue(collect_req, None);
-                                        cvar.notify_one();
-                                        EnqueueOutcome::ReplyBusy
-                                    } else {
-                                        let prev = active_waiters.fetch_add(1, Ordering::AcqRel);
-                                        if prev >= MAX_CONCURRENT_WAITERS {
-                                            active_waiters.fetch_sub(1, Ordering::AcqRel);
-                                            guard.enqueue(collect_req, None);
-                                            cvar.notify_one();
-                                            EnqueueOutcome::ReplyBusy
-                                        } else {
-                                            let (tx, rx) =
-                                                mpsc::sync_channel::<CollectorWireResponse>(1);
-                                            guard.enqueue(collect_req, Some(tx));
-                                            cvar.notify_one();
-                                            EnqueueOutcome::Wait(rx)
-                                        }
-                                    }
-                                }
-                            }
-                        };
-
-                        match outcome {
-                            EnqueueOutcome::ReplyError(msg) => {
-                                let _ = write_frame(
-                                    &mut stream,
-                                    &CollectorWireResponse::Error(msg.to_string()),
-                                );
-                            }
-                            EnqueueOutcome::ReplyBusy => {
-                                let _ = write_frame(&mut stream, &CollectorWireResponse::Busy);
-                            }
-                            EnqueueOutcome::Wait(rx) => {
-                                let waiters_counter = Arc::clone(&active_waiters);
-                                let spawn_res = thread::Builder::new()
-                                    .name("agy-pulse-collector-waiter".to_string())
-                                    .spawn(move || {
-                                        struct WaiterGuard(Arc<AtomicUsize>);
-                                        impl Drop for WaiterGuard {
-                                            fn drop(&mut self) {
-                                                self.0.fetch_sub(1, Ordering::AcqRel);
-                                            }
-                                        }
-                                        let _guard = WaiterGuard(waiters_counter);
-                                        let resp = match rx.recv_timeout(Duration::from_millis(wait_ms)) {
-                                            Ok(r) => r,
-                                            Err(_) => CollectorWireResponse::Busy,
-                                        };
-                                        let _ = write_frame(&mut stream, &resp);
-                                    });
-                                if spawn_res.is_err() {
-                                    active_waiters.fetch_sub(1, Ordering::AcqRel);
-                                }
-                            }
-                        }
-                    }
+                    });
+                if let Err(err) = spawn_res {
+                    platform::write_error_log_safely(&format!(
+                        "Collector IPC connection thread spawn failed: {err}"
+                    ));
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -529,10 +650,24 @@ fn spawn_stale_cleanup_thread(env_ov: Option<HashMap<String, Option<String>>>) {
         .spawn(move || run_stale_cleanup_with_env(env_ov.as_ref()));
 }
 
+struct WorkerDoneGuard(Arc<(Mutex<bool>, Condvar)>);
+
+impl Drop for WorkerDoneGuard {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.0;
+        if let Ok(mut done) = lock.lock() {
+            *done = true;
+            cvar.notify_all();
+        }
+    }
+}
+
 fn run_worker_loop(
     queue: Arc<(Mutex<CollectorQueueState>, Condvar)>,
     shutdown_flag: Arc<AtomicBool>,
+    worker_done: Arc<(Mutex<bool>, Condvar)>,
 ) {
+    let _done_guard = WorkerDoneGuard(worker_done);
     let mut did_stale_cleanup = false;
 
     loop {
@@ -672,8 +807,7 @@ pub fn run_collector_bg_cli(_args: &[String]) -> i32 {
     if let Some(existing) = read_collector_state()
         && platform::is_process_alive(existing.pid)
     {
-        let same_binary =
-            existing.version == crate::VERSION && existing.exe_mtime_ms == my_exe_mtime;
+        let same_binary = is_same_collector_binary(&existing, my_exe_mtime);
         if same_binary {
             let _ = release_collector_spawn_lock();
             return 0;
@@ -712,8 +846,128 @@ pub fn run_collector_bg_cli(_args: &[String]) -> i32 {
             cvar.notify_all();
         }
     }
-    if let Some(worker) = handle.worker_thread.take() {
-        let _ = worker.join();
+    let mut handle = handle;
+    if let Some(ipc) = handle.ipc_thread.take() {
+        let _ = ipc.join();
     }
+    handle.shutdown();
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        CollectorQueueState, CollectorServerHandle, is_same_collector_binary,
+    };
+    use crate::collector::protocol::{
+        COLLECTOR_APP_ID, CollectorRequest, CollectorStateFile, CollectorWireResponse,
+    };
+
+    fn sample_state(exe_mtime_ms: i64) -> CollectorStateFile {
+        CollectorStateFile {
+            app: COLLECTOR_APP_ID.to_string(),
+            pid: std::process::id(),
+            version: crate::VERSION.to_string(),
+            exe_mtime_ms,
+            mode: "collector".to_string(),
+            socket_path: None,
+            tcp_port: None,
+            token: "tok".to_string(),
+            started_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    fn sample_collect_req(conv_key: &str, stdin_text: &str) -> CollectorRequest {
+        CollectorRequest {
+            token: "tok".to_string(),
+            stdin_text: stdin_text.to_string(),
+            fallback_cwd: PathBuf::from("."),
+            stdin_ms: 1,
+            conversation_key: conv_key.to_string(),
+            has_warm_snapshot: false,
+            wait_ms: 100,
+            soft_budget_ms: 500,
+            env_overrides: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn server_and_client_agree_on_exe_mtime_zero_fallback() {
+        assert!(is_same_collector_binary(&sample_state(0), 1_700_000_000_000));
+        assert!(is_same_collector_binary(&sample_state(1_700_000_000_000), 0));
+        assert!(is_same_collector_binary(
+            &sample_state(1_700_000_000_123),
+            1_700_000_000_123
+        ));
+        assert!(!is_same_collector_binary(
+            &sample_state(1_700_000_000_123),
+            1_700_000_000_999
+        ));
+    }
+
+    #[test]
+    fn queue_bounds_distinct_keys_while_preserving_debounce_merge() {
+        let mut q = CollectorQueueState::with_capacity(2);
+        let (tx_a1, _rx_a1) = mpsc::sync_channel::<CollectorWireResponse>(1);
+        let (tx_b, _rx_b) = mpsc::sync_channel::<CollectorWireResponse>(1);
+        let (tx_c, _rx_c) = mpsc::sync_channel::<CollectorWireResponse>(1);
+        let (tx_a2, _rx_a2) = mpsc::sync_channel::<CollectorWireResponse>(1);
+
+        assert!(q.can_accept("conv-a"));
+        assert!(q.enqueue(sample_collect_req("conv-a", "a1"), Some(tx_a1)));
+        assert!(q.enqueue(sample_collect_req("conv-b", "b1"), Some(tx_b)));
+
+        assert!(!q.can_accept("conv-c"));
+        assert!(!q.enqueue(sample_collect_req("conv-c", "c1"), Some(tx_c)));
+        assert_eq!(q.pending_order.len(), 2);
+
+        // Existing conversation key must still debounce-merge even when queue is at capacity.
+        assert!(q.can_accept("conv-a"));
+        assert!(q.enqueue(sample_collect_req("conv-a", "a2"), Some(tx_a2)));
+        assert_eq!(q.pending_order.len(), 2);
+        let Some(merged) = q.pending_jobs.get("conv-a") else {
+            panic!("conv-a present");
+        };
+        assert_eq!(merged.req.stdin_text, "a2");
+        assert_eq!(merged.waiters.len(), 2);
+    }
+
+    #[test]
+    fn shutdown_uses_bounded_wait_when_worker_is_stalled() {
+        let queue = Arc::new((
+            Mutex::new(CollectorQueueState::with_capacity(2)),
+            Condvar::new(),
+        ));
+        let worker_done = Arc::new((Mutex::new(false), Condvar::new()));
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let worker_thread = thread::spawn(move || {
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+
+        let mut handle = CollectorServerHandle {
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            queue,
+            worker_done,
+            ipc_thread: None,
+            worker_thread: Some(worker_thread),
+        };
+
+        let start = Instant::now();
+        handle.shutdown();
+        let elapsed = start.elapsed();
+        let _ = release_tx.send(());
+
+        assert!(
+            elapsed < Duration::from_millis(2400),
+            "shutdown must not block indefinitely on stalled worker (took {elapsed:?})"
+        );
+    }
 }

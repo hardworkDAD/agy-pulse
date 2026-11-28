@@ -955,3 +955,172 @@ fn t16_sequential_warm_statusline_requests_never_get_spurious_busy() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn t16_embedded_collector_takes_over_existing_embedded_instance() {
+    use std::sync::mpsc;
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let env_map = env.env_map();
+    let _cleanup = CollectorCleanup {
+        runtime_dir: env.runtime_dir.clone(),
+        data_dir: env.data_dir.clone(),
+    };
+    let port = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let port_str = port.to_string();
+
+    let dummy = ChildGuard(Command::new("sleep").arg("10").spawn().unwrap());
+    let dummy_pid = dummy.0.id();
+
+    let old_sock = env.runtime_dir.join("old-embedded.sock");
+    let _ = fs::remove_file(&old_sock);
+    let listener = UnixListener::bind(&old_sock).unwrap();
+    let (tx, rx) = mpsc::channel::<bool>();
+    let old_server = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept()
+            && let Ok(CollectorWireRequest::Shutdown { token }) = read_frame(&mut stream)
+        {
+            let _ = write_frame(&mut stream, &CollectorWireResponse::Ack);
+            let _ = tx.send(token == "old-embedded-token");
+        }
+    });
+
+    let state_path = platform::with_env_overrides(&env_map, collector_state_path);
+    let old_state = CollectorStateFile {
+        app: COLLECTOR_APP_ID.to_string(),
+        pid: dummy_pid,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        exe_mtime_ms: 0,
+        mode: "dashboard".to_string(),
+        socket_path: Some(old_sock.to_string_lossy().into_owned()),
+        tcp_port: None,
+        token: "old-embedded-token".to_string(),
+        started_at_ms: 1_700_000_000_000,
+    };
+    fs::write(&state_path, serde_json::to_vec_pretty(&old_state).unwrap()).unwrap();
+
+    let serve_out = env
+        .base_cmd(&agy_pulse_bin())
+        .args([
+            "dashboard",
+            "--serve-background",
+            "--port",
+            &port_str,
+            "--idle-timeout",
+            "10",
+            "--no-open",
+        ])
+        .env("AGY_PULSE_NO_OPEN", "1")
+        .output()
+        .unwrap();
+    assert!(
+        serve_out.status.success(),
+        "dashboard --serve-background failed: {}",
+        String::from_utf8_lossy(&serve_out.stderr)
+    );
+
+    let got_shutdown = rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false);
+    let _ = env
+        .base_cmd(&agypl_bin())
+        .args(["dashboard", "stop", "--port", &port_str])
+        .output();
+    let _ = fs::remove_file(&old_sock);
+    drop(old_server);
+
+    assert!(
+        got_shutdown,
+        "start_embedded must send Shutdown takeover to an alive existing embedded collector"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn t16_slow_ipc_clients_do_not_block_normal_ping_requests() {
+    use std::os::unix::net::UnixStream;
+
+    let _lock = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let env_map = env.env_map();
+    let _cleanup = CollectorCleanup {
+        runtime_dir: env.runtime_dir.clone(),
+        data_dir: env.data_dir.clone(),
+    };
+
+    let (code, _out, err, _) = env.run_statusline(
+        r#"{"plan_tier":"Pro"}"#,
+        &[
+            ("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1"),
+            ("AGY_PULSE_COLLECTOR_IDLE_SEC", "10"),
+            ("COLUMNS", "160"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+
+    let state = platform::with_env_overrides(&env_map, read_collector_state)
+        .expect("collector.json must exist");
+    let sock_path = state
+        .socket_path
+        .as_deref()
+        .expect("unix collector state must have socket_path");
+
+    // Open two stalled slow clients that send a frame length prefix without completing the body.
+    let mut slow_streams = Vec::new();
+    for _ in 0..2 {
+        let mut s = UnixStream::connect(sock_path).unwrap();
+        s.write_all(&128u32.to_be_bytes()).unwrap();
+        s.write_all(b"{").unwrap();
+        s.flush().unwrap();
+        slow_streams.push(s);
+    }
+
+    // Give the accept loop a moment to accept the slow clients, then send a normal Ping.
+    thread::sleep(Duration::from_millis(20));
+    let ping_start = Instant::now();
+    let mut ping_stream = UnixStream::connect(sock_path).unwrap();
+    ping_stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    ping_stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write_frame(
+        &mut ping_stream,
+        &CollectorWireRequest::Ping {
+            token: state.token.clone(),
+        },
+    )
+    .unwrap();
+    let pong: CollectorWireResponse = read_frame(&mut ping_stream).unwrap();
+    let ping_elapsed = ping_start.elapsed();
+
+    drop(slow_streams);
+    let mut shutdown_stream = UnixStream::connect(sock_path).unwrap();
+    let _ = write_frame(
+        &mut shutdown_stream,
+        &CollectorWireRequest::Shutdown {
+            token: state.token.clone(),
+        },
+    );
+
+    assert!(
+        matches!(pong, CollectorWireResponse::Pong { .. }),
+        "expected Pong response, got {pong:?}"
+    );
+    assert!(
+        ping_elapsed < Duration::from_millis(120),
+        "normal Ping must not be blocked behind stalled slow IPC clients (took {ping_elapsed:?})"
+    );
+}

@@ -190,7 +190,13 @@ pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()>
             format!("IPC frame exceeds {MAX_FRAME_BYTES} bytes"),
         ));
     }
-    let len_be = (payload.len() as u32).to_be_bytes();
+    let len_u32 = u32::try_from(payload.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("IPC frame length {} exceeds u32::MAX", payload.len()),
+        )
+    })?;
+    let len_be = len_u32.to_be_bytes();
     w.write_all(&len_be)?;
     w.write_all(&payload)?;
     w.flush()
@@ -341,4 +347,49 @@ pub fn release_collector_spawn_lock_if_owner() {
 /// Unconditionally remove `collector.lock` (used by the spawned `--collector-bg` child once ready).
 pub fn release_collector_spawn_lock() -> bool {
     fs::remove_file(collector_lock_path()).is_ok()
+}
+
+/// Return `true` when both executable mtimes are positive and equal, or when either is unavailable (`<= 0`).
+pub(super) fn exe_mtime_matches(existing_mtime_ms: i64, current_mtime_ms: i64) -> bool {
+    if existing_mtime_ms <= 0 || current_mtime_ms <= 0 {
+        return true;
+    }
+    existing_mtime_ms == current_mtime_ms
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{CollectorWireResponse, MAX_FRAME_BYTES, exe_mtime_matches, read_frame, write_frame};
+
+    #[test]
+    fn exe_mtime_matches_treats_non_positive_as_compatible_and_positive_as_strict() {
+        assert!(exe_mtime_matches(0, 1_700_000_000_000));
+        assert!(exe_mtime_matches(1_700_000_000_000, 0));
+        assert!(exe_mtime_matches(-1, 0));
+        assert!(exe_mtime_matches(1_700_000_000_000, 1_700_000_000_000));
+        assert!(!exe_mtime_matches(1_700_000_000_000, 1_700_000_000_001));
+    }
+
+    #[test]
+    fn write_frame_rejects_oversized_payload_and_roundtrips_valid_frame() {
+        let mut buf = Vec::new();
+        let oversized = CollectorWireResponse::Error("a".repeat(MAX_FRAME_BYTES + 1));
+        let Err(err) = write_frame(&mut buf, &oversized) else {
+            panic!("oversized frame must fail");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(buf.is_empty());
+
+        if let Err(err) = write_frame(&mut buf, &CollectorWireResponse::Ack) {
+            panic!("write_frame valid frame failed: {err}");
+        }
+        let mut cursor = Cursor::new(buf);
+        let decoded: CollectorWireResponse = match read_frame(&mut cursor) {
+            Ok(d) => d,
+            Err(err) => panic!("read_frame valid frame failed: {err}"),
+        };
+        assert!(matches!(decoded, CollectorWireResponse::Ack));
+    }
 }

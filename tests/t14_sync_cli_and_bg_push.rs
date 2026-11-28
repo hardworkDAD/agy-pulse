@@ -1038,3 +1038,142 @@ fn statusline_spawns_sync_bg_respecting_throttle_and_no_autostart_env() {
         "AGY_PULSE_NO_SYNC_AUTOSTART=1 must suppress --sync-bg"
     );
 }
+
+#[test]
+fn cli_subcommand_routing_isolates_flags_per_subcommand() {
+    let env = IsolatedCliEnv::new();
+
+    // 1. Subcommands must not be hijacked by trailing global flags like `--stats` or `--version`.
+    let sync_stats = env
+        .cmd(&agypl_bin())
+        .args(["sync", "--stats"])
+        .output()
+        .unwrap();
+    assert_ne!(
+        sync_stats.status.code(),
+        Some(0),
+        "agypl sync --stats must route to sync and fail, not stats; stdout={}",
+        String::from_utf8_lossy(&sync_stats.stdout)
+    );
+    let sync_stats_err = String::from_utf8_lossy(&sync_stats.stderr);
+    assert!(
+        sync_stats_err.contains("agy-pulse sync"),
+        "expected sync error message, got stderr: {sync_stats_err}"
+    );
+
+    let acct_ver = env
+        .cmd(&agypl_bin())
+        .args(["account", "--version"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        acct_ver.status.code(),
+        Some(2),
+        "agypl account --version must route to account, stdout={}",
+        String::from_utf8_lossy(&acct_ver.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&acct_ver.stderr).contains("agy-pulse account error"),
+        "expected account error, got stderr: {}",
+        String::from_utf8_lossy(&acct_ver.stderr)
+    );
+
+    // 2. Top-level version / help / compatibility flags still route as expected.
+    for flag in ["--version", "-V", "-v", "version"] {
+        let out = env.cmd(&agypl_bin()).arg(flag).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "flag {flag} failed");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.starts_with("agy-pulse v"),
+            "expected version output for {flag}, got: {stdout}"
+        );
+    }
+
+    let dash_help = env
+        .cmd(&agy_pulse_bin())
+        .args(["--dashboard", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(dash_help.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&dash_help.stdout).contains("dashboard"),
+        "expected dashboard help: {}",
+        String::from_utf8_lossy(&dash_help.stdout)
+    );
+}
+
+#[test]
+fn bg_ledger_sync_lock_recovers_from_future_timestamp_clock_rollback() {
+    let env = IsolatedCliEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        r#"{"display":{"showDailyCost":true}}"#,
+    )
+    .unwrap();
+    let lock_path = env.data_dir.join("agy-pulse-ledger-sync.lock");
+    let now_ms = Utc::now().timestamp_millis();
+    let future_ms = now_ms + 120_000;
+    let fake_lock = serde_json::json!({
+        "pid": std::process::id(),
+        "role": "worker",
+        "token": "future-clock-rollback-token",
+        "ts": future_ms
+    });
+    fs::write(&lock_path, fake_lock.to_string()).unwrap();
+    let f = fs::OpenOptions::new().write(true).open(&lock_path).unwrap();
+    f.set_modified(std::time::SystemTime::now() + Duration::from_secs(120))
+        .unwrap();
+    drop(f);
+
+    let payload = serde_json::json!({
+        "conversation_id": "conv-clock-rollback",
+        "plan_tier": "Pro",
+        "model": { "display_name": "Gemini 4 Carbon (High)" }
+    })
+    .to_string();
+
+    let mut child = env
+        .cmd(&agy_pulse_bin())
+        .env("AGY_PULSE_SYNC_MODE", "1")
+        .env("AGY_PULSE_NO_SYNC_AUTOSTART", "1")
+        .env("AGY_PULSE_NO_DASHBOARD_AUTOSTART", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Wait for the reclaimed lock to be taken over and released by the spawned `--sync-ledger-bg` worker.
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut reclaimed = false;
+    while Instant::now() < deadline {
+        match fs::read_to_string(&lock_path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                reclaimed = true;
+                break;
+            }
+            Ok(raw) if !raw.contains("future-clock-rollback-token") => {
+                reclaimed = true;
+                break;
+            }
+            _ => thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    assert!(
+        reclaimed,
+        "future-timestamp bg ledger sync lock must be reclaimed rather than deadlocking"
+    );
+}

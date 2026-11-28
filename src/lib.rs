@@ -18,7 +18,7 @@ use std::io::{self, Read, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -35,6 +35,8 @@ const STATUSLINE_TOTAL_HARD_CAP: Duration = Duration::from_millis(3500);
 const STATUSLINE_EXIT_TIMEOUT: Duration = Duration::from_secs(4);
 const LEDGER_BG_SYNC_LOCK_FILENAME: &str = "agy-pulse-ledger-sync.lock";
 const LEDGER_BG_SYNC_SPAWNING_GRACE_MS: u64 = 5_000;
+const LEDGER_BG_SYNC_SPAWNING_HANDOFF_GRACE_MS: u64 = 1_500;
+const LEDGER_BG_SYNC_CLOCK_SKEW_TOLERANCE_MS: i64 = 5_000;
 const LEDGER_BG_SYNC_LOCK_TTL_MS: u64 = 30_000;
 const LEDGER_BG_SYNC_LOCK_MAX_TTL_MS: u64 = 10 * 60 * 1000;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -137,6 +139,52 @@ fn current_epoch_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn is_bg_ledger_sync_lock_active<F>(
+    parsed: Option<&BgLedgerSyncLock>,
+    mtime_ms: Option<i64>,
+    now_ms: i64,
+    is_pid_alive: F,
+) -> bool
+where
+    F: Fn(u32) -> bool,
+{
+    let mtime_ahead = mtime_ms.is_some_and(|m| m > now_ms);
+    let ts_ahead = parsed.is_some_and(|p| p.ts > now_ms);
+
+    if mtime_ms.is_some_and(|m| m - now_ms > LEDGER_BG_SYNC_CLOCK_SKEW_TOLERANCE_MS)
+        || parsed
+            .is_some_and(|p| p.ts > 0 && p.ts - now_ms > LEDGER_BG_SYNC_CLOCK_SKEW_TOLERANCE_MS)
+    {
+        return false;
+    }
+
+    let mtime_age_ms = mtime_ms.map(|m| now_ms.saturating_sub(m).max(0));
+    let ts_age_ms = parsed
+        .filter(|p| p.ts > 0)
+        .map(|p| now_ms.saturating_sub(p.ts).max(0));
+    let effective_age_ms = match (mtime_age_ms, ts_age_ms) {
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => return false,
+    };
+
+    match parsed {
+        Some(lock) if lock.role == "worker" && lock.pid > 0 => {
+            is_pid_alive(lock.pid) && effective_age_ms < LEDGER_BG_SYNC_LOCK_MAX_TTL_MS as i64
+        }
+        Some(lock) if lock.role == "spawning" => {
+            if lock.pid == 0 || is_pid_alive(lock.pid) {
+                effective_age_ms < LEDGER_BG_SYNC_SPAWNING_GRACE_MS as i64
+            } else {
+                !mtime_ahead
+                    && !ts_ahead
+                    && effective_age_ms < LEDGER_BG_SYNC_SPAWNING_HANDOFF_GRACE_MS as i64
+            }
+        }
+        _ => effective_age_ms < LEDGER_BG_SYNC_LOCK_TTL_MS as i64,
+    }
+}
+
 fn acquire_bg_ledger_sync_lock(token: &str) -> bool {
     let lock_path = platform::resolve_antigravity_path(LEDGER_BG_SYNC_LOCK_FILENAME);
     let now_ms = current_epoch_ms();
@@ -159,29 +207,22 @@ fn acquire_bg_ledger_sync_lock(token: &str) -> bool {
                     Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                     Err(_) => return false,
                 };
-                let Ok(modified) = meta.modified() else {
-                    return false;
-                };
-                let age_ms = SystemTime::now()
-                    .duration_since(modified)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-
-                let is_active = match fs::read_to_string(&lock_path)
+                let mtime_ms = meta
+                    .modified()
                     .ok()
-                    .and_then(|raw| serde_json::from_str::<BgLedgerSyncLock>(&raw).ok())
-                {
-                    Some(parsed) if parsed.role == "worker" && parsed.pid > 0 => {
-                        platform::is_process_alive(parsed.pid)
-                            && age_ms < LEDGER_BG_SYNC_LOCK_MAX_TTL_MS
-                    }
-                    Some(parsed) if parsed.role == "spawning" => {
-                        age_ms < LEDGER_BG_SYNC_SPAWNING_GRACE_MS
-                            && (parsed.pid == 0 || platform::is_process_alive(parsed.pid))
-                    }
-                    _ => age_ms < LEDGER_BG_SYNC_LOCK_TTL_MS,
-                };
-                if is_active {
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64);
+                let parsed = fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<BgLedgerSyncLock>(&raw).ok());
+                let check_now_ms = current_epoch_ms();
+
+                if is_bg_ledger_sync_lock_active(
+                    parsed.as_ref(),
+                    mtime_ms,
+                    check_now_ms,
+                    platform::is_process_alive,
+                ) {
                     return false;
                 }
                 if fs::remove_file(&lock_path).is_err() {
@@ -779,90 +820,278 @@ fn run_statusline_pipeline(process_start: Instant) {
     profiler.finish(&result.summary);
 }
 
-/// Primary CLI entrypoint shared by `agy-pulse` and `agypl` binaries.
-pub fn run_cli() -> i32 {
-    let process_start = Instant::now();
-    let args: Vec<String> = env::args().skip(1).collect();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliRoute {
+    Version,
+    Help,
+    Dashboard,
+    Stats,
+    Config,
+    Install,
+    Uninstall,
+    Account,
+    Sync,
+    Update,
+    CheckUpdateBg,
+    SyncLedgerBg,
+    SyncBg,
+    CollectorBg,
+    Statusline,
+}
+
+fn resolve_cli_route(args: &[String]) -> CliRoute {
     let first = args.first().map(String::as_str);
-
-    if matches!(first, Some("--version" | "-V" | "-v" | "version"))
-        || args.iter().any(|a| a == "--version" || a == "-V")
-    {
-        println!("agy-pulse v{VERSION}");
-        return 0;
+    match first {
+        Some("version" | "--version" | "-V" | "-v") => return CliRoute::Version,
+        Some("help" | "--help" | "-h") => return CliRoute::Help,
+        Some("dashboard" | "dash" | "ui" | "--dashboard") => return CliRoute::Dashboard,
+        Some("stats" | "report" | "--stats") => return CliRoute::Stats,
+        Some("config" | "--config") => return CliRoute::Config,
+        Some("install" | "--install") => return CliRoute::Install,
+        Some("uninstall" | "--uninstall") => return CliRoute::Uninstall,
+        Some("account") => return CliRoute::Account,
+        Some("sync") => return CliRoute::Sync,
+        Some("update" | "--update") => return CliRoute::Update,
+        Some("--check-update-bg") => return CliRoute::CheckUpdateBg,
+        Some("--sync-ledger-bg") => return CliRoute::SyncLedgerBg,
+        Some("--sync-bg") => return CliRoute::SyncBg,
+        Some("--collector-bg") => return CliRoute::CollectorBg,
+        _ => {}
     }
 
-    if matches!(first, Some("dashboard" | "dash" | "ui"))
-        || args.iter().any(|a| a == "--dashboard")
-    {
-        return dashboard::run_dashboard_cli(&args);
+    // Legacy global-flag fallback only when the first argument is not an explicit subcommand.
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    if has("--version") || has("-V") {
+        CliRoute::Version
+    } else if has("--dashboard") {
+        CliRoute::Dashboard
+    } else if has("--stats") {
+        CliRoute::Stats
+    } else if has("--config") {
+        CliRoute::Config
+    } else if has("--install") {
+        CliRoute::Install
+    } else if has("--uninstall") {
+        CliRoute::Uninstall
+    } else if has("--update") {
+        CliRoute::Update
+    } else if has("--check-update-bg") {
+        CliRoute::CheckUpdateBg
+    } else if has("--sync-ledger-bg") {
+        CliRoute::SyncLedgerBg
+    } else if has("--sync-bg") {
+        CliRoute::SyncBg
+    } else if has("--collector-bg") {
+        CliRoute::CollectorBg
+    } else if has("--help") || has("-h") {
+        CliRoute::Help
+    } else {
+        CliRoute::Statusline
+    }
+}
+
+fn run_statusline_with_exit_watchdog(process_start: Instant) -> i32 {
+    let finished = Arc::new((Mutex::new(false), Condvar::new()));
+    struct FinishGuard(Arc<(Mutex<bool>, Condvar)>);
+    impl Drop for FinishGuard {
+        fn drop(&mut self) {
+            let (lock, cvar) = &*self.0;
+            if let Ok(mut done) = lock.lock() {
+                *done = true;
+                cvar.notify_all();
+            }
+        }
     }
 
-    if matches!(first, Some("stats" | "report")) || args.iter().any(|a| a == "--stats") {
-        return ledger::run_stats_cli(&args);
-    }
-
-    if matches!(first, Some("config")) || args.iter().any(|a| a == "--config") {
-        return config::run_config_cli();
-    }
-
-    if matches!(first, Some("install")) || args.iter().any(|a| a == "--install") {
-        return ops::run_install_cli(&args);
-    }
-
-    if matches!(first, Some("uninstall")) || args.iter().any(|a| a == "--uninstall") {
-        return ops::run_uninstall_cli(&args);
-    }
-
-    if matches!(first, Some("account")) {
-        return ops::run_account_cli(&args);
-    }
-
-    if matches!(first, Some("sync")) {
-        return sync::run_sync_cli(&args);
-    }
-
-    if matches!(first, Some("update")) || args.iter().any(|a| a == "--update") {
-        return ops::run_update_cli(&args);
-    }
-
-    if args.iter().any(|a| a == "--check-update-bg") {
-        return ops::run_check_update_bg_cli();
-    }
-
-    if args.iter().any(|a| a == "--sync-ledger-bg") {
-        return run_sync_ledger_bg_cli(&args);
-    }
-
-    if args.iter().any(|a| a == "--sync-bg") {
-        return sync::run_sync_bg();
-    }
-
-    if args.iter().any(|a| a == "--collector-bg") {
-        return collector::run_collector_bg_cli(&args);
-    }
-
-    if matches!(first, Some("help" | "--help" | "-h"))
-        || args.iter().any(|a| a == "--help" || a == "-h")
-    {
-        print!("{}", build_cli_help_text());
-        return 0;
-    }
-
+    let watchdog_finished = Arc::clone(&finished);
     let watchdog_thread = thread::Builder::new()
         .name("agy-pulse-exit-watchdog".into())
         .spawn(move || {
-            thread::sleep(STATUSLINE_EXIT_TIMEOUT.saturating_sub(process_start.elapsed()));
-            platform::exit_immediately(0);
+            let timeout = STATUSLINE_EXIT_TIMEOUT.saturating_sub(process_start.elapsed());
+            let (lock, cvar) = &*watchdog_finished;
+            let done = if let Ok(guard) = lock.lock() {
+                cvar.wait_timeout_while(guard, timeout, |d| !*d)
+                    .map(|(g, _)| *g)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if !done {
+                platform::exit_immediately(0);
+            }
         });
     if watchdog_thread.is_err() {
         return 0;
     }
 
+    let _finish_guard = FinishGuard(Arc::clone(&finished));
     let res = panic::catch_unwind(|| run_statusline_pipeline(process_start));
     if res.is_err() {
         platform::write_error_log_safely("Recovered from unexpected panic in statusline mode");
     }
-    // Keep the watchdog armed through normal process shutdown.
-    std::process::exit(0)
+    0
+}
+
+/// Primary CLI entrypoint shared by `agy-pulse` and `agypl` binaries.
+pub fn run_cli() -> i32 {
+    let process_start = Instant::now();
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    match resolve_cli_route(&args) {
+        CliRoute::Version => {
+            println!("agy-pulse v{VERSION}");
+            0
+        }
+        CliRoute::Help => {
+            print!("{}", build_cli_help_text());
+            0
+        }
+        CliRoute::Dashboard => dashboard::run_dashboard_cli(&args),
+        CliRoute::Stats => ledger::run_stats_cli(&args),
+        CliRoute::Config => config::run_config_cli(),
+        CliRoute::Install => ops::run_install_cli(&args),
+        CliRoute::Uninstall => ops::run_uninstall_cli(&args),
+        CliRoute::Account => ops::run_account_cli(&args),
+        CliRoute::Sync => sync::run_sync_cli(&args),
+        CliRoute::Update => ops::run_update_cli(&args),
+        CliRoute::CheckUpdateBg => ops::run_check_update_bg_cli(),
+        CliRoute::SyncLedgerBg => run_sync_ledger_bg_cli(&args),
+        CliRoute::SyncBg => sync::run_sync_bg(),
+        CliRoute::CollectorBg => collector::run_collector_bg_cli(&args),
+        CliRoute::Statusline => run_statusline_with_exit_watchdog(process_start),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BgLedgerSyncLock, CliRoute, is_bg_ledger_sync_lock_active, resolve_cli_route,
+    };
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn bg_ledger_sync_lock_handles_clock_rollback_and_spawning_handoff() {
+        let now = 1_700_000_000_000i64;
+        let worker_lock = BgLedgerSyncLock {
+            pid: 4242,
+            role: "worker".to_string(),
+            token: "tok".to_string(),
+            ts: now - 1_000,
+        };
+
+        // Normal live worker within TTL stays active.
+        assert!(is_bg_ledger_sync_lock_active(
+            Some(&worker_lock),
+            Some(now - 1_000),
+            now,
+            |_| true
+        ));
+
+        // Future mtime beyond 5s skew tolerance is treated as clock rollback -> reclaimable.
+        assert!(!is_bg_ledger_sync_lock_active(
+            Some(&worker_lock),
+            Some(now + 5_001),
+            now,
+            |_| true
+        ));
+
+        // Future parsed.ts beyond 5s skew tolerance is also reclaimable even if mtime looks normal.
+        let future_ts_worker = BgLedgerSyncLock {
+            ts: now + 5_001,
+            ..worker_lock.clone()
+        };
+        assert!(!is_bg_ledger_sync_lock_active(
+            Some(&future_ts_worker),
+            Some(now - 100),
+            now,
+            |_| true
+        ));
+
+        // Stale parsed.ts beyond MAX_TTL is reclaimed even when file mtime was touched recently.
+        let stale_ts_worker = BgLedgerSyncLock {
+            ts: now - 11 * 60 * 1000,
+            ..worker_lock
+        };
+        assert!(!is_bg_ledger_sync_lock_active(
+            Some(&stale_ts_worker),
+            Some(now - 100),
+            now,
+            |_| true
+        ));
+
+        // Spawning handoff grace: dead parent PID gets a short (<1500ms) window when not future.
+        let fresh_spawning = BgLedgerSyncLock {
+            pid: 9999,
+            role: "spawning".to_string(),
+            token: "tok-s".to_string(),
+            ts: now - 400,
+        };
+        assert!(is_bg_ledger_sync_lock_active(
+            Some(&fresh_spawning),
+            Some(now - 400),
+            now,
+            |_| false
+        ));
+
+        // Past 1500ms handoff window with dead parent PID -> immediately reclaimable.
+        let expired_handoff = BgLedgerSyncLock {
+            ts: now - 1_500,
+            ..fresh_spawning.clone()
+        };
+        assert!(!is_bg_ledger_sync_lock_active(
+            Some(&expired_handoff),
+            Some(now - 1_500),
+            now,
+            |_| false
+        ));
+
+        // Future timestamp in spawning state with dead parent PID gets NO handoff grace.
+        let future_spawning = BgLedgerSyncLock {
+            ts: now + 100,
+            ..fresh_spawning
+        };
+        assert!(!is_bg_ledger_sync_lock_active(
+            Some(&future_spawning),
+            Some(now - 100),
+            now,
+            |_| false
+        ));
+    }
+
+    #[test]
+    fn cli_routing_prefers_first_subcommand_and_keeps_global_compat_flags() {
+        assert_eq!(resolve_cli_route(&args(&["sync", "--stats"])), CliRoute::Sync);
+        assert_eq!(
+            resolve_cli_route(&args(&["account", "--version"])),
+            CliRoute::Account
+        );
+        assert_eq!(
+            resolve_cli_route(&args(&["stats", "--version"])),
+            CliRoute::Stats
+        );
+        assert_eq!(
+            resolve_cli_route(&args(&["install", "--dashboard"])),
+            CliRoute::Install
+        );
+        assert_eq!(
+            resolve_cli_route(&args(&["--dashboard", "--help"])),
+            CliRoute::Dashboard
+        );
+        assert_eq!(
+            resolve_cli_route(&args(&["--stats", "--help"])),
+            CliRoute::Stats
+        );
+        assert_eq!(resolve_cli_route(&args(&["--version"])), CliRoute::Version);
+        assert_eq!(resolve_cli_route(&args(&["-v"])), CliRoute::Version);
+        assert_eq!(resolve_cli_route(&args(&["version"])), CliRoute::Version);
+        assert_eq!(resolve_cli_route(&args(&["--help"])), CliRoute::Help);
+        assert_eq!(resolve_cli_route(&args(&[])), CliRoute::Statusline);
+        assert_eq!(
+            resolve_cli_route(&args(&["--port", "3789", "--dashboard"])),
+            CliRoute::Dashboard
+        );
+    }
 }
