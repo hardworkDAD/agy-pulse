@@ -1142,7 +1142,11 @@ fn t04_many_uncached_wal_dbs_are_bounded_per_statusline_call() {
     .to_string();
 
     let start = Instant::now();
-    let (code, out, err) = env.run_stdin(&payload, &[("COLUMNS", "140")]);
+    // Time the WAL scan through the synchronous statusline entry point.
+    let (code, out, err) = env.run_stdin(
+        &payload,
+        &[("COLUMNS", "140"), ("AGY_PULSE_SYNC_MODE", "1")],
+    );
     let elapsed = start.elapsed();
     drop(open_conns);
 
@@ -1158,11 +1162,11 @@ fn t04_many_uncached_wal_dbs_are_bounded_per_statusline_call() {
         serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
     let perf_count = cache_json["_db_perf"]
         .as_object()
-        .map(|m| m.len())
-        .unwrap_or(0);
+        .expect("WAL scan wrote the performance cache")
+        .len();
     assert!(
-        perf_count <= 10,
-        "expected WAL-copy DB scan per statusline call to be bounded (<= 10), got {perf_count}"
+        (1..=10).contains(&perf_count),
+        "expected WAL-copy DB scan to populate 1 to 10 cache entries, got {perf_count}"
     );
 }
 

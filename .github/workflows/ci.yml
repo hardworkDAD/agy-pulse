@@ -39,7 +39,7 @@ jobs:
         run: cargo build --release
 
       - name: Run full test suite
-        run: cargo test
+        run: cargo test --no-fail-fast
 
       - name: Verify configure-utf8 script (Windows)
         if: runner.os == 'Windows'
