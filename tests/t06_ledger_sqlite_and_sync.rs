@@ -1415,3 +1415,103 @@ fn t06_cli_account_assign_dry_run_workspace_filter_and_validation() {
         .unwrap();
     assert_eq!(alice_dev_registered, 1);
 }
+
+#[test]
+fn t06_rolling_cost_preserves_daily_spend_on_clock_regression_and_post_reset_week_delta() {
+    let temp = TempDir::new().unwrap();
+    let ledger_path = temp.path().join("agy-pulse-ledger.sqlite");
+    let mut store = LedgerStore::open_at(&ledger_path).unwrap();
+
+    let day_ms = 24 * 60 * 60 * 1000;
+    let day0 = local_ms(2026, 11, 10, 12, 0, 0);
+    let week_ms = 7 * day_ms;
+
+    // Day 0: accrue $3.00 ($1.00 -> $4.00)
+    store
+        .record_rolling_costs(&RollingCostInput {
+            cursor_id: "sess-reg",
+            cascade_root_id: Some("sess-reg"),
+            live_cost_usd: Some(1.00),
+            seven_day_reset_at_ms: Some(day0 + week_ms),
+            now_ms: day0,
+        })
+        .unwrap();
+    let r_day0 = store
+        .record_rolling_costs(&RollingCostInput {
+            cursor_id: "sess-reg",
+            cascade_root_id: Some("sess-reg"),
+            live_cost_usd: Some(4.00),
+            seven_day_reset_at_ms: Some(day0 + week_ms),
+            now_ms: day0 + 60_000,
+        })
+        .unwrap()
+        .unwrap();
+    assert!((r_day0.today_usd - 3.00).abs() < 1e-9);
+    assert!((r_day0.week_usd - 3.00).abs() < 1e-9);
+
+    // Clock regresses back to Day -1 (yesterday): MUST NOT wipe out today's $3.00!
+    let r_regress = store
+        .record_rolling_costs(&RollingCostInput {
+            cursor_id: "sess-reg",
+            cascade_root_id: Some("sess-reg"),
+            live_cost_usd: Some(4.50),
+            seven_day_reset_at_ms: Some(day0 + week_ms),
+            now_ms: day0 - day_ms,
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        (r_regress.today_usd - 3.50).abs() < 1e-9,
+        "clock regression wiped today_usd: {}",
+        r_regress.today_usd
+    );
+    assert!(
+        (r_regress.week_usd - 3.50).abs() < 1e-9,
+        "clock regression wiped week_usd: {}",
+        r_regress.week_usd
+    );
+
+    // Keep cursor active across days 1..6 (last seen 12h before reset_boundary) so it stays within 24h window.
+    for d in 1..=6 {
+        store
+            .record_rolling_costs(&RollingCostInput {
+                cursor_id: "sess-reg",
+                cascade_root_id: Some("sess-reg"),
+                live_cost_usd: Some(4.50),
+                seven_day_reset_at_ms: Some(day0 + week_ms),
+                now_ms: day0 + d * day_ms + 12 * 3_600_000,
+            })
+            .unwrap();
+    }
+
+    // Cross-week boundary with delayed seven_day_reset_at_ms:
+    // At reset_boundary + 5min, session accrues +$2.00 ($4.50 -> $6.50) before quota reset timestamp refreshes.
+    let reset_boundary = day0 + week_ms;
+    store
+        .record_rolling_costs(&RollingCostInput {
+            cursor_id: "sess-reg",
+            cascade_root_id: Some("sess-reg"),
+            live_cost_usd: Some(6.50),
+            seven_day_reset_at_ms: Some(day0 + week_ms), // stale reset_at (still old week's end)
+            now_ms: reset_boundary + 5 * 60_000,
+        })
+        .unwrap();
+
+    // At reset_boundary + 10min, seven_day_reset_at_ms refreshes to new window (reset_boundary + 7d),
+    // and live_cost grows +$0.75 ($6.50 -> $7.25). The +$2.00 accrued AFTER reset_boundary MUST NOT be lost!
+    let r_week_post = store
+        .record_rolling_costs(&RollingCostInput {
+            cursor_id: "sess-reg",
+            cascade_root_id: Some("sess-reg"),
+            live_cost_usd: Some(7.25),
+            seven_day_reset_at_ms: Some(reset_boundary + week_ms),
+            now_ms: reset_boundary + 10 * 60_000,
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        (r_week_post.week_usd - 2.75).abs() < 1e-9,
+        "expected week_usd=2.75 (2.00 post-reset + 0.75 current turn), got {}",
+        r_week_post.week_usd
+    );
+}

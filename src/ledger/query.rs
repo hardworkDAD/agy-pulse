@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::env;
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
@@ -545,13 +544,55 @@ pub struct LedgerOverview {
 
 // --- Local timezone helpers (cross-platform via chrono) ---
 
-pub(super) fn local_datetime(ms: i64) -> DateTime<Local> {
-    if let Some(dt) = Local.timestamp_millis_opt(ms).single() {
+pub(super) fn local_datetime_in_tz<Tz: TimeZone>(tz: &Tz, ms: i64) -> DateTime<Tz> {
+    if let Some(dt) = tz.timestamp_millis_opt(ms).earliest() {
         return dt;
     }
     DateTime::from_timestamp_millis(ms)
         .unwrap_or(DateTime::UNIX_EPOCH)
-        .with_timezone(&Local)
+        .with_timezone(tz)
+}
+
+pub(super) fn local_datetime(ms: i64) -> DateTime<Local> {
+    local_datetime_in_tz(&Local, ms)
+}
+
+fn resolve_local_naive_ms<Tz: TimeZone>(
+    tz: &Tz,
+    naive: chrono::NaiveDateTime,
+    prefer_latest: bool,
+) -> Option<i64> {
+    let res = tz.from_local_datetime(&naive);
+    let chosen = if prefer_latest {
+        res.latest()
+    } else {
+        res.earliest()
+    };
+    chosen.map(|dt| dt.timestamp_millis())
+}
+
+fn local_naive_to_ms_in_tz<Tz: TimeZone>(
+    tz: &Tz,
+    naive: chrono::NaiveDateTime,
+    prefer_latest: bool,
+) -> Option<i64> {
+    if let Some(ms) = resolve_local_naive_ms(tz, naive, prefer_latest) {
+        return Some(ms);
+    }
+    // DST spring-forward gap: step forward (for start-of-window) or backward (for end-of-window)
+    // minute-by-minute up to 3 hours to land on the nearest valid local instant of that day.
+    let target_date = naive.date();
+    for step_min in 1i64..=180 {
+        let delta = chrono::Duration::minutes(if prefer_latest { -step_min } else { step_min });
+        let candidate = naive + delta;
+        if candidate.date() != target_date {
+            break;
+        }
+        if let Some(ms) = resolve_local_naive_ms(tz, candidate, prefer_latest) {
+            return Some(ms);
+        }
+    }
+    None
 }
 
 pub(super) fn local_ymd_hms_to_ms(
@@ -565,10 +606,7 @@ pub(super) fn local_ymd_hms_to_ms(
 ) -> Option<i64> {
     let date = NaiveDate::from_ymd_opt(year, month, day)?;
     let naive = date.and_hms_milli_opt(hour, min, sec, milli)?;
-    Local
-        .from_local_datetime(&naive)
-        .earliest()
-        .map(|dt| dt.timestamp_millis())
+    local_naive_to_ms_in_tz(&Local, naive, false)
 }
 
 pub(super) fn local_date_key(ms: i64) -> String {
@@ -576,12 +614,24 @@ pub(super) fn local_date_key(ms: i64) -> String {
     format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day())
 }
 
-pub(super) fn local_today_bounds(now_ms: i64) -> (i64, i64) {
-    let dt = local_datetime(now_ms);
-    let start = local_ymd_hms_to_ms(dt.year(), dt.month(), dt.day(), 0, 0, 0, 0).unwrap_or(now_ms);
-    let end =
-        local_ymd_hms_to_ms(dt.year(), dt.month(), dt.day(), 23, 59, 59, 999).unwrap_or(now_ms);
+pub(super) fn local_today_bounds_in_tz<Tz: TimeZone>(tz: &Tz, now_ms: i64) -> (i64, i64) {
+    let dt = local_datetime_in_tz(tz, now_ms);
+    let fallback_start = now_ms - i64::from(dt.num_seconds_from_midnight()) * 1000;
+    let date = dt.date_naive();
+    let start = date
+        .and_hms_milli_opt(0, 0, 0, 0)
+        .and_then(|naive| local_naive_to_ms_in_tz(tz, naive, false))
+        .unwrap_or(fallback_start);
+    let end = date
+        .and_hms_milli_opt(23, 59, 59, 999)
+        .and_then(|naive| local_naive_to_ms_in_tz(tz, naive, true))
+        .unwrap_or_else(|| start.saturating_add(DAY_MS - 1))
+        .max(start);
     (start, end)
+}
+
+pub(super) fn local_today_bounds(now_ms: i64) -> (i64, i64) {
+    local_today_bounds_in_tz(&Local, now_ms)
 }
 
 fn format_local_date_str(ms: i64) -> String {
@@ -602,10 +652,13 @@ fn parse_date_input(raw: Option<&str>, is_end: bool) -> Option<i64> {
         let y = trimmed[0..4].parse::<i32>().ok()?;
         let m = trimmed[5..7].parse::<u32>().ok()?;
         let d = trimmed[8..10].parse::<u32>().ok()?;
+        let date = NaiveDate::from_ymd_opt(y, m, d)?;
         return if is_end {
-            local_ymd_hms_to_ms(y, m, d, 23, 59, 59, 999)
+            let naive = date.and_hms_milli_opt(23, 59, 59, 999)?;
+            local_naive_to_ms_in_tz(&Local, naive, true)
         } else {
-            local_ymd_hms_to_ms(y, m, d, 0, 0, 0, 0)
+            let naive = date.and_hms_milli_opt(0, 0, 0, 0)?;
+            local_naive_to_ms_in_tz(&Local, naive, false)
         };
     }
     DateTime::parse_from_rfc3339(trimmed)
@@ -728,107 +781,274 @@ fn normalize_row_device_id(raw: Option<String>, local_device_id: &str) -> String
     }
 }
 
-#[allow(clippy::type_complexity)]
-pub(super) fn load_ledger_rows(
-    conn: &Connection,
-) -> Result<
-    (
-        HashMap<String, ConvLineageMeta>,
-        HashMap<String, ConvIdentityMeta>,
-        Vec<StoredStepRow>,
-    ),
-    LedgerError,
-> {
-    let local_device_id = super::schema::read_local_device_id(conn).unwrap_or_default();
-    let mut conv_meta: HashMap<String, ConvLineageMeta> = HashMap::new();
-    let mut conv_identity: HashMap<String, ConvIdentityMeta> = HashMap::new();
-    {
-        let mut stmt = conn.prepare(
-            "SELECT conversation_id, workspace, branch, parent_conversation_id, root_conversation_id, source, account_id, device_id
-             FROM ingested_dbs",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let cid: String = row.get(0)?;
-            if cid.is_empty() {
-                continue;
-            }
-            let src_raw: String = row.get(5)?;
-            let account_id = normalize_row_account_id(row.get::<_, Option<String>>(6)?);
-            let device_id =
-                normalize_row_device_id(row.get::<_, Option<String>>(7)?, &local_device_id);
-            conv_identity.insert(
-                cid.clone(),
-                ConvIdentityMeta {
-                    account_id,
-                    device_id,
-                },
-            );
-            conv_meta.insert(
-                cid,
-                ConvLineageMeta {
-                    workspace: row.get::<_, Option<String>>(1)?.filter(|s| !s.is_empty()),
-                    branch: row.get::<_, Option<String>>(2)?.filter(|s| !s.is_empty()),
-                    parent_conversation_id: row
-                        .get::<_, Option<String>>(3)?
-                        .filter(|s| !s.is_empty()),
-                    root_conversation_id: row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty()),
-                    source: LedgerSource::from_raw(&src_raw),
-                },
-            );
-        }
-    }
+const NONZERO_STEP_SQL: &str = "(input_tokens > 0 OR cache_read_tokens > 0 OR cache_write_tokens > 0 OR output_tokens > 0 OR (cost_usd > 0.0 AND cost_usd < 1e308))";
 
-    let mut steps = Vec::new();
-    {
-        let mut stmt = conn.prepare(
-            "SELECT conversation_id, ts_ms, model, raw_model,
+const TELEMETRY_STEPS_SELECT_COLS: &str = "conversation_id, ts_ms, model, raw_model,
                     input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                     cost_usd, stream_sec, ttft_sec, valid_stream, valid_ttft,
                     parent_conversation_id, root_conversation_id, workspace, branch, source,
-                    account_id, device_id
-             FROM telemetry_steps",
-        )?;
+                    account_id, device_id";
+
+struct ParsedStepRow {
+    step: StoredStepRow,
+    #[cfg(test)]
+    parent_conversation_id: Option<String>,
+    #[cfg(test)]
+    root_conversation_id: Option<String>,
+}
+
+fn parse_step_row(
+    row: &rusqlite::Row<'_>,
+    local_device_id: &str,
+) -> Result<Option<ParsedStepRow>, rusqlite::Error> {
+    let conversation_id: String = row.get(0)?;
+    let ts_ms: i64 = row.get(1)?;
+    let model: String = row.get(2)?;
+    let raw_model: Option<String> = row.get(3)?;
+    let input_tokens = row.get::<_, i64>(4)?.max(0) as u64;
+    let cache_read_tokens = row.get::<_, i64>(5)?.max(0) as u64;
+    let cache_write_tokens = row.get::<_, i64>(6)?.max(0) as u64;
+    let output_tokens = row.get::<_, i64>(7)?.max(0) as u64;
+    let raw_cost: f64 = row.get(8)?;
+    let cost_usd = if raw_cost.is_finite() && raw_cost >= 0.0 {
+        raw_cost
+    } else {
+        0.0
+    };
+    if input_tokens == 0
+        && cache_read_tokens == 0
+        && cache_write_tokens == 0
+        && output_tokens == 0
+        && cost_usd <= 0.0
+    {
+        return Ok(None);
+    }
+    let stream_sec: Option<f64> = row.get(9)?;
+    let ttft_sec: Option<f64> = row.get(10)?;
+    let valid_stream = row.get::<_, i64>(11)? != 0;
+    let valid_ttft = row.get::<_, i64>(12)? != 0;
+    #[cfg(test)]
+    let parent_conversation_id = row.get::<_, Option<String>>(13)?.filter(|s| !s.is_empty());
+    #[cfg(test)]
+    let root_conversation_id = row.get::<_, Option<String>>(14)?.filter(|s| !s.is_empty());
+    let workspace = row.get::<_, Option<String>>(15)?.filter(|s| !s.is_empty());
+    let branch = row.get::<_, Option<String>>(16)?.filter(|s| !s.is_empty());
+    let src_raw: String = row.get(17)?;
+    let source = LedgerSource::from_raw(&src_raw);
+    let account_id = normalize_row_account_id(row.get::<_, Option<String>>(18)?);
+    let device_id = normalize_row_device_id(row.get::<_, Option<String>>(19)?, local_device_id);
+
+    Ok(Some(ParsedStepRow {
+        step: StoredStepRow {
+            conversation_id,
+            ts_ms,
+            raw_model: raw_model.unwrap_or_else(|| model.clone()),
+            model,
+            input_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            output_tokens,
+            cost_usd,
+            stream_sec,
+            ttft_sec,
+            valid_stream,
+            valid_ttft,
+            workspace,
+            branch,
+            source,
+            account_id,
+            device_id,
+        },
+        #[cfg(test)]
+        parent_conversation_id,
+        #[cfg(test)]
+        root_conversation_id,
+    }))
+}
+
+struct StepsSqlQuery {
+    sql: String,
+    params: Vec<rusqlite::types::Value>,
+}
+
+fn build_steps_sql_query(
+    source_filter: LedgerSourceFilter,
+    is_unbounded_all: bool,
+    from_ms: i64,
+    to_ms: i64,
+    local_device_id: &str,
+    account_filter: Option<&str>,
+    device_filter: Option<&str>,
+) -> StepsSqlQuery {
+    use rusqlite::types::Value;
+
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+    let mut push_param = |val: Value| -> String {
+        params.push(val);
+        format!("?{}", params.len())
+    };
+
+    if let Some(target_acct) = account_filter {
+        if target_acct == UNASSIGNED_ACCOUNT_ID {
+            let p = push_param(Value::Text(UNASSIGNED_ACCOUNT_ID.to_string()));
+            clauses.push(format!("account_id IN ({p}, '')"));
+        } else {
+            let p = push_param(Value::Text(target_acct.to_string()));
+            clauses.push(format!("account_id = {p}"));
+        }
+    }
+
+    if let Some(target_dev) = device_filter {
+        if target_dev == local_device_id {
+            let p = push_param(Value::Text(local_device_id.to_string()));
+            clauses.push(format!("device_id IN ({p}, '')"));
+        } else {
+            let p = push_param(Value::Text(target_dev.to_string()));
+            clauses.push(format!("device_id = {p}"));
+        }
+    }
+
+    if !is_unbounded_all {
+        let p_from = push_param(Value::Integer(from_ms));
+        let p_to = push_param(Value::Integer(to_ms));
+        clauses.push(format!("ts_ms >= {p_from} AND ts_ms <= {p_to}"));
+    }
+
+    match source_filter {
+        LedgerSourceFilter::Cli => {
+            let p = push_param(Value::Text("cli".to_string()));
+            clauses.push(format!("source IN ({p}, '')"));
+        }
+        LedgerSourceFilter::Ide => {
+            let p = push_param(Value::Text("ide".to_string()));
+            clauses.push(format!("source = {p}"));
+        }
+        LedgerSourceFilter::All => {}
+    }
+
+    clauses.push(NONZERO_STEP_SQL.to_string());
+    let sql = format!(
+        "SELECT {TELEMETRY_STEPS_SELECT_COLS} FROM telemetry_steps WHERE {}",
+        clauses.join(" AND ")
+    );
+    StepsSqlQuery { sql, params }
+}
+
+struct ConvMetadataMaps {
+    conv_meta: HashMap<String, ConvLineageMeta>,
+    conv_identity: HashMap<String, ConvIdentityMeta>,
+}
+
+fn load_conv_metadata_from_ingested_dbs(
+    conn: &Connection,
+    local_device_id: &str,
+) -> Result<ConvMetadataMaps, LedgerError> {
+    let mut conv_meta: HashMap<String, ConvLineageMeta> = HashMap::new();
+    let mut conv_identity: HashMap<String, ConvIdentityMeta> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT conversation_id, workspace, branch, parent_conversation_id, root_conversation_id, source, account_id, device_id
+         FROM ingested_dbs",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let cid: String = row.get(0)?;
+        if cid.is_empty() {
+            continue;
+        }
+        let src_raw: String = row.get(5)?;
+        let account_id = normalize_row_account_id(row.get::<_, Option<String>>(6)?);
+        let device_id = normalize_row_device_id(row.get::<_, Option<String>>(7)?, local_device_id);
+        conv_identity.insert(
+            cid.clone(),
+            ConvIdentityMeta {
+                account_id,
+                device_id,
+            },
+        );
+        conv_meta.insert(
+            cid,
+            ConvLineageMeta {
+                workspace: row.get::<_, Option<String>>(1)?.filter(|s| !s.is_empty()),
+                branch: row.get::<_, Option<String>>(2)?.filter(|s| !s.is_empty()),
+                parent_conversation_id: row
+                    .get::<_, Option<String>>(3)?
+                    .filter(|s| !s.is_empty()),
+                root_conversation_id: row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty()),
+                source: LedgerSource::from_raw(&src_raw),
+            },
+        );
+    }
+    Ok(ConvMetadataMaps {
+        conv_meta,
+        conv_identity,
+    })
+}
+
+struct GlobalStepMetadata {
+    conv_meta: HashMap<String, ConvLineageMeta>,
+    conv_identity: HashMap<String, ConvIdentityMeta>,
+    available_models_set: BTreeSet<String>,
+    available_workspaces_set: BTreeSet<String>,
+    available_sources_set: HashSet<LedgerSource>,
+    all_convs_count: u64,
+    total_recorded_steps: u64,
+    min_recorded_ts: i64,
+    max_recorded_ts: i64,
+}
+
+fn load_global_ledger_metadata(
+    conn: &Connection,
+    local_device_id: &str,
+    device_info_map: &mut HashMap<String, DeviceInfoEntry>,
+    account_devices_all: &mut HashMap<String, BTreeSet<String>>,
+    root_cache: &mut HashMap<String, String>,
+) -> Result<GlobalStepMetadata, LedgerError> {
+    let ConvMetadataMaps {
+        mut conv_meta,
+        mut conv_identity,
+    } = load_conv_metadata_from_ingested_dbs(conn, local_device_id)?;
+
+    let mut all_convs_set: HashSet<String> = HashSet::new();
+    let mut convs_needing_fallback_ws: Vec<String> = Vec::new();
+    {
+        let sql = format!(
+            "SELECT conversation_id,
+                    MAX(NULLIF(workspace, '')),
+                    MAX(NULLIF(branch, '')),
+                    MAX(NULLIF(parent_conversation_id, '')),
+                    MAX(NULLIF(root_conversation_id, '')),
+                    MAX(source),
+                    MAX(NULLIF(NULLIF(account_id, ''), 'unassigned')),
+                    MAX(NULLIF(device_id, '')),
+                    MAX(CASE WHEN workspace IS NULL OR workspace = '' THEN 1 ELSE 0 END)
+             FROM telemetry_steps
+             WHERE {NONZERO_STEP_SQL}
+             GROUP BY conversation_id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
-            let conversation_id: String = row.get(0)?;
-            let ts_ms: i64 = row.get(1)?;
-            let model: String = row.get(2)?;
-            let raw_model: Option<String> = row.get(3)?;
-            let input_tokens = row.get::<_, i64>(4)?.max(0) as u64;
-            let cache_read_tokens = row.get::<_, i64>(5)?.max(0) as u64;
-            let cache_write_tokens = row.get::<_, i64>(6)?.max(0) as u64;
-            let output_tokens = row.get::<_, i64>(7)?.max(0) as u64;
-            let raw_cost: f64 = row.get(8)?;
-            let cost_usd = if raw_cost.is_finite() && raw_cost >= 0.0 {
-                raw_cost
-            } else {
-                0.0
-            };
-            if input_tokens == 0
-                && cache_read_tokens == 0
-                && cache_write_tokens == 0
-                && output_tokens == 0
-                && cost_usd <= 0.0
-            {
-                continue;
+            let cid: String = row.get(0)?;
+            if !cid.is_empty() {
+                all_convs_set.insert(cid.clone());
             }
-            let stream_sec: Option<f64> = row.get(9)?;
-            let ttft_sec: Option<f64> = row.get(10)?;
-            let valid_stream = row.get::<_, i64>(11)? != 0;
-            let valid_ttft = row.get::<_, i64>(12)? != 0;
-            let parent_conversation_id = row.get::<_, Option<String>>(13)?.filter(|s| !s.is_empty());
-            let root_conversation_id = row.get::<_, Option<String>>(14)?.filter(|s| !s.is_empty());
-            let workspace = row.get::<_, Option<String>>(15)?.filter(|s| !s.is_empty());
-            let branch = row.get::<_, Option<String>>(16)?.filter(|s| !s.is_empty());
-            let src_raw: String = row.get(17)?;
+            let workspace = row.get::<_, Option<String>>(1)?.filter(|s| !s.is_empty());
+            let branch = row.get::<_, Option<String>>(2)?.filter(|s| !s.is_empty());
+            let parent_conversation_id = row.get::<_, Option<String>>(3)?.filter(|s| !s.is_empty());
+            let root_conversation_id = row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty());
+            let src_raw: String = row.get(5)?;
             let source = LedgerSource::from_raw(&src_raw);
-            let account_id = normalize_row_account_id(row.get::<_, Option<String>>(18)?);
+            let account_id = normalize_row_account_id(row.get::<_, Option<String>>(6)?);
             let device_id =
-                normalize_row_device_id(row.get::<_, Option<String>>(19)?, &local_device_id);
+                normalize_row_device_id(row.get::<_, Option<String>>(7)?, local_device_id);
+            let has_null_ws = row.get::<_, i64>(8)? != 0;
+            if has_null_ws {
+                convs_needing_fallback_ws.push(cid.clone());
+            }
 
             conv_identity
-                .entry(conversation_id.clone())
+                .entry(cid.clone())
                 .and_modify(|existing| {
                     if existing.account_id == UNASSIGNED_ACCOUNT_ID
                         && account_id != UNASSIGNED_ACCOUNT_ID
@@ -840,12 +1060,12 @@ pub(super) fn load_ledger_rows(
                     }
                 })
                 .or_insert_with(|| ConvIdentityMeta {
-                    account_id: account_id.clone(),
-                    device_id: device_id.clone(),
+                    account_id,
+                    device_id,
                 });
 
             conv_meta
-                .entry(conversation_id.clone())
+                .entry(cid)
                 .and_modify(|existing| {
                     if existing.workspace.is_none() && workspace.is_some() {
                         existing.workspace = workspace.clone();
@@ -853,7 +1073,8 @@ pub(super) fn load_ledger_rows(
                     if existing.branch.is_none() && branch.is_some() {
                         existing.branch = branch.clone();
                     }
-                    if existing.parent_conversation_id.is_none() && parent_conversation_id.is_some() {
+                    if existing.parent_conversation_id.is_none() && parent_conversation_id.is_some()
+                    {
                         existing.parent_conversation_id = parent_conversation_id.clone();
                     }
                     if existing.root_conversation_id.is_none() && root_conversation_id.is_some() {
@@ -861,33 +1082,213 @@ pub(super) fn load_ledger_rows(
                     }
                 })
                 .or_insert_with(|| ConvLineageMeta {
-                    workspace: workspace.clone(),
-                    branch: branch.clone(),
-                    parent_conversation_id: parent_conversation_id.clone(),
-                    root_conversation_id: root_conversation_id.clone(),
+                    workspace,
+                    branch,
+                    parent_conversation_id,
+                    root_conversation_id,
                     source,
                 });
+        }
+    }
 
-            steps.push(StoredStepRow {
-                conversation_id,
-                ts_ms,
-                raw_model: raw_model.unwrap_or_else(|| model.clone()),
-                model,
-                input_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-                output_tokens,
-                cost_usd,
-                stream_sec,
-                ttft_sec,
-                valid_stream,
-                valid_ttft,
-                workspace,
-                branch,
-                source,
-                account_id,
-                device_id,
-            });
+    let (total_recorded_steps, min_recorded_ts, max_recorded_ts): (u64, i64, i64) = {
+        let sql = format!(
+            "SELECT COUNT(*), MIN(ts_ms), MAX(ts_ms) FROM telemetry_steps WHERE {NONZERO_STEP_SQL}"
+        );
+        let (cnt, min_ts, max_ts): (i64, Option<i64>, Option<i64>) =
+            conn.query_row(&sql, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        (
+            cnt.max(0) as u64,
+            min_ts.unwrap_or(i64::MAX),
+            max_ts.unwrap_or(i64::MIN),
+        )
+    };
+
+    let mut available_models_set: BTreeSet<String> = BTreeSet::new();
+    {
+        let sql = format!(
+            "SELECT DISTINCT model FROM telemetry_steps WHERE {NONZERO_STEP_SQL} AND model != ''"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let model: String = row.get(0)?;
+            if !model.is_empty() {
+                available_models_set.insert(model);
+            }
+        }
+    }
+
+    let mut available_workspaces_set: BTreeSet<String> = BTreeSet::new();
+    {
+        let sql = format!(
+            "SELECT DISTINCT workspace FROM telemetry_steps WHERE {NONZERO_STEP_SQL} AND workspace IS NOT NULL AND workspace != ''"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let ws: String = row.get(0)?;
+            if !ws.is_empty() {
+                available_workspaces_set.insert(ws);
+            }
+        }
+    }
+    for cid in convs_needing_fallback_ws {
+        let root_id = resolve_root_conversation_id(&cid, &conv_meta, root_cache);
+        let ws = conv_meta
+            .get(&cid)
+            .and_then(|m| m.workspace.as_deref())
+            .or_else(|| conv_meta.get(&root_id).and_then(|m| m.workspace.as_deref()));
+        if let Some(w) = ws {
+            available_workspaces_set.insert(w.to_string());
+        }
+    }
+
+    let mut available_sources_set: HashSet<LedgerSource> = HashSet::new();
+    {
+        let sql = format!("SELECT DISTINCT source FROM telemetry_steps WHERE {NONZERO_STEP_SQL}");
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let src_raw: String = row.get(0)?;
+            available_sources_set.insert(LedgerSource::from_raw(&src_raw));
+        }
+    }
+
+    {
+        let sql = format!(
+            "SELECT account_id, device_id, MAX(ts_ms)
+             FROM telemetry_steps
+             WHERE {NONZERO_STEP_SQL}
+             GROUP BY account_id, device_id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let acct = normalize_row_account_id(row.get::<_, Option<String>>(0)?);
+            let dev = normalize_row_device_id(row.get::<_, Option<String>>(1)?, local_device_id);
+            let max_ts: i64 = row.get(2)?;
+            if !dev.is_empty() {
+                let entry = device_info_map.entry(dev.clone()).or_default();
+                entry.is_local |= dev == local_device_id;
+                if max_ts > entry.last_seen_ms {
+                    entry.last_seen_ms = max_ts;
+                }
+                entry.account_ids.insert(acct.clone());
+                account_devices_all.entry(acct).or_default().insert(dev);
+            }
+        }
+    }
+
+    Ok(GlobalStepMetadata {
+        conv_meta,
+        conv_identity,
+        available_models_set,
+        available_workspaces_set,
+        available_sources_set,
+        all_convs_count: all_convs_set.len() as u64,
+        total_recorded_steps,
+        min_recorded_ts,
+        max_recorded_ts,
+    })
+}
+
+fn load_filtered_steps(
+    conn: &Connection,
+    local_device_id: &str,
+    query: &StepsSqlQuery,
+) -> Result<Vec<StoredStepRow>, LedgerError> {
+    let mut stmt = conn.prepare(&query.sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(query.params.iter()))?;
+    let mut steps = Vec::new();
+    while let Some(row) = rows.next()? {
+        if let Some(parsed) = parse_step_row(row, local_device_id)? {
+            steps.push(parsed.step);
+        }
+    }
+    Ok(steps)
+}
+
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub(super) fn load_ledger_rows(
+    conn: &Connection,
+) -> Result<
+    (
+        HashMap<String, ConvLineageMeta>,
+        HashMap<String, ConvIdentityMeta>,
+        Vec<StoredStepRow>,
+    ),
+    LedgerError,
+> {
+    let local_device_id = super::schema::read_local_device_id(conn).inspect_err(|err| {
+        crate::platform::write_error_log_safely(&format!(
+            "Failed to read local_device_id in load_ledger_rows: {err}"
+        ));
+    })?;
+    let ConvMetadataMaps {
+        mut conv_meta,
+        mut conv_identity,
+    } = load_conv_metadata_from_ingested_dbs(conn, &local_device_id)?;
+
+    let mut steps = Vec::new();
+    {
+        let sql = format!("SELECT {TELEMETRY_STEPS_SELECT_COLS} FROM telemetry_steps");
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let Some(ParsedStepRow {
+                step,
+                parent_conversation_id,
+                root_conversation_id,
+            }) = parse_step_row(row, &local_device_id)?
+            else {
+                continue;
+            };
+
+            conv_identity
+                .entry(step.conversation_id.clone())
+                .and_modify(|existing| {
+                    if existing.account_id == UNASSIGNED_ACCOUNT_ID
+                        && step.account_id != UNASSIGNED_ACCOUNT_ID
+                    {
+                        existing.account_id = step.account_id.clone();
+                    }
+                    if existing.device_id.is_empty() && !step.device_id.is_empty() {
+                        existing.device_id = step.device_id.clone();
+                    }
+                })
+                .or_insert_with(|| ConvIdentityMeta {
+                    account_id: step.account_id.clone(),
+                    device_id: step.device_id.clone(),
+                });
+
+            conv_meta
+                .entry(step.conversation_id.clone())
+                .and_modify(|existing| {
+                    if existing.workspace.is_none() && step.workspace.is_some() {
+                        existing.workspace = step.workspace.clone();
+                    }
+                    if existing.branch.is_none() && step.branch.is_some() {
+                        existing.branch = step.branch.clone();
+                    }
+                    if existing.parent_conversation_id.is_none() && parent_conversation_id.is_some()
+                    {
+                        existing.parent_conversation_id = parent_conversation_id.clone();
+                    }
+                    if existing.root_conversation_id.is_none() && root_conversation_id.is_some() {
+                        existing.root_conversation_id = root_conversation_id.clone();
+                    }
+                })
+                .or_insert_with(|| ConvLineageMeta {
+                    workspace: step.workspace.clone(),
+                    branch: step.branch.clone(),
+                    parent_conversation_id,
+                    root_conversation_id,
+                    source: step.source,
+                });
+
+            steps.push(step);
         }
     }
 
@@ -1254,7 +1655,7 @@ pub fn redact_sync_error_message(msg: &str, cfg: Option<&SyncConfig>) -> String 
         "AGY_PULSE_S3_ACCESS_KEY",
         "AGY_PULSE_S3_SECRET_KEY",
     ] {
-        if let Ok(val) = env::var(env_name) {
+        if let Some(val) = crate::platform::env_var(env_name) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 secrets.push(trimmed.to_string());
@@ -1283,7 +1684,15 @@ pub(crate) fn build_sync_status_overview(
     cfg: Option<&SyncConfig>,
     in_progress: bool,
 ) -> SyncStatusOverview {
-    let sync_meta = super::sync::get_sync_meta(conn).unwrap_or_default();
+    let sync_meta = match super::sync::get_sync_meta(conn) {
+        Ok(meta) => meta,
+        Err(err) => {
+            crate::platform::write_error_log_safely(&format!(
+                "Failed to read sync_meta in build_sync_status_overview: {err}"
+            ));
+            crate::domain::LedgerSyncMeta::default()
+        }
+    };
     let last_error = sync_meta
         .last_sync_error
         .as_deref()
@@ -1317,17 +1726,80 @@ pub(super) fn query_overview(
     default_now_ms: i64,
 ) -> Result<LedgerOverview, LedgerError> {
     let now_ms = filter.now_ms.unwrap_or(default_now_ms);
-    let local_device_id = super::schema::read_local_device_id(conn).unwrap_or_default();
+    let local_device_id = super::schema::read_local_device_id(conn).inspect_err(|err| {
+        crate::platform::write_error_log_safely(&format!(
+            "Failed to read local_device_id in query_overview: {err}"
+        ));
+    })?;
     let sync_devices = super::sync::list_sync_devices(conn)?;
     let latest_quotas = super::sync::query_latest_account_quotas(conn)?;
-    let (conv_meta, conv_identity, steps) = load_ledger_rows(conn)?;
     let time_range = resolve_time_range(filter, now_ms);
     let mut root_cache: HashMap<String, String> = HashMap::new();
 
     let mut device_info_map: HashMap<String, DeviceInfoEntry> = HashMap::new();
     let mut account_devices_all: HashMap<String, BTreeSet<String>> = HashMap::new();
+    seed_device_info_maps(
+        &local_device_id,
+        &sync_devices,
+        &latest_quotas,
+        &mut device_info_map,
+        &mut account_devices_all,
+    );
 
-    for dev in &sync_devices {
+    let global_meta = load_global_ledger_metadata(
+        conn,
+        &local_device_id,
+        &mut device_info_map,
+        &mut account_devices_all,
+        &mut root_cache,
+    )?;
+
+    let is_unbounded_all = time_range.range == LedgerTimeRange::All
+        && filter.from.is_none()
+        && filter.to.is_none();
+    let (account_filter, meta_account) = normalize_account_filter(filter.account.as_deref());
+    let (device_filter, meta_device) =
+        normalize_device_filter(filter.device.as_deref(), &local_device_id);
+
+    let steps_query = build_steps_sql_query(
+        filter.source,
+        is_unbounded_all,
+        time_range.from_ms,
+        time_range.to_ms,
+        &local_device_id,
+        account_filter.as_deref(),
+        device_filter.as_deref(),
+    );
+    let steps = load_filtered_steps(conn, &local_device_id, &steps_query)?;
+
+    aggregate_overview(OverviewBuildInput {
+        conn,
+        ledger_path,
+        filter,
+        local_device_id,
+        latest_quotas,
+        time_range,
+        is_unbounded_all,
+        account_filter,
+        meta_account,
+        device_filter,
+        meta_device,
+        device_info_map,
+        account_devices_all,
+        global_meta,
+        steps,
+        root_cache,
+    })
+}
+
+fn seed_device_info_maps(
+    local_device_id: &str,
+    sync_devices: &[crate::domain::SyncDeviceRecord],
+    latest_quotas: &[crate::domain::QuotaSnapshot],
+    device_info_map: &mut HashMap<String, DeviceInfoEntry>,
+    account_devices_all: &mut HashMap<String, BTreeSet<String>>,
+) {
+    for dev in sync_devices {
         let dev_id = dev.device_id.trim();
         if dev_id.is_empty() {
             continue;
@@ -1357,7 +1829,7 @@ pub(super) fn query_overview(
             .insert(dev_id.to_string());
     }
 
-    for snap in &latest_quotas {
+    for snap in latest_quotas {
         let dev_id = snap.device_id.trim();
         if dev_id.is_empty() {
             continue;
@@ -1387,51 +1859,92 @@ pub(super) fn query_overview(
             .or_default()
             .insert(dev_id.to_string());
     }
+}
 
-    let mut available_models_set: BTreeSet<String> = BTreeSet::new();
-    let mut available_workspaces_set: BTreeSet<String> = BTreeSet::new();
-    let mut available_sources_set: HashSet<LedgerSource> = HashSet::new();
-    let mut all_convs_set: HashSet<String> = HashSet::new();
-    let mut min_recorded_ts = i64::MAX;
-    let mut max_recorded_ts = i64::MIN;
-
-    for step in &steps {
-        if !step.model.is_empty() {
-            available_models_set.insert(step.model.clone());
-        }
-        if !step.conversation_id.is_empty() {
-            all_convs_set.insert(step.conversation_id.clone());
-        }
-        available_sources_set.insert(step.source);
-        let root_id = resolve_root_conversation_id(&step.conversation_id, &conv_meta, &mut root_cache);
-        let ws = step
-            .workspace
-            .as_deref()
-            .or_else(|| conv_meta.get(&step.conversation_id).and_then(|m| m.workspace.as_deref()))
-            .or_else(|| conv_meta.get(&root_id).and_then(|m| m.workspace.as_deref()));
-        if let Some(w) = ws {
-            available_workspaces_set.insert(w.to_string());
-        }
-        if step.ts_ms < min_recorded_ts {
-            min_recorded_ts = step.ts_ms;
-        }
-        if step.ts_ms > max_recorded_ts {
-            max_recorded_ts = step.ts_ms;
-        }
-
-        if !step.device_id.is_empty() {
-            let entry = device_info_map.entry(step.device_id.clone()).or_default();
-            entry.is_local |= step.device_id == local_device_id;
-            if step.ts_ms > entry.last_seen_ms {
-                entry.last_seen_ms = step.ts_ms;
+fn normalize_account_filter(raw: Option<&str>) -> (Option<String>, String) {
+    let account_filter = raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+        .map(|s| {
+            if s.eq_ignore_ascii_case(UNASSIGNED_ACCOUNT_ID) {
+                UNASSIGNED_ACCOUNT_ID.to_string()
+            } else {
+                normalize_account_id(s).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string())
             }
-            entry.account_ids.insert(step.account_id.clone());
-            account_devices_all
-                .entry(step.account_id.clone())
-                .or_default()
-                .insert(step.device_id.clone());
-        }
-    }
+        });
+    let meta_account = account_filter
+        .clone()
+        .unwrap_or_else(|| "all".to_string());
+    (account_filter, meta_account)
+}
+
+fn normalize_device_filter(raw: Option<&str>, local_device_id: &str) -> (Option<String>, String) {
+    let device_filter = raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+        .map(|s| {
+            if s.eq_ignore_ascii_case("local") {
+                local_device_id.to_string()
+            } else {
+                s.to_string()
+            }
+        });
+    let meta_device = device_filter
+        .clone()
+        .unwrap_or_else(|| "all".to_string());
+    (device_filter, meta_device)
+}
+
+struct OverviewBuildInput<'a> {
+    conn: &'a Connection,
+    ledger_path: &'a Path,
+    filter: &'a LedgerQueryFilter,
+    local_device_id: String,
+    latest_quotas: Vec<crate::domain::QuotaSnapshot>,
+    time_range: ResolvedRange,
+    is_unbounded_all: bool,
+    account_filter: Option<String>,
+    meta_account: String,
+    device_filter: Option<String>,
+    meta_device: String,
+    device_info_map: HashMap<String, DeviceInfoEntry>,
+    account_devices_all: HashMap<String, BTreeSet<String>>,
+    global_meta: GlobalStepMetadata,
+    steps: Vec<StoredStepRow>,
+    root_cache: HashMap<String, String>,
+}
+
+fn aggregate_overview(input: OverviewBuildInput<'_>) -> Result<LedgerOverview, LedgerError> {
+    let OverviewBuildInput {
+        conn,
+        ledger_path,
+        filter,
+        local_device_id,
+        latest_quotas,
+        time_range,
+        is_unbounded_all,
+        account_filter,
+        meta_account,
+        device_filter,
+        meta_device,
+        device_info_map,
+        account_devices_all,
+        global_meta,
+        steps,
+        mut root_cache,
+    } = input;
+
+    let GlobalStepMetadata {
+        conv_meta,
+        conv_identity,
+        available_models_set,
+        available_workspaces_set,
+        available_sources_set,
+        all_convs_count,
+        total_recorded_steps,
+        min_recorded_ts,
+        max_recorded_ts,
+    } = global_meta;
 
     let mut available_accounts: Vec<AccountOption> = account_devices_all
         .iter()
@@ -1472,9 +1985,6 @@ pub(super) fn query_overview(
         available_sources.push("ide".to_string());
     }
 
-    let is_unbounded_all = time_range.range == LedgerTimeRange::All
-        && filter.from.is_none()
-        && filter.to.is_none();
     let span_ms = if is_unbounded_all {
         if max_recorded_ts > min_recorded_ts {
             max_recorded_ts - min_recorded_ts
@@ -1502,38 +2012,6 @@ pub(super) fn query_overview(
 
     let ws_filter_raw = filter.workspace.as_deref().map(str::trim).unwrap_or("");
     let has_ws_filter = !ws_filter_raw.is_empty() && !ws_filter_raw.eq_ignore_ascii_case("all");
-
-    let account_filter = filter
-        .account
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
-        .map(|s| {
-            if s.eq_ignore_ascii_case(UNASSIGNED_ACCOUNT_ID) {
-                UNASSIGNED_ACCOUNT_ID.to_string()
-            } else {
-                normalize_account_id(s).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string())
-            }
-        });
-    let meta_account = account_filter
-        .clone()
-        .unwrap_or_else(|| "all".to_string());
-
-    let device_filter = filter
-        .device
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
-        .map(|s| {
-            if s.eq_ignore_ascii_case("local") {
-                local_device_id.clone()
-            } else {
-                s.to_string()
-            }
-        });
-    let meta_device = device_filter
-        .clone()
-        .unwrap_or_else(|| "all".to_string());
 
     let mut summary_acc = PerfAcc::default();
     let mut bucket_map: HashMap<String, BucketAcc> = HashMap::new();
@@ -2117,8 +2595,8 @@ pub(super) fn query_overview(
         granularity: granularity.as_str().to_string(),
         ledger_path: ledger_path.to_string_lossy().into_owned(),
         backend: "sqlite".to_string(),
-        total_recorded_steps: steps.len() as u64,
-        total_recorded_conversations: all_convs_set.len() as u64,
+        total_recorded_steps,
+        total_recorded_conversations: all_convs_count,
         available_models: available_models_set.into_iter().collect(),
         available_workspaces: available_workspaces_set.into_iter().collect(),
         available_sources,
@@ -2324,4 +2802,704 @@ pub(super) fn format_datetime_short(ms: i64) -> String {
         dt.hour(),
         dt.minute()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ledger::{schema, sync};
+
+    #[test]
+    fn redact_sync_error_message_honors_thread_local_env_overrides() {
+        let overrides: HashMap<String, Option<String>> = [
+            ("AGY_PULSE_SYNC_TOKEN", Some("tok-thread-secret-999")),
+            ("AGY_PULSE_SYNC_PASSWORD", Some("pwd-thread-secret-888")),
+            ("AGY_PULSE_S3_ACCESS_KEY", Some("ak-thread-secret-777")),
+            ("AGY_PULSE_S3_SECRET_KEY", Some("sk-thread-secret-666")),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.map(str::to_string)))
+        .collect();
+        crate::platform::with_env_overrides(&overrides, || {
+            let raw = "auth failed Bearer tok-thread-secret-999 pwd=pwd-thread-secret-888 ak=ak-thread-secret-777 sk=sk-thread-secret-666";
+            let redacted = redact_sync_error_message(raw, None);
+            assert!(
+                !redacted.contains("tok-thread-secret-999"),
+                "token leaked: {redacted}"
+            );
+            assert!(
+                !redacted.contains("pwd-thread-secret-888"),
+                "password leaked: {redacted}"
+            );
+            assert!(
+                !redacted.contains("ak-thread-secret-777"),
+                "s3 access key leaked: {redacted}"
+            );
+            assert!(
+                !redacted.contains("sk-thread-secret-666"),
+                "s3 secret key leaked: {redacted}"
+            );
+            assert!(redacted.contains("[REDACTED]"));
+        });
+    }
+
+    #[derive(Clone, Copy)]
+    struct MockMidnightDstTz {
+        skip_midnight_hour: bool,
+        skip_eod_hour: bool,
+    }
+
+    impl TimeZone for MockMidnightDstTz {
+        type Offset = chrono::FixedOffset;
+
+        fn from_offset(_offset: &Self::Offset) -> Self {
+            Self {
+                skip_midnight_hour: false,
+                skip_eod_hour: false,
+            }
+        }
+
+        fn offset_from_local_date(&self, _local: &NaiveDate) -> chrono::MappedLocalTime<Self::Offset> {
+            let Some(off) = chrono::FixedOffset::east_opt(0) else {
+                return chrono::MappedLocalTime::None;
+            };
+            chrono::MappedLocalTime::Single(off)
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &chrono::NaiveDateTime,
+        ) -> chrono::MappedLocalTime<Self::Offset> {
+            let h = local.hour();
+            if self.skip_midnight_hour && h == 0 {
+                return chrono::MappedLocalTime::None;
+            }
+            if self.skip_eod_hour && h == 23 {
+                return chrono::MappedLocalTime::None;
+            }
+            let offset_secs = if self.skip_midnight_hour && h >= 1 {
+                3600
+            } else {
+                0
+            };
+            let Some(off) = chrono::FixedOffset::east_opt(offset_secs) else {
+                return chrono::MappedLocalTime::None;
+            };
+            chrono::MappedLocalTime::Single(off)
+        }
+
+        fn offset_from_utc_date(&self, _utc: &NaiveDate) -> Self::Offset {
+            chrono::FixedOffset::east_opt(0).unwrap_or_else(|| unreachable!())
+        }
+
+        fn offset_from_utc_datetime(&self, _utc: &chrono::NaiveDateTime) -> Self::Offset {
+            let off_secs = if self.skip_midnight_hour { 3600 } else { 0 };
+            chrono::FixedOffset::east_opt(off_secs).unwrap_or_else(|| unreachable!())
+        }
+    }
+
+    #[test]
+    fn local_today_bounds_handles_midnight_and_eod_dst_spring_forward_gaps() {
+        let Some(date) = NaiveDate::from_ymd_opt(2026, 11, 1) else {
+            panic!("valid date");
+        };
+        let Some(noon) = date.and_hms_opt(12, 0, 0) else {
+            panic!("valid noon");
+        };
+        let tz_midnight_gap = MockMidnightDstTz {
+            skip_midnight_hour: true,
+            skip_eod_hour: false,
+        };
+        let now_ms = noon.and_utc().timestamp_millis() - 3_600_000;
+        let (start, end) = local_today_bounds_in_tz(&tz_midnight_gap, now_ms);
+        assert!(start < end, "expected non-empty window: {start}..{end}");
+        assert!(
+            start <= now_ms && now_ms <= end,
+            "expected now_ms inside window: start={start}, now={now_ms}, end={end}"
+        );
+        // Nearest valid local start on midnight DST jump is 01:00:00+01:00 == 00:00:00Z
+        let expected_start = date
+            .and_hms_opt(0, 0, 0)
+            .map(|dt| dt.and_utc().timestamp_millis())
+            .unwrap_or(0);
+        assert_eq!(start, expected_start);
+
+        let tz_eod_gap = MockMidnightDstTz {
+            skip_midnight_hour: false,
+            skip_eod_hour: true,
+        };
+        let now_eod = noon.and_utc().timestamp_millis();
+        let (start2, end2) = local_today_bounds_in_tz(&tz_eod_gap, now_eod);
+        assert!(start2 < end2, "expected non-empty eod gap window: {start2}..{end2}");
+        assert!(start2 <= now_eod && now_eod <= end2);
+        // Nearest valid local end when 23:00..24:00 is skipped is 22:59:59.999Z
+        let expected_end = date
+            .and_hms_milli_opt(22, 59, 59, 999)
+            .map(|dt| dt.and_utc().timestamp_millis())
+            .unwrap_or(0);
+        assert_eq!(end2, expected_end);
+    }
+
+    fn explain_plan_details(conn: &Connection, query: &StepsSqlQuery) -> Vec<String> {
+        let explain_sql = format!("EXPLAIN QUERY PLAN {}", query.sql);
+        let Ok(mut stmt) = conn.prepare(&explain_sql) else {
+            panic!("prepare EXPLAIN QUERY PLAN failed");
+        };
+        let Ok(mut rows) = stmt.query(rusqlite::params_from_iter(query.params.iter())) else {
+            panic!("query EXPLAIN QUERY PLAN failed");
+        };
+        let mut details = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            if let Ok(detail) = row.get::<_, String>(3) {
+                details.push(detail);
+            }
+        }
+        details
+    }
+
+    fn query_overview_full_scan_reference(
+        conn: &Connection,
+        ledger_path: &Path,
+        filter: &LedgerQueryFilter,
+        default_now_ms: i64,
+    ) -> Result<LedgerOverview, LedgerError> {
+        let now_ms = filter.now_ms.unwrap_or(default_now_ms);
+        let local_device_id = schema::read_local_device_id(conn)?;
+        let sync_devices = sync::list_sync_devices(conn)?;
+        let latest_quotas = sync::query_latest_account_quotas(conn)?;
+        let (conv_meta, conv_identity, steps) = load_ledger_rows(conn)?;
+        let time_range = resolve_time_range(filter, now_ms);
+        let mut root_cache: HashMap<String, String> = HashMap::new();
+
+        let mut device_info_map: HashMap<String, DeviceInfoEntry> = HashMap::new();
+        let mut account_devices_all: HashMap<String, BTreeSet<String>> = HashMap::new();
+        seed_device_info_maps(
+            &local_device_id,
+            &sync_devices,
+            &latest_quotas,
+            &mut device_info_map,
+            &mut account_devices_all,
+        );
+
+        let mut available_models_set: BTreeSet<String> = BTreeSet::new();
+        let mut available_workspaces_set: BTreeSet<String> = BTreeSet::new();
+        let mut available_sources_set: HashSet<LedgerSource> = HashSet::new();
+        let mut all_convs_set: HashSet<String> = HashSet::new();
+        let mut min_recorded_ts = i64::MAX;
+        let mut max_recorded_ts = i64::MIN;
+
+        for step in &steps {
+            if !step.model.is_empty() {
+                available_models_set.insert(step.model.clone());
+            }
+            if !step.conversation_id.is_empty() {
+                all_convs_set.insert(step.conversation_id.clone());
+            }
+            available_sources_set.insert(step.source);
+            let root_id =
+                resolve_root_conversation_id(&step.conversation_id, &conv_meta, &mut root_cache);
+            let ws = step
+                .workspace
+                .as_deref()
+                .or_else(|| conv_meta.get(&step.conversation_id).and_then(|m| m.workspace.as_deref()))
+                .or_else(|| conv_meta.get(&root_id).and_then(|m| m.workspace.as_deref()));
+            if let Some(w) = ws {
+                available_workspaces_set.insert(w.to_string());
+            }
+            if step.ts_ms < min_recorded_ts {
+                min_recorded_ts = step.ts_ms;
+            }
+            if step.ts_ms > max_recorded_ts {
+                max_recorded_ts = step.ts_ms;
+            }
+            if !step.device_id.is_empty() {
+                let entry = device_info_map.entry(step.device_id.clone()).or_default();
+                entry.is_local |= step.device_id == local_device_id;
+                if step.ts_ms > entry.last_seen_ms {
+                    entry.last_seen_ms = step.ts_ms;
+                }
+                entry.account_ids.insert(step.account_id.clone());
+                account_devices_all
+                    .entry(step.account_id.clone())
+                    .or_default()
+                    .insert(step.device_id.clone());
+            }
+        }
+
+        let is_unbounded_all = time_range.range == LedgerTimeRange::All
+            && filter.from.is_none()
+            && filter.to.is_none();
+        let (account_filter, meta_account) = normalize_account_filter(filter.account.as_deref());
+        let (device_filter, meta_device) =
+            normalize_device_filter(filter.device.as_deref(), &local_device_id);
+        let global_meta = GlobalStepMetadata {
+            conv_meta,
+            conv_identity,
+            available_models_set,
+            available_workspaces_set,
+            available_sources_set,
+            all_convs_count: all_convs_set.len() as u64,
+            total_recorded_steps: steps.len() as u64,
+            min_recorded_ts,
+            max_recorded_ts,
+        };
+
+        aggregate_overview(OverviewBuildInput {
+            conn,
+            ledger_path,
+            filter,
+            local_device_id,
+            latest_quotas,
+            time_range,
+            is_unbounded_all,
+            account_filter,
+            meta_account,
+            device_filter,
+            meta_device,
+            device_info_map,
+            account_devices_all,
+            global_meta,
+            steps,
+            root_cache,
+        })
+    }
+
+    #[test]
+    fn sql_filter_where_clause_hits_sqlite_indexes_not_table_scan() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            panic!("tempdir");
+        };
+        let path = tmp.path().join("ledger.sqlite");
+        let Ok(conn) = schema::open_ledger_connection(&path) else {
+            panic!("open ledger");
+        };
+        let local_id = schema::read_local_device_id(&conn).unwrap_or_default();
+        let now_ms = 1_794_312_000_000i64;
+        let week_from = now_ms - 7 * DAY_MS;
+
+        let cases = [
+            (
+                "time_window_only",
+                LedgerSourceFilter::All,
+                false,
+                None,
+                None,
+            ),
+            (
+                "local_device_and_time",
+                LedgerSourceFilter::All,
+                false,
+                None,
+                Some(local_id.as_str()),
+            ),
+            (
+                "remote_device_and_time",
+                LedgerSourceFilter::All,
+                false,
+                None,
+                Some("dev-remote-1"),
+            ),
+            (
+                "account_and_device_and_time",
+                LedgerSourceFilter::All,
+                false,
+                Some("alice@example.com"),
+                Some("dev-remote-1"),
+            ),
+            (
+                "unassigned_account_and_time",
+                LedgerSourceFilter::All,
+                false,
+                Some(UNASSIGNED_ACCOUNT_ID),
+                None,
+            ),
+            (
+                "source_ide_unbounded",
+                LedgerSourceFilter::Ide,
+                true,
+                None,
+                None,
+            ),
+            (
+                "source_cli_unbounded",
+                LedgerSourceFilter::Cli,
+                true,
+                None,
+                None,
+            ),
+        ];
+
+        for (label, source, is_unbounded, acct, dev) in cases {
+            let q = build_steps_sql_query(
+                source,
+                is_unbounded,
+                week_from,
+                now_ms,
+                &local_id,
+                acct,
+                dev,
+            );
+            let plan = explain_plan_details(&conn, &q);
+            let joined = plan.join(" | ");
+            assert!(
+                joined.contains("USING INDEX") && !joined.contains("SCAN telemetry_steps"),
+                "expected index search for {label}, got query plan: {joined} (sql: {})",
+                q.sql
+            );
+        }
+    }
+
+    fn assert_json_equivalent(
+        left: &serde_json::Value,
+        right: &serde_json::Value,
+        path: &str,
+        ctx: &LedgerQueryFilter,
+    ) {
+        use serde_json::Value;
+        match (left, right) {
+            (Value::Number(a), Value::Number(b)) => {
+                if let (Some(ia), Some(ib)) = (a.as_i64(), b.as_i64()) {
+                    assert_eq!(ia, ib, "int mismatch at {path} for {ctx:?}");
+                } else if let (Some(ua), Some(ub)) = (a.as_u64(), b.as_u64()) {
+                    assert_eq!(ua, ub, "uint mismatch at {path} for {ctx:?}");
+                } else {
+                    let fa = a.as_f64().unwrap_or(f64::NAN);
+                    let fb = b.as_f64().unwrap_or(f64::NAN);
+                    assert!(
+                        (fa - fb).abs() <= 1e-12,
+                        "float mismatch at {path} ({fa} vs {fb}) for {ctx:?}"
+                    );
+                }
+            }
+            (Value::Array(la), Value::Array(ra)) => {
+                assert_eq!(
+                    la.len(),
+                    ra.len(),
+                    "array len mismatch at {path} for {ctx:?}"
+                );
+                for (i, (lv, rv)) in la.iter().zip(ra.iter()).enumerate() {
+                    assert_json_equivalent(lv, rv, &format!("{path}[{i}]"), ctx);
+                }
+            }
+            (Value::Object(lo), Value::Object(ro)) => {
+                assert_eq!(
+                    lo.len(),
+                    ro.len(),
+                    "object key count mismatch at {path} for {ctx:?}"
+                );
+                for (k, lv) in lo {
+                    let Some(rv) = ro.get(k) else {
+                        panic!("missing key {k} at {path} for {ctx:?}");
+                    };
+                    assert_json_equivalent(lv, rv, &format!("{path}.{k}"), ctx);
+                }
+            }
+            _ => assert_eq!(left, right, "value mismatch at {path} for {ctx:?}"),
+        }
+    }
+
+    #[test]
+    fn indexed_query_overview_matches_full_table_reference_across_all_dimensions() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            panic!("tempdir");
+        };
+        let path = tmp.path().join("ledger.sqlite");
+        let Ok(conn) = schema::open_ledger_connection(&path) else {
+            panic!("open ledger");
+        };
+        let Ok(local_id) = schema::read_local_device_id(&conn) else {
+            panic!("local_device_id");
+        };
+
+        let now_ms = local_ymd_hms_to_ms(2026, 11, 15, 14, 30, 0, 0).unwrap_or(1_794_753_000_000);
+        let t_1h = now_ms - 3_600_000;
+        let t_30m = now_ms - 1_800_000;
+        let t_2d = now_ms - 2 * DAY_MS;
+        let t_15d = now_ms - 15 * DAY_MS;
+        let t_45d = now_ms - 45 * DAY_MS;
+
+        let insert_conv = |cid: &str,
+                           ws: Option<&str>,
+                           br: Option<&str>,
+                           parent: Option<&str>,
+                           root: Option<&str>,
+                           src: &str,
+                           acct: &str,
+                           dev: &str| {
+            let res = conn.execute(
+                "INSERT INTO ingested_dbs (
+                   conversation_id, db_path, sig, last_synced_ms, workspace, branch,
+                   created_at_ms, cascade_id, parent_conversation_id, root_conversation_id,
+                   db_mtime_ms, source, account_id, device_id
+                 ) VALUES (?1, '', 'sig', ?2, ?3, ?4, ?2, ?1, ?5, ?6, ?2, ?7, ?8, ?9)",
+                rusqlite::params![cid, t_1h, ws, br, parent, root, src, acct, dev],
+            );
+            assert!(res.is_ok());
+        };
+
+        #[allow(clippy::too_many_arguments)]
+        let insert_step = |uid: &str,
+                           cid: &str,
+                           ts: i64,
+                           model: &str,
+                           raw_model: &str,
+                           in_tok: i64,
+                           out_tok: i64,
+                           cost: f64,
+                           parent: Option<&str>,
+                           root: Option<&str>,
+                           ws: Option<&str>,
+                           src: &str,
+                           acct: &str,
+                           dev: &str| {
+            let res = conn.execute(
+                "INSERT INTO telemetry_steps (
+                   step_uid, conversation_id, gen_idx, entry_idx, step_index, ts_ms,
+                   model, raw_model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                   cost_usd, stream_sec, ttft_sec, valid_stream, valid_ttft,
+                   parent_conversation_id, root_conversation_id, workspace, branch, source,
+                   account_id, device_id
+                 ) VALUES (?1, ?2, 1, 0, 1, ?3, ?4, ?5, ?6, 1000, 0, ?7, ?8, 4.0, 0.5, 1, 1, ?9, ?10, ?11, 'main', ?12, ?13, ?14)",
+                rusqlite::params![
+                    uid, cid, ts, model, raw_model, in_tok, out_tok, cost, parent, root, ws, src,
+                    acct, dev
+                ],
+            );
+            assert!(res.is_ok());
+        };
+
+        // Multi-level cascade spanning 15d -> 2d -> 30m ago, with empty-string device_id fallback to local_id
+        insert_conv(
+            "root-tree",
+            Some("file:///work/alpha"),
+            Some("main"),
+            None,
+            None,
+            "cli",
+            "alice@example.com",
+            &local_id,
+        );
+        insert_conv(
+            "child-tree",
+            None,
+            None,
+            Some("root-tree"),
+            Some("root-tree"),
+            "cli",
+            "alice@example.com",
+            "",
+        );
+        insert_conv(
+            "grandchild-tree",
+            None,
+            None,
+            Some("child-tree"),
+            None,
+            "cli",
+            "",
+            "",
+        );
+        insert_conv(
+            "remote-ide-conv",
+            Some("file:///work/beta"),
+            Some("feat"),
+            None,
+            None,
+            "ide",
+            "bob@example.com",
+            "dev-remote-1",
+        );
+        insert_conv(
+            "old-local-unassigned",
+            Some("file:///work/legacy"),
+            Some("old"),
+            None,
+            None,
+            "",
+            "unassigned",
+            &local_id,
+        );
+
+        insert_step(
+            "s1",
+            "root-tree",
+            t_15d,
+            "Gemini 4 Carbon",
+            "Gemini 4 Carbon (High)",
+            50_000,
+            2_000,
+            0.25,
+            None,
+            None,
+            Some("file:///work/alpha"),
+            "cli",
+            "alice@example.com",
+            &local_id,
+        );
+        insert_step(
+            "s2",
+            "child-tree",
+            t_2d,
+            "Claude 4.5 Haiku",
+            "Claude 4.5 Haiku",
+            20_000,
+            1_000,
+            0.08,
+            Some("root-tree"),
+            Some("root-tree"),
+            None,
+            "cli",
+            "alice@example.com",
+            "",
+        );
+        insert_step(
+            "s3",
+            "grandchild-tree",
+            t_30m,
+            "Claude 4.5 Haiku",
+            "Claude 4.5 Haiku",
+            10_000,
+            500,
+            0.04,
+            Some("child-tree"),
+            None,
+            None,
+            "cli",
+            "",
+            "",
+        );
+        insert_step(
+            "s4",
+            "remote-ide-conv",
+            t_1h,
+            "Claude 4.6 Sonnet",
+            "Claude 4.6 Sonnet (Thinking)",
+            40_000,
+            3_000,
+            0.35,
+            None,
+            None,
+            Some("file:///work/beta"),
+            "ide",
+            "bob@example.com",
+            "dev-remote-1",
+        );
+        insert_step(
+            "s5",
+            "old-local-unassigned",
+            t_45d,
+            "Gemini 4 Carbon",
+            "Gemini 4 Carbon (High)",
+            15_000,
+            800,
+            0.12,
+            None,
+            None,
+            Some("file:///work/legacy"),
+            "",
+            "",
+            "",
+        );
+        // Zero-cost/zero-token step that must be ignored identically
+        let res_zero = conn.execute(
+            "INSERT INTO telemetry_steps (
+               step_uid, conversation_id, gen_idx, entry_idx, step_index, ts_ms,
+               model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+               cost_usd, valid_stream, valid_ttft, source, account_id, device_id
+             ) VALUES ('s-zero', 'zero-conv', 1, 0, 1, ?1, 'EmptyModel', 0, 0, 0, 0, 0.0, 0, 0, 'cli', 'unassigned', '')",
+            rusqlite::params![t_1h],
+        );
+        assert!(res_zero.is_ok());
+        // Synthetic step whose conversation is not in ingested_dbs
+        insert_step(
+            "s6",
+            "orphan-step-conv",
+            t_2d,
+            "Claude 4.6 Sonnet",
+            "Claude 4.6 Sonnet",
+            12_000,
+            600,
+            0.09,
+            None,
+            None,
+            Some("file:///work/orphan"),
+            "ide",
+            "unassigned",
+            "dev-remote-1",
+        );
+
+        let sync_dev_res = sync::upsert_sync_device(
+            &conn,
+            "bob@example.com",
+            "dev-remote-1",
+            "bob-linux",
+            false,
+            t_1h,
+            Some("Pro"),
+            schema::BusyRetryPolicy::standard(),
+        );
+        assert!(sync_dev_res.is_ok());
+
+        let ranges = [
+            LedgerTimeRange::Today,
+            LedgerTimeRange::Last24h,
+            LedgerTimeRange::Last7d,
+            LedgerTimeRange::Last30d,
+            LedgerTimeRange::ThisMonth,
+            LedgerTimeRange::All,
+        ];
+        let sources = [
+            LedgerSourceFilter::All,
+            LedgerSourceFilter::Cli,
+            LedgerSourceFilter::Ide,
+        ];
+        let accounts = [None, Some("unassigned"), Some("alice@example.com"), Some("bob@example.com")];
+        let devices = [None, Some("local"), Some(local_id.as_str()), Some("dev-remote-1")];
+        let models = [None, Some("Haiku 4.5")];
+        let workspaces = [None, Some("alpha")];
+
+        for range in ranges {
+            for source in sources {
+                for acct in accounts {
+                    for dev in devices {
+                        for model in models {
+                            for ws in workspaces {
+                                for include_subagents in [true, false] {
+                                    let filter = LedgerQueryFilter {
+                                        range,
+                                        from: None,
+                                        to: None,
+                                        granularity: LedgerGranularity::Auto,
+                                        source,
+                                        model: model.map(str::to_string),
+                                        workspace: ws.map(str::to_string),
+                                        account: acct.map(str::to_string),
+                                        device: dev.map(str::to_string),
+                                        include_subagents,
+                                        now_ms: Some(now_ms),
+                                    };
+                                    let Ok(indexed) = query_overview(&conn, &path, &filter, now_ms)
+                                    else {
+                                        panic!("indexed query_overview failed");
+                                    };
+                                    let Ok(reference) = query_overview_full_scan_reference(
+                                        &conn, &path, &filter, now_ms,
+                                    ) else {
+                                        panic!("reference query_overview failed");
+                                    };
+                                    let Ok(idx_val) = serde_json::to_value(&indexed) else {
+                                        panic!("serialize indexed");
+                                    };
+                                    let Ok(ref_val) = serde_json::to_value(&reference) else {
+                                        panic!("serialize reference");
+                                    };
+                                    assert_json_equivalent(&idx_val, &ref_val, "$", &filter);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

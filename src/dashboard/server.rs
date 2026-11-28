@@ -101,10 +101,9 @@ pub struct DashboardServerInfo {
     pub sync_report: Option<LedgerSyncReport>,
 }
 
-pub(super) struct LedgerRuntime {
+pub(super) struct LedgerSyncWriter {
     pub(super) store: LedgerStore,
     last_sync_instant: Option<Instant>,
-    pub(super) sync_options: LedgerSyncOptions,
 }
 
 pub(super) fn refresh_sync_identity_hints(sync_options: &mut LedgerSyncOptions) {
@@ -126,9 +125,11 @@ pub(super) struct ServerSharedState {
     sse_ping_interval: Duration,
     started_at: String,
     ledger_path: PathBuf,
+    pub(super) local_device_id: String,
     pub(super) csrf_token: String,
     pub(super) pulse_config_lock: Mutex<()>,
     pub(super) sync_config_lock: Mutex<()>,
+    pub(super) sync_options: Mutex<LedgerSyncOptions>,
     pub(super) keepalive: Arc<KeepaliveState>,
     shutdown: AtomicBool,
     collector_shutdown: Arc<AtomicBool>,
@@ -138,7 +139,7 @@ pub(super) struct ServerSharedState {
     active_sse_connections: Arc<AtomicUsize>,
     sync_remote_in_progress: Arc<AtomicBool>,
     last_remote_sync_instant: Mutex<Option<Instant>>,
-    pub(super) ledger: Mutex<LedgerRuntime>,
+    sync_write: Mutex<LedgerSyncWriter>,
 }
 
 struct AtomicSlotGuard {
@@ -176,17 +177,27 @@ impl Drop for AtomicSlotGuard {
 }
 
 impl ServerSharedState {
-    fn maybe_auto_sync(&self, guard: &mut LedgerRuntime) {
+    fn maybe_auto_sync(&self) {
         if self.no_sync || self.auto_sync_interval_ms == 0 {
             return;
         }
+        let Ok(mut guard) = self.sync_write.try_lock() else {
+            // Skip auto-sync without blocking when another local sync is already in flight.
+            return;
+        };
         if let Some(prev) = guard.last_sync_instant
             && (prev.elapsed().as_millis() as u64) < self.auto_sync_interval_ms
         {
             return;
         }
-        refresh_sync_identity_hints(&mut guard.sync_options);
-        match guard.store.sync_all(&guard.sync_options) {
+        let sync_opts = {
+            let Ok(mut opts_guard) = self.sync_options.lock() else {
+                return;
+            };
+            refresh_sync_identity_hints(&mut opts_guard);
+            opts_guard.clone()
+        };
+        match guard.store.sync_all(&sync_opts) {
             Ok(_) => {
                 guard.last_sync_instant = Some(Instant::now());
             }
@@ -218,6 +229,7 @@ impl DashboardServer {
             .ledger_path
             .unwrap_or_else(LedgerStore::default_ledger_path);
         let mut store = LedgerStore::open_at(&ledger_path)?;
+        let local_device_id = store.local_device_id()?;
         let mut sync_options = LedgerSyncOptions {
             source_roots: config.source_roots,
             ..Default::default()
@@ -276,9 +288,11 @@ impl DashboardServer {
             sse_ping_interval,
             started_at: started_at.clone(),
             ledger_path,
+            local_device_id,
             csrf_token,
             pulse_config_lock: Mutex::new(()),
             sync_config_lock: Mutex::new(()),
+            sync_options: Mutex::new(sync_options),
             keepalive,
             shutdown: AtomicBool::new(false),
             collector_shutdown: Arc::clone(&collector_shutdown),
@@ -288,10 +302,9 @@ impl DashboardServer {
             active_sse_connections: Arc::new(AtomicUsize::new(0)),
             sync_remote_in_progress: Arc::new(AtomicBool::new(false)),
             last_remote_sync_instant: Mutex::new(None),
-            ledger: Mutex::new(LedgerRuntime {
+            sync_write: Mutex::new(LedgerSyncWriter {
                 store,
                 last_sync_instant,
-                sync_options,
             }),
         });
 
@@ -747,7 +760,7 @@ fn read_sync_status_standalone(
     cfg: Option<&crate::sync::SyncConfig>,
     in_progress: bool,
 ) -> SyncStatusOverview {
-    match LedgerStore::open_at(&shared.ledger_path) {
+    match LedgerStore::open_readonly_at(&shared.ledger_path) {
         Ok(store) => store.sync_status_overview(cfg, in_progress),
         Err(_) => SyncStatusOverview {
             enabled: cfg.is_some_and(|c| c.enabled),
@@ -1170,12 +1183,15 @@ fn dispatch_request(
             }
             shared.keepalive.touch_activity();
             let (filter, _) = parse_overview_filter(&params);
-            let Ok(mut guard) = shared.ledger.lock() else {
-                send_error_json(stream, 500, "Ledger lock poisoned");
-                return;
+            shared.maybe_auto_sync();
+            let store = match LedgerStore::open_readonly_at(&shared.ledger_path) {
+                Ok(s) => s,
+                Err(err) => {
+                    send_error_json(stream, 500, &err.to_string());
+                    return;
+                }
             };
-            shared.maybe_auto_sync(&mut guard);
-            match guard.store.query_overview(&filter) {
+            match store.query_overview(&filter) {
                 Ok(mut overview) => {
                     overview.sync_status.in_progress =
                         shared.sync_remote_in_progress.load(Ordering::Acquire);
@@ -1193,12 +1209,18 @@ fn dispatch_request(
                 return;
             }
             shared.keepalive.touch_activity();
-            let Ok(mut guard) = shared.ledger.lock() else {
-                send_error_json(stream, 500, "Ledger lock poisoned");
+            let Ok(mut guard) = shared.sync_write.lock() else {
+                send_error_json(stream, 500, "Ledger sync lock poisoned");
                 return;
             };
-            refresh_sync_identity_hints(&mut guard.sync_options);
-            let sync_opts = guard.sync_options.clone();
+            let sync_opts = {
+                let Ok(mut opts_guard) = shared.sync_options.lock() else {
+                    send_error_json(stream, 500, "Sync options lock poisoned");
+                    return;
+                };
+                refresh_sync_identity_hints(&mut opts_guard);
+                opts_guard.clone()
+            };
             match guard.store.sync_all(&sync_opts) {
                 Ok(report) => {
                     guard.last_sync_instant = Some(Instant::now());
@@ -1228,11 +1250,14 @@ fn dispatch_request(
             let kind = query_param(&params, "kind")
                 .and_then(CsvExportKind::from_raw)
                 .unwrap_or(CsvExportKind::Timeseries);
-            let Ok(guard) = shared.ledger.lock() else {
-                send_error_json(stream, 500, "Ledger lock poisoned");
-                return;
+            let store = match LedgerStore::open_readonly_at(&shared.ledger_path) {
+                Ok(s) => s,
+                Err(err) => {
+                    send_error_json(stream, 500, &err.to_string());
+                    return;
+                }
             };
-            match guard.store.export_csv(&filter, kind) {
+            match store.export_csv(&filter, kind) {
                 Ok(csv) => {
                     let disposition =
                         format!("attachment; filename=\"agy-pulse-telemetry-{safe_range}.csv\"");
@@ -1255,11 +1280,14 @@ fn dispatch_request(
             }
             shared.keepalive.touch_activity();
             let (filter, safe_range) = parse_overview_filter(&params);
-            let Ok(guard) = shared.ledger.lock() else {
-                send_error_json(stream, 500, "Ledger lock poisoned");
-                return;
+            let store = match LedgerStore::open_readonly_at(&shared.ledger_path) {
+                Ok(s) => s,
+                Err(err) => {
+                    send_error_json(stream, 500, &err.to_string());
+                    return;
+                }
             };
-            match guard.store.export_json(&filter) {
+            match store.export_json(&filter) {
                 Ok(json) => {
                     let disposition =
                         format!("attachment; filename=\"agy-pulse-telemetry-{safe_range}.json\"");

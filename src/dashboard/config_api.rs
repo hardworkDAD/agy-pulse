@@ -941,13 +941,7 @@ struct DeleteSyncConfigResponse {
 }
 
 fn read_local_device_id(shared: &ServerSharedState) -> Result<String, String> {
-    let Ok(guard) = shared.ledger.lock() else {
-        return Err("ledger lock poisoned".to_string());
-    };
-    guard
-        .store
-        .local_device_id()
-        .map_err(|err| format!("failed to read local device id: {err}"))
+    Ok(shared.local_device_id.clone())
 }
 
 fn validate_and_normalize_prefix(raw: &str) -> Result<String, (String, String)> {
@@ -1514,8 +1508,8 @@ fn handle_put_sync_config(
     let remote_changed =
         existing_raw.map(SyncConfig::remote_fingerprint) != Some(to_save.remote_fingerprint());
 
-    if let Ok(mut guard) = shared.ledger.lock() {
-        refresh_sync_identity_hints(&mut guard.sync_options);
+    if let Ok(mut opts) = shared.sync_options.lock() {
+        refresh_sync_identity_hints(&mut opts);
     }
 
     let after = match sync::read_raw_sync_config_snapshot_at(&snap.path) {
@@ -1701,8 +1695,8 @@ fn handle_delete_sync_config(
         }
     };
 
-    if let Ok(mut guard) = shared.ledger.lock() {
-        refresh_sync_identity_hints(&mut guard.sync_options);
+    if let Ok(mut opts) = shared.sync_options.lock() {
+        refresh_sync_identity_hints(&mut opts);
     }
 
     send_json_value(

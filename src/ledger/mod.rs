@@ -98,6 +98,17 @@ impl LedgerStore {
         })
     }
 
+    /// Open an existing WAL ledger at `ledger_path` in read-only mode so concurrent queries never
+    /// contend on writer locks or schema initialization.
+    pub fn open_readonly_at(ledger_path: &Path) -> Result<Self, LedgerError> {
+        let conn = schema::open_readonly_connection(ledger_path)?;
+        Ok(Self {
+            conn,
+            ledger_path: ledger_path.to_path_buf(),
+            retry_policy: schema::BusyRetryPolicy::standard(),
+        })
+    }
+
     /// Path to the opened `agy-pulse-ledger.sqlite` file.
     pub fn ledger_path(&self) -> &Path {
         &self.ledger_path
@@ -483,7 +494,7 @@ pub fn run_stats_cli(argv: &[String]) -> i32 {
         },
         StatsOutputFormat::Table => match store.query_overview(&filter) {
             Ok(overview) => {
-                let no_color = env::var("NO_COLOR").is_ok_and(|v| !v.is_empty());
+                let no_color = platform::env_var("NO_COLOR").is_some_and(|v| !v.is_empty());
                 print!("{}", render_stats_text(&overview, resolved_lang, !no_color));
                 0
             }

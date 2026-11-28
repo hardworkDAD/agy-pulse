@@ -397,6 +397,14 @@ pub(super) fn open_ledger_connection(ledger_path: &Path) -> Result<Connection, L
     open_ledger_connection_with_options(ledger_path, BusyRetryPolicy::standard())
 }
 
+pub(super) fn open_readonly_connection(ledger_path: &Path) -> Result<Connection, LedgerError> {
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(ledger_path, flags)?;
+    conn.busy_timeout(Duration::from_millis(DEFAULT_BUSY_TIMEOUT_MS))?;
+    Ok(conn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

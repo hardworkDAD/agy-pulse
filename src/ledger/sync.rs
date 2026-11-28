@@ -1345,19 +1345,41 @@ pub(super) fn record_rolling_costs(
         }
 
         // 1. Evict cursors unseen for > 24h, carrying any unpersisted weekly increment into week_carry.
+        let quota_window_start = input
+            .seven_day_reset_at_ms
+            .map(|reset| reset - SEVEN_DAY_WINDOW_MS);
+        let should_reset_week = match quota_window_start {
+            Some(ws) => {
+                ws > week_start_ms + WEEK_START_JITTER_MS && ws <= now_ms + WEEK_START_JITTER_MS
+            }
+            None => now_ms - week_start_ms >= SEVEN_DAY_WINDOW_MS,
+        };
+        let new_week_start_ms = if should_reset_week {
+            quota_window_start
+                .map(|ws| ws.min(now_ms))
+                .unwrap_or(now_ms)
+        } else {
+            week_start_ms
+        };
+        if should_reset_week {
+            week_carry = 0.0;
+        }
+
         let mut stale_ids = Vec::new();
         for (cid, cur) in &cursors {
             if now_ms - cur.ts_ms > ROLLING_CURSOR_MAX_AGE_MS {
-                let db_total_now = cur
-                    .cascade_root_id
-                    .as_deref()
-                    .and_then(|rid| db_by_root.get(rid))
-                    .map(|s| s.total_usd)
-                    .unwrap_or(0.0);
-                let cursor_week = (cur.total - cur.week_baseline).max(0.0);
-                let db_week_delta = (db_total_now - cur.db_week_total_anchor).max(0.0);
-                let extra_week = (cursor_week - db_week_delta).max(0.0);
-                week_carry += extra_week;
+                if !should_reset_week || cur.ts_ms >= new_week_start_ms {
+                    let db_total_now = cur
+                        .cascade_root_id
+                        .as_deref()
+                        .and_then(|rid| db_by_root.get(rid))
+                        .map(|s| s.total_usd)
+                        .unwrap_or(0.0);
+                    let cursor_week = (cur.total - cur.week_baseline).max(0.0);
+                    let db_week_delta = (db_total_now - cur.db_week_total_anchor).max(0.0);
+                    let extra_week = (cursor_week - db_week_delta).max(0.0);
+                    week_carry += extra_week;
+                }
                 stale_ids.push(cid.clone());
             }
         }
@@ -1365,8 +1387,11 @@ pub(super) fn record_rolling_costs(
             cursors.remove(&cid);
         }
 
-        // 2. Midnight day rollover -> carry active cursors over so only today's part counts.
-        if stored_date != today_key {
+        // 2. Midnight day rollover -> carry active cursors over only when date genuinely advances.
+        //    If system clock regresses (today_key < stored_date), keep current stored_date & baselines.
+        let stored_date_valid =
+            stored_date.len() == 8 && stored_date.bytes().all(|b| b.is_ascii_digit());
+        if !stored_date_valid || today_key > stored_date {
             stored_date = today_key.clone();
             for cur in cursors.values_mut() {
                 let db_total_now = cur
@@ -1381,16 +1406,9 @@ pub(super) fn record_rolling_costs(
         }
 
         // 3. Weekly rolling / quota window rollover.
-        let quota_window_start = input
-            .seven_day_reset_at_ms
-            .map(|reset| reset - SEVEN_DAY_WINDOW_MS);
-        let should_reset_week = match quota_window_start {
-            Some(ws) => ws > week_start_ms + WEEK_START_JITTER_MS,
-            None => now_ms - week_start_ms >= SEVEN_DAY_WINDOW_MS,
-        };
         if should_reset_week {
-            week_start_ms = now_ms;
-            week_carry = 0.0;
+            let new_week_date_key = local_date_key(new_week_start_ms);
+            week_start_ms = new_week_start_ms;
             for cur in cursors.values_mut() {
                 let db_total_now = cur
                     .cascade_root_id
@@ -1398,8 +1416,23 @@ pub(super) fn record_rolling_costs(
                     .and_then(|rid| db_by_root.get(rid))
                     .map(|s| s.total_usd)
                     .unwrap_or(0.0);
-                cur.week_baseline = cur.total;
-                cur.week_start_ms = now_ms;
+                let preserved_unpersisted = if cur.ts_ms >= new_week_start_ms {
+                    let cursor_delta_week = (cur.total - cur.week_baseline).max(0.0);
+                    let db_delta_week = (db_total_now - cur.db_week_total_anchor).max(0.0);
+                    let unpersisted_week = (cursor_delta_week - db_delta_week).max(0.0);
+                    if new_week_date_key == stored_date {
+                        let cursor_delta_today = (cur.total - cur.baseline).max(0.0);
+                        let db_delta_today = (db_total_now - cur.db_total_anchor).max(0.0);
+                        let unpersisted_today = (cursor_delta_today - db_delta_today).max(0.0);
+                        unpersisted_week.min(unpersisted_today)
+                    } else {
+                        unpersisted_week
+                    }
+                } else {
+                    0.0
+                };
+                cur.week_baseline = (cur.total - preserved_unpersisted).max(0.0);
+                cur.week_start_ms = new_week_start_ms;
                 cur.db_week_total_anchor = db_total_now;
             }
         }

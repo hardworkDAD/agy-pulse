@@ -2246,3 +2246,160 @@ fn t07_mutating_routes_require_csrf_and_origin_and_keepalive_checks_same_origin(
 
     server.shutdown();
 }
+
+fn send_raw_http_with_timeout(
+    port: u16,
+    method: &str,
+    target: &str,
+    headers: &[(&str, &str)],
+    timeout: Duration,
+) -> std::io::Result<HttpResponse> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(timeout))?;
+    let mut req = format!("{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n");
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    stream.write_all(req.as_bytes())?;
+    stream.flush()?;
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "missing HTTP separator")
+    })?;
+    let mut lines = head.lines();
+    let status_line = lines.next().unwrap_or("");
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad status"))?;
+    let parsed_headers = lines
+        .filter_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            Some((k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect();
+
+    Ok(HttpResponse {
+        status,
+        headers: parsed_headers,
+        body: body.to_string(),
+    })
+}
+
+#[test]
+fn t07_reads_and_sync_config_do_not_block_during_inflight_sync_write() {
+    let env = IsolatedEnv::new();
+    let now = current_ms();
+    write_conv_db(
+        &env.cli_data_dir.join("conversations").join("conv-concurrent.db"),
+        Some(&build_trajectory_blob(
+            "file:///work/conc",
+            "main",
+            now - 60_000,
+            Some("conv-concurrent"),
+        )),
+        &[(1, build_step_metadata_blob(now - 60_000))],
+        &[(
+            1,
+            build_gen_blob(
+                &[1],
+                &[GenStepSpec {
+                    display_name: "Gemini 4 Carbon (High)",
+                    input_tokens: 100_000,
+                    cache_read_tokens: 0,
+                    output_tokens: 10_000,
+                    stream_sec: Some((10, 0)),
+                    ttft_sec: Some((1, 0)),
+                    parent_cascade_id: None,
+                    root_cascade_id: None,
+                }],
+            ),
+        )],
+    );
+
+    let ledger_path = env.ledger_path();
+    let mut server = DashboardServer::start(DashboardServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        no_sync: false,
+        defer_initial_sync: false,
+        auto_sync_interval_ms: 1,
+        ledger_path: Some(ledger_path.clone()),
+        source_roots: Some(vec![agy_pulse::ledger::SourceRoot {
+            root: env.cli_data_dir.clone(),
+            source: agy_pulse::ledger::LedgerSource::Cli,
+        }]),
+        ..Default::default()
+    })
+    .expect("start dashboard");
+
+    let port = server.info().port;
+    let token = extract_html_csrf_token(port);
+    let origin = format!("http://127.0.0.1:{port}");
+
+    // Hold a SQLite IMMEDIATE write lock externally so POST /api/sync stalls inside sync_all.
+    let mut lock_conn = Connection::open(&ledger_path).unwrap();
+    let tx = lock_conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+
+    let token_sync = token.clone();
+    let origin_sync = origin.clone();
+    let sync_handle = std::thread::spawn(move || {
+        send_raw_http_with_timeout(
+            port,
+            "POST",
+            "/api/sync",
+            &[("Origin", &origin_sync), ("X-Agy-Pulse-Token", &token_sync)],
+            Duration::from_secs(10),
+        )
+    });
+
+    // Allow POST /api/sync to acquire the sync lock and block on SQLite write lock.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let read_timeout = Duration::from_millis(800);
+    let cfg_res = send_raw_http_with_timeout(
+        port,
+        "GET",
+        "/api/config/sync",
+        &[("Origin", &origin), ("X-Agy-Pulse-Token", &token)],
+        read_timeout,
+    );
+    let ov_res =
+        send_raw_http_with_timeout(port, "GET", "/api/overview?range=7d", &[], read_timeout);
+    let csv_res =
+        send_raw_http_with_timeout(port, "GET", "/api/export.csv?range=7d", &[], read_timeout);
+    let json_res =
+        send_raw_http_with_timeout(port, "GET", "/api/export.json?range=7d", &[], read_timeout);
+
+    // Release external write lock before asserting so background POST /api/sync and shutdown always finish cleanly.
+    drop(tx);
+    drop(lock_conn);
+
+    let sync_res = sync_handle.join().unwrap().expect("POST /api/sync completes");
+    assert_eq!(sync_res.status, 200);
+
+    let cfg = cfg_res.expect("GET /api/config/sync must not block on inflight sync");
+    assert_eq!(cfg.status, 200);
+    let cfg_json: Value = serde_json::from_str(&cfg.body).unwrap();
+    assert!(!cfg_json["localDeviceId"].as_str().unwrap_or("").is_empty());
+
+    let ov = ov_res.expect("GET /api/overview must not block on inflight sync");
+    assert_eq!(ov.status, 200);
+    let ov_json: Value = serde_json::from_str(&ov.body).unwrap();
+    assert_eq!(ov_json["summary"]["totalSteps"], 1);
+
+    let csv = csv_res.expect("GET /api/export.csv must not block on inflight sync");
+    assert_eq!(csv.status, 200);
+
+    let json = json_res.expect("GET /api/export.json must not block on inflight sync");
+    assert_eq!(json.status, 200);
+
+    server.shutdown();
+}
