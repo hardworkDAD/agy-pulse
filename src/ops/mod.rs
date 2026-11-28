@@ -106,9 +106,7 @@ pub fn run_uninstall_cli(args: &[String]) -> i32 {
         return 0;
     }
 
-    let purge_ledger = args
-        .iter()
-        .any(|a| a == "--purge-ledger" || a == "--purge");
+    let purge_ledger = args.iter().any(|a| a == "--purge-ledger" || a == "--purge");
     let bin_dir_override = parse_bin_dir_flag(args);
 
     match uninstall::uninstall(purge_ledger, bin_dir_override.as_deref()) {
@@ -162,9 +160,7 @@ pub fn run_update_cli(args: &[String]) -> i32 {
             if report.updated {
                 println!(
                     "Updated agy-pulse from v{} to v{} ({})",
-                    report.previous_version,
-                    report.target_version,
-                    report.asset_name
+                    report.previous_version, report.target_version, report.asset_name
                 );
             } else {
                 println!(

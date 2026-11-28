@@ -745,8 +745,7 @@ fn run_statusline_enriched(
             summary: collected.summary,
         };
     }
-    let (output, render_ms) =
-        render_snapshot_for_terminal(&collected.snapshot, &collected.config);
+    let (output, render_ms) = render_snapshot_for_terminal(&collected.snapshot, &collected.config);
     StatuslineWorkerOutput {
         output: Some(output),
         summary: format!("{} render={render_ms}", collected.summary),
@@ -783,7 +782,8 @@ fn run_statusline_pipeline(process_start: Instant) {
         .name("agy-pulse-worker".to_string())
         .spawn(move || {
             let _worker_stage_guard = profile::enter_stage_scope(worker_stage);
-            let res = run_statusline_enriched(&worker_stdin, &worker_cwd, stdin_ms, pipeline_deadline);
+            let res =
+                run_statusline_enriched(&worker_stdin, &worker_cwd, stdin_ms, pipeline_deadline);
             let _ = tx.send(res);
         });
 
@@ -952,9 +952,7 @@ pub(crate) fn run_cli() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BgLedgerSyncLock, CliRoute, is_bg_ledger_sync_lock_active, resolve_cli_route,
-    };
+    use super::{BgLedgerSyncLock, CliRoute, is_bg_ledger_sync_lock_active, resolve_cli_route};
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
@@ -1051,7 +1049,10 @@ mod tests {
 
     #[test]
     fn cli_routing_prefers_first_subcommand_and_keeps_global_compat_flags() {
-        assert_eq!(resolve_cli_route(&args(&["sync", "--stats"])), CliRoute::Sync);
+        assert_eq!(
+            resolve_cli_route(&args(&["sync", "--stats"])),
+            CliRoute::Sync
+        );
         assert_eq!(
             resolve_cli_route(&args(&["account", "--version"])),
             CliRoute::Account

@@ -31,8 +31,23 @@ fn percent_encode_sqlite_uri_path(path_str: &str) -> String {
         let keep = byte.is_ascii_alphanumeric()
             || matches!(
                 byte,
-                b'-' | b'_' | b'.' | b'~' | b'/' | b':' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
-                    | b'*' | b'+' | b',' | b';' | b'=' | b'@'
+                b'-' | b'_'
+                    | b'.'
+                    | b'~'
+                    | b'/'
+                    | b':'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b'@'
             );
         if keep {
             out.push(*byte as char);
@@ -95,7 +110,9 @@ pub(super) fn is_sqlite_open_or_access_error(err: &rusqlite::Error) -> bool {
 }
 
 pub(super) fn is_no_such_table_error(err: &rusqlite::Error) -> bool {
-    err.to_string().to_ascii_lowercase().contains("no such table")
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("no such table")
 }
 
 fn is_sqlite_corrupt_or_notadb_error(err: &rusqlite::Error) -> bool {
@@ -251,9 +268,9 @@ fn create_temp_db_copy(db_path: &Path) -> std::io::Result<TempDbCopy> {
         .prefix("agy-pulse-db-")
         .tempdir_in(&fast_dir)
         .or_else(|_| tempfile::Builder::new().prefix("agy-pulse-db-").tempdir())?;
-    let file_name = db_path
-        .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing db filename"))?;
+    let file_name = db_path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing db filename")
+    })?;
     let tmp_db_path = dir.path().join(file_name);
     fs::copy(db_path, &tmp_db_path)?;
 
@@ -494,7 +511,10 @@ mod tests {
         });
         let temp_dirs = count_temp_db_dirs(root.path());
 
-        assert_eq!(rows, Some(vec![(1, "v2".to_string()), (2, "second".to_string())]));
+        assert_eq!(
+            rows,
+            Some(vec![(1, "v2".to_string()), (2, "second".to_string())])
+        );
         if shm_removed {
             assert!(!shm_path.exists(), "source -shm must not be recreated");
         }
@@ -512,15 +532,20 @@ mod tests {
         let w1 = u32::from_be_bytes([0x10, 0x20, 0x30, 0x40]);
         let expected_s0 = w0;
         let expected_s1 = w1.wrapping_add(expected_s0);
-        assert_eq!(sqlite_wal_checksum(&data, (0, 0), true), (expected_s0, expected_s1));
+        assert_eq!(
+            sqlite_wal_checksum(&data, (0, 0), true),
+            (expected_s0, expected_s1)
+        );
 
         // Build a synthetic DB + big-endian WAL where frame 1 commits and frame 2 has mismatched salt.
         let root = tempfile::tempdir().expect("tempdir");
         let db_path = root.path().join("be.db");
         {
             let conn = Connection::open(&db_path).expect("open");
-            conn.execute("CREATE TABLE t (x INTEGER)", []).expect("create");
-            conn.execute("INSERT INTO t VALUES (42)", []).expect("insert");
+            conn.execute("CREATE TABLE t (x INTEGER)", [])
+                .expect("create");
+            conn.execute("INSERT INTO t VALUES (42)", [])
+                .expect("insert");
         }
         let mut base_bytes = fs::read(&db_path).expect("read db");
         assert!(base_bytes.len() >= 4096 * 2);

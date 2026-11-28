@@ -6,8 +6,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -325,7 +325,11 @@ fn pb_timestamp_ms(field_num: u32, ts_ms: i64) -> Vec<u8> {
 }
 
 fn pb_duration_sec(field_num: u32, sec: u64) -> Vec<u8> {
-    let inner = if sec > 0 { pb_varint(1, sec) } else { Vec::new() };
+    let inner = if sec > 0 {
+        pb_varint(1, sec)
+    } else {
+        Vec::new()
+    };
     pb_bytes(field_num, &inner)
 }
 
@@ -393,7 +397,11 @@ fn ledger_sync_devices_and_pending_changes_behave_accurately() {
     assert_eq!(initial_devices[0].device_id, local_id);
     assert!(initial_devices[0].is_local);
     assert!(!store.has_pending_local_sync_changes(None).unwrap());
-    assert!(!store.has_pending_local_sync_changes(Some(1_000_000)).unwrap());
+    assert!(
+        !store
+            .has_pending_local_sync_changes(Some(1_000_000))
+            .unwrap()
+    );
 
     let ts1 = 1_795_000_000_000i64;
     store
@@ -474,19 +482,23 @@ fn sync_init_supports_flags_and_interactive_probe_and_protects_existing_on_401()
         "local-dir\n{}\nlaptop-alpha\nAlice@Example.COM\nwork-prefix\n120\n",
         local_remote_dir.display()
     );
-    let (code, stdout, stderr) = env.run_with_stdin(
-        &agy_pulse_bin(),
-        &["sync", "init"],
-        &interactive_stdin,
-    );
+    let (code, stdout, stderr) =
+        env.run_with_stdin(&agy_pulse_bin(), &["sync", "init"], &interactive_stdin);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("Sync configuration saved"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("Sync configuration saved"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("local-dir:"), "stdout: {stdout}");
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(&env.sync_cfg_path).unwrap().permissions().mode() & 0o777;
+        let mode = fs::metadata(&env.sync_cfg_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600, "sync config must be 0600, got {:o}", mode);
     }
 
@@ -531,7 +543,10 @@ fn sync_init_supports_flags_and_interactive_probe_and_protects_existing_on_401()
     );
 
     let after_fail_cfg = load_sync_config_from(&env.sync_cfg_path).unwrap().unwrap();
-    assert_eq!(after_fail_cfg, initial_cfg, "401 must not overwrite existing config");
+    assert_eq!(
+        after_fail_cfg, initial_cfg,
+        "401 must not overwrite existing config"
+    );
 
     // 3) Mock CF Worker server: 200 health probe succeeds and writes 0600 config without leaking token
     let ok_tok = "tok_valid_worker_secret";
@@ -596,7 +611,11 @@ fn two_machine_cli_sync_dry_run_push_pull_status_and_prune_device() {
     let machine_b = IsolatedCliEnv::new();
 
     // Unconfigured sync returns exit code 1 with guidance
-    let uncfg = machine_a.cmd(&agy_pulse_bin()).arg("sync").output().unwrap();
+    let uncfg = machine_a
+        .cmd(&agy_pulse_bin())
+        .arg("sync")
+        .output()
+        .unwrap();
     assert_eq!(uncfg.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&uncfg.stderr).contains("sync init"),
@@ -689,7 +708,9 @@ fn two_machine_cli_sync_dry_run_push_pull_status_and_prune_device() {
                 Some("Ultra"),
             )
             .unwrap();
-        store_a.set_last_observed_email("alice@example.com").unwrap();
+        store_a
+            .set_last_observed_email("alice@example.com")
+            .unwrap();
     }
 
     // Dry-run push on machine A before local scan must skip local DB write and remote write
@@ -883,7 +904,11 @@ fn sync_bg_exits_zero_and_records_redacted_error_when_remote_unreachable() {
     let store = env.open_ledger();
     let dev_id = store.local_device_id().unwrap();
     cfg.device_id = Some(dev_id.clone());
-    fs::write(&env.sync_cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+    fs::write(
+        &env.sync_cfg_path,
+        serde_json::to_string_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
 
     store
         .upsert_quota_snapshot(&QuotaSnapshot {
@@ -896,21 +921,23 @@ fn sync_bg_exits_zero_and_records_redacted_error_when_remote_unreachable() {
         })
         .unwrap();
 
-    let out = env
-        .cmd(&agy_pulse_bin())
-        .arg("--sync-bg")
-        .output()
-        .unwrap();
+    let out = env.cmd(&agy_pulse_bin()).arg("--sync-bg").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "--sync-bg must always exit 0");
 
     let meta = env.open_ledger().get_sync_meta().unwrap();
     let err_msg = meta
         .last_sync_error
         .expect("last_sync_error must be recorded");
-    assert!(!err_msg.contains(secret_tok), "error leaked secret: {err_msg}");
+    assert!(
+        !err_msg.contains(secret_tok),
+        "error leaked secret: {err_msg}"
+    );
 
     let err_log = fs::read_to_string(env.data_dir.join("agy-pulse-error.log")).unwrap_or_default();
-    assert!(!err_log.contains(secret_tok), "log leaked secret: {err_log}");
+    assert!(
+        !err_log.contains(secret_tok),
+        "log leaked secret: {err_log}"
+    );
 }
 
 #[test]
@@ -997,7 +1024,11 @@ fn statusline_spawns_sync_bg_respecting_throttle_and_no_autostart_env() {
     // must NOT trigger another --sync-bg push.
     let mut cfg = load_sync_config_from(&env.sync_cfg_path).unwrap().unwrap();
     cfg.push_interval_sec = 3600;
-    fs::write(&env.sync_cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+    fs::write(
+        &env.sync_cfg_path,
+        serde_json::to_string_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
     fs::remove_file(&manifest_path).unwrap();
 
     let (code2, _, _) = env.run_with_stdin(&agy_pulse_bin(), &[], &payload);
@@ -1011,7 +1042,11 @@ fn statusline_spawns_sync_bg_respecting_throttle_and_no_autostart_env() {
     // 3) Even with pushIntervalSec=1 and cleared last_sync_push_ms, AGY_PULSE_NO_SYNC_AUTOSTART=1
     // prevents spawning --sync-bg.
     cfg.push_interval_sec = 1;
-    fs::write(&env.sync_cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+    fs::write(
+        &env.sync_cfg_path,
+        serde_json::to_string_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
     env.open_ledger()
         .set_sync_meta_field("last_sync_push_ms", None)
         .unwrap();

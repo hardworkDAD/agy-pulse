@@ -93,7 +93,11 @@ fn pb_timestamp_ms(field_num: u32, ts_ms: i64) -> Vec<u8> {
 }
 
 fn pb_duration_sec(field_num: u32, sec: u64) -> Vec<u8> {
-    let inner = if sec > 0 { pb_varint(1, sec) } else { Vec::new() };
+    let inner = if sec > 0 {
+        pb_varint(1, sec)
+    } else {
+        Vec::new()
+    };
     pb_bytes(field_num, &inner)
 }
 
@@ -520,10 +524,18 @@ fn t12_concurrent_same_account_push_and_sha256_zero_redundancy_skip() {
     assert_eq!(out_b.chunks_uploaded, 1);
 
     // Both devices' manifests exist independently under shared@ex.com.
-    let keys = remote.list("agy-pulse-sync/accounts/shared@ex.com/devices").unwrap();
+    let keys = remote
+        .list("agy-pulse-sync/accounts/shared@ex.com/devices")
+        .unwrap();
     assert_eq!(keys.len(), 4);
-    assert!(keys.iter().any(|k| k.contains(&format!("/{dev_a}/manifest.json"))));
-    assert!(keys.iter().any(|k| k.contains(&format!("/{dev_b}/manifest.json"))));
+    assert!(
+        keys.iter()
+            .any(|k| k.contains(&format!("/{dev_a}/manifest.json")))
+    );
+    assert!(
+        keys.iter()
+            .any(|k| k.contains(&format!("/{dev_b}/manifest.json")))
+    );
 
     // Repeat Push with no changes -> 0 chunks uploaded, 0 manifests uploaded, 1 chunk skipped.
     let push_again = push(&store_a, &remote, &cfg_a, false).unwrap();
@@ -572,8 +584,24 @@ fn t12_remote_fingerprint_switch_auto_clears_remote_cache_preserving_local() {
     let machine_b = IsolatedMachine::new();
     let ts = utc_ms(2026, 11, 21, 10, 0);
 
-    seed_conv(&machine_a.cli_root, "conv-a", "file:///a", "main", ts, 500, 100);
-    seed_conv(&machine_b.cli_root, "conv-b", "file:///b", "main", ts, 700, 150);
+    seed_conv(
+        &machine_a.cli_root,
+        "conv-a",
+        "file:///a",
+        "main",
+        ts,
+        500,
+        100,
+    );
+    seed_conv(
+        &machine_b.cli_root,
+        "conv-b",
+        "file:///b",
+        "main",
+        ts,
+        700,
+        150,
+    );
 
     let mut store_a = machine_a.open_store();
     let mut store_b = machine_b.open_store();
@@ -646,9 +674,33 @@ fn t12_prune_device_protects_local_and_cleans_remote_and_cache() {
     let machine_b = IsolatedMachine::new();
     let ts = utc_ms(2026, 11, 22, 8, 0);
 
-    seed_conv(&machine_a.cli_root, "a-work", "file:///w", "main", ts, 400, 80);
-    seed_conv(&machine_a.ide_root, "a-pers", "file:///p", "main", ts, 300, 60);
-    seed_conv(&machine_b.cli_root, "b-work", "file:///wb", "main", ts, 200, 40);
+    seed_conv(
+        &machine_a.cli_root,
+        "a-work",
+        "file:///w",
+        "main",
+        ts,
+        400,
+        80,
+    );
+    seed_conv(
+        &machine_a.ide_root,
+        "a-pers",
+        "file:///p",
+        "main",
+        ts,
+        300,
+        60,
+    );
+    seed_conv(
+        &machine_b.cli_root,
+        "b-work",
+        "file:///wb",
+        "main",
+        ts,
+        200,
+        40,
+    );
 
     let mut store_a = machine_a.open_store();
     let mut store_b = machine_b.open_store();
@@ -752,7 +804,9 @@ fn t12_prune_device_protects_local_and_cleans_remote_and_cache() {
         .unwrap();
     assert_eq!(dev_b_rows_after, 1);
     assert_eq!(
-        store_b.get_sync_chunk_hash("work@ex.com", &dev_b, "2026-11", "push").unwrap(),
+        store_b
+            .get_sync_chunk_hash("work@ex.com", &dev_b, "2026-11", "push")
+            .unwrap(),
         None
     );
 }
@@ -813,17 +867,29 @@ fn t12_config_0600_env_overrides_redaction_and_security_boundaries() {
     let redacted = s3_cfg.redacted_target();
     let fp_before = s3_cfg.remote_fingerprint();
     for secret in ["AKIA_FILE_SECRET", "S3_FILE_SECRET", "urlsecret"] {
-        assert!(!debug_str.contains(secret), "Debug leaked {secret}: {debug_str}");
-        assert!(!redacted.contains(secret), "redacted_target leaked {secret}: {redacted}");
+        assert!(
+            !debug_str.contains(secret),
+            "Debug leaked {secret}: {debug_str}"
+        );
+        assert!(
+            !redacted.contains(secret),
+            "redacted_target leaked {secret}: {redacted}"
+        );
     }
-    assert_eq!(redacted, "s3:https://s3.example.com/my-bucket (region=auto, prefix=custom/prefix)");
+    assert_eq!(
+        redacted,
+        "s3:https://s3.example.com/my-bucket (region=auto, prefix=custom/prefix)"
+    );
 
     // Env overrides supersede file secrets without changing remote_fingerprint.
     env_guard.set("AGY_PULSE_S3_ACCESS_KEY", "AKIA_ENV_OVERRIDE");
     env_guard.set("AGY_PULSE_S3_SECRET_KEY", "S3_ENV_SECRET_OVERRIDE");
     let loaded_s3 = load_sync_config().unwrap().unwrap();
     assert_eq!(loaded_s3.prefix, "custom/prefix");
-    assert_eq!(loaded_s3.default_account.as_deref(), Some("alice@example.com"));
+    assert_eq!(
+        loaded_s3.default_account.as_deref(),
+        Some("alice@example.com")
+    );
     assert_eq!(loaded_s3.remote_fingerprint(), fp_before);
     match &loaded_s3.remote {
         RemoteConfig::S3 {
@@ -843,12 +909,18 @@ fn t12_config_0600_env_overrides_redaction_and_security_boundaries() {
         r#"{"enabled":true,"pushIntervalSec":0,"remote":{"type":"webdav","url":"https://dav.example.com"}}"#,
     )
     .unwrap();
-    assert!(matches!(parsed_dav_json.remote, RemoteConfig::WebDav { .. }));
+    assert!(matches!(
+        parsed_dav_json.remote,
+        RemoteConfig::WebDav { .. }
+    ));
     let parsed_cf_json: SyncConfig = serde_json::from_str(
         r#"{"enabled":true,"remote":{"type":"cf-worker","url":"https://sync.example.workers.dev"}}"#,
     )
     .unwrap();
-    assert!(matches!(parsed_cf_json.remote, RemoteConfig::CfWorker { .. }));
+    assert!(matches!(
+        parsed_cf_json.remote,
+        RemoteConfig::CfWorker { .. }
+    ));
 
     let webdav_path = temp.path().join("webdav.json");
     save_sync_config_to(
@@ -897,7 +969,10 @@ fn t12_config_0600_env_overrides_redaction_and_security_boundaries() {
         "bad\nkey",
     ] {
         assert!(
-            matches!(validate_relative_key(bad_key), Err(SyncError::InvalidKey(_))),
+            matches!(
+                validate_relative_key(bad_key),
+                Err(SyncError::InvalidKey(_))
+            ),
             "expected InvalidKey for {bad_key:?}"
         );
     }
@@ -908,7 +983,10 @@ fn t12_config_0600_env_overrides_redaction_and_security_boundaries() {
     assert!(decode_account_key("%00").is_err());
 
     let encoded = encode_account_key("Alice+Work@Example.COM").unwrap();
-    assert_eq!(decode_account_key(&encoded).unwrap(), "Alice+Work@Example.COM");
+    assert_eq!(
+        decode_account_key(&encoded).unwrap(),
+        "Alice+Work@Example.COM"
+    );
 
     let remote_dir = temp.path().join("remote");
     let local_remote = LocalDirRemote::new(remote_dir.clone());
@@ -978,7 +1056,11 @@ fn t12_config_0600_env_overrides_redaction_and_security_boundaries() {
     ));
 
     // Active lock held by a live PID causes AlreadyRunning without error; stale lock is recovered.
-    let lock_path = machine_b.ledger_path.parent().unwrap().join("agy-pulse-sync.lock");
+    let lock_path = machine_b
+        .ledger_path
+        .parent()
+        .unwrap()
+        .join("agy-pulse-sync.lock");
     let live_lock = serde_json::json!({
         "pid": std::process::id(),
         "token": "external-live-lock",
@@ -1077,8 +1159,24 @@ fn t12_sync_both_dedup_accounts_incremental_steps_and_clock_skew_clamp() {
     let machine_b = IsolatedMachine::new();
     let ts = utc_ms(2026, 11, 15, 10, 0);
 
-    seed_conv(&machine_a.cli_root, "conv-a-1", "file:///a1", "main", ts, 100, 20);
-    seed_conv(&machine_b.cli_root, "conv-b-1", "file:///b1", "main", ts + 1_000, 150, 30);
+    seed_conv(
+        &machine_a.cli_root,
+        "conv-a-1",
+        "file:///a1",
+        "main",
+        ts,
+        100,
+        20,
+    );
+    seed_conv(
+        &machine_b.cli_root,
+        "conv-b-1",
+        "file:///b1",
+        "main",
+        ts + 1_000,
+        150,
+        30,
+    );
 
     let mut store_a = machine_a.open_store();
     let mut store_b = machine_b.open_store();
@@ -1115,11 +1213,22 @@ fn t12_sync_both_dedup_accounts_incremental_steps_and_clock_skew_clamp() {
     // sync_both on Machine B touches the same account "shared@ex.com" in both pull and push:
     // accounts_processed must be deduplicated (1, not 2).
     let sb1 = sync_both(&store_b, &remote, &cfg_b, false).unwrap();
-    assert_eq!(sb1.accounts_processed, 1, "shared@ex.com must not be double-counted");
+    assert_eq!(
+        sb1.accounts_processed, 1,
+        "shared@ex.com must not be double-counted"
+    );
     assert_eq!(sb1.steps_imported, 1);
 
     // Machine A appends a second step in the SAME month (2026-11) and pushes.
-    seed_conv(&machine_a.cli_root, "conv-a-2", "file:///a2", "main", ts + 2_000, 200, 40);
+    seed_conv(
+        &machine_a.cli_root,
+        "conv-a-2",
+        "file:///a2",
+        "main",
+        ts + 2_000,
+        200,
+        40,
+    );
     store_a
         .sync_all(&LedgerSyncOptions {
             source_roots: Some(vec![SourceRoot {
@@ -1138,7 +1247,10 @@ fn t12_sync_both_dedup_accounts_incremental_steps_and_clock_skew_clamp() {
     // steps_imported must count only the 1 newly added step, not re-count the unchanged existing step.
     let pull_inc = pull(&store_b, &remote, &cfg_b, false).unwrap();
     assert_eq!(pull_inc.chunks_downloaded, 1);
-    assert_eq!(pull_inc.steps_imported, 1, "unchanged existing steps must not inflate steps_imported");
+    assert_eq!(
+        pull_inc.steps_imported, 1,
+        "unchanged existing steps must not inflate steps_imported"
+    );
 
     // Future clock-skew clamping: a rogue device manifest with updated_at_ms & observed_at_ms
     // 24 hours in the future must be clamped to <= now_ms + 5min.
@@ -1184,8 +1296,14 @@ fn t12_sync_both_dedup_accounts_incremental_steps_and_clock_skew_clamp() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(dev_ts <= max_allowed, "updated_at_ms {dev_ts} exceeded max_allowed {max_allowed}");
-    assert!(snap_ts <= max_allowed, "observed_at_ms {snap_ts} exceeded max_allowed {max_allowed}");
+    assert!(
+        dev_ts <= max_allowed,
+        "updated_at_ms {dev_ts} exceeded max_allowed {max_allowed}"
+    );
+    assert!(
+        snap_ts <= max_allowed,
+        "observed_at_ms {snap_ts} exceeded max_allowed {max_allowed}"
+    );
 }
 
 #[test]
@@ -1203,9 +1321,33 @@ fn t12_pull_concurrent_overwrite_retry_and_persistent_mismatch_isolation() {
     let machine_b = IsolatedMachine::new();
     let ts = utc_ms(2026, 11, 18, 9, 0);
 
-    seed_conv(&machine_a.cli_root, "conv-a1", "file:///a", "main", ts, 100, 20);
-    seed_conv(&machine_c.cli_root, "conv-c1", "file:///c", "main", ts, 200, 30);
-    seed_conv(&machine_d.cli_root, "conv-d1", "file:///d", "main", ts, 300, 40);
+    seed_conv(
+        &machine_a.cli_root,
+        "conv-a1",
+        "file:///a",
+        "main",
+        ts,
+        100,
+        20,
+    );
+    seed_conv(
+        &machine_c.cli_root,
+        "conv-c1",
+        "file:///c",
+        "main",
+        ts,
+        200,
+        30,
+    );
+    seed_conv(
+        &machine_d.cli_root,
+        "conv-d1",
+        "file:///d",
+        "main",
+        ts,
+        300,
+        40,
+    );
 
     let mut store_a = machine_a.open_store();
     let mut store_c = machine_c.open_store();
@@ -1261,7 +1403,15 @@ fn t12_pull_concurrent_overwrite_retry_and_persistent_mismatch_isolation() {
     // Capture Machine A's v1 manifest, then push v2 on Machine A so remote chunk is v2.
     let mkey_a = format!("agy-pulse-sync/accounts/alpha@ex.com/devices/{dev_a}/manifest.json");
     let v1_manifest_a = inner_remote.get(&mkey_a).unwrap().unwrap();
-    seed_conv(&machine_a.cli_root, "conv-a2", "file:///a2", "main", ts + 1_000, 120, 25);
+    seed_conv(
+        &machine_a.cli_root,
+        "conv-a2",
+        "file:///a2",
+        "main",
+        ts + 1_000,
+        120,
+        25,
+    );
     store_a
         .sync_all(&LedgerSyncOptions {
             source_roots: Some(vec![SourceRoot {
@@ -1277,8 +1427,11 @@ fn t12_pull_concurrent_overwrite_retry_and_persistent_mismatch_isolation() {
     let v2_manifest_a = inner_remote.get(&mkey_a).unwrap().unwrap();
 
     // Corrupt Machine C's chunk bytes permanently so it always fails sha256 even after retry.
-    let ckey_c = format!("agy-pulse-sync/accounts/charlie@ex.com/devices/{dev_c}/chunks/2026-11.jsonl.gz");
-    inner_remote.put(&ckey_c, b"corrupted-gzip-bytes", "application/gzip").unwrap();
+    let ckey_c =
+        format!("agy-pulse-sync/accounts/charlie@ex.com/devices/{dev_c}/chunks/2026-11.jsonl.gz");
+    inner_remote
+        .put(&ckey_c, b"corrupted-gzip-bytes", "application/gzip")
+        .unwrap();
 
     // Custom SyncRemote that serves stale v1_manifest_a on the first manifest read for A,
     // then v2_manifest_a on retry, simulating concurrent overwrite during pull!
@@ -1327,10 +1480,18 @@ fn t12_pull_concurrent_overwrite_retry_and_persistent_mismatch_isolation() {
     };
 
     let outcome = pull(&store_b, &racing_remote, &cfg_b, false).unwrap();
-    assert!(racing_remote.saw_retry.load(Ordering::SeqCst), "pull must retry fetching manifest on sha mismatch");
+    assert!(
+        racing_remote.saw_retry.load(Ordering::SeqCst),
+        "pull must retry fetching manifest on sha mismatch"
+    );
     // Machine A (2 steps after retry) + Machine D (1 step) imported; Machine C isolated with warning!
     assert_eq!(outcome.steps_imported, 3);
-    assert_eq!(outcome.warnings.len(), 1, "expected 1 warning for persistent mismatch on Machine C: {:?}", outcome.warnings);
+    assert_eq!(
+        outcome.warnings.len(),
+        1,
+        "expected 1 warning for persistent mismatch on Machine C: {:?}",
+        outcome.warnings
+    );
     assert!(
         outcome.warnings[0].contains(&dev_c),
         "warning should identify failing device/chunk: {}",

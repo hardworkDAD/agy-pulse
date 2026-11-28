@@ -96,12 +96,18 @@ pub(super) fn parse_host_stdin(
         .map(|w| w as u16);
 
     let task_count = root.get("task_count").and_then(Value::as_u64).unwrap_or(0);
-    let api_duration_ms = as_u64_non_neg(root.get("cost").and_then(|c| c.get("total_api_duration_ms")))
-        .or_else(|| as_u64_non_neg(root.get("total_api_duration_ms")));
+    let api_duration_ms = as_u64_non_neg(
+        root.get("cost")
+            .and_then(|c| c.get("total_api_duration_ms")),
+    )
+    .or_else(|| as_u64_non_neg(root.get("total_api_duration_ms")));
 
     let native_total_usd = extract_native_cost(&root);
     let cw_val = find_context_window(&root, 0).cloned();
-    let stdin_current_usage_val = cw_val.as_ref().and_then(|cw| cw.get("current_usage")).cloned();
+    let stdin_current_usage_val = cw_val
+        .as_ref()
+        .and_then(|cw| cw.get("current_usage"))
+        .cloned();
     let stdin_total_output_tokens = cw_val
         .as_ref()
         .and_then(|cw| as_u64_non_neg(cw.get("total_output_tokens")));
@@ -172,16 +178,14 @@ fn parse_quota_window(entry: &Value, observed_at_ms: i64) -> Option<QuotaWindow>
         .and_then(Value::as_f64)
         .filter(|v| v.is_finite())?;
     let remaining_fraction = raw_fraction.clamp(0.0, 1.0);
-    let reset_time_ms = parse_reset_time_ms(
-        map.get("reset_time").or_else(|| map.get("resetTime")),
-    )
-    .or_else(|| {
-        map.get("reset_in_seconds")
-            .or_else(|| map.get("resetInSeconds"))
-            .and_then(Value::as_f64)
-            .filter(|secs| secs.is_finite() && *secs > 0.0)
-            .map(|secs| observed_at_ms.saturating_add((secs * 1000.0).round() as i64))
-    });
+    let reset_time_ms = parse_reset_time_ms(map.get("reset_time").or_else(|| map.get("resetTime")))
+        .or_else(|| {
+            map.get("reset_in_seconds")
+                .or_else(|| map.get("resetInSeconds"))
+                .and_then(Value::as_f64)
+                .filter(|secs| secs.is_finite() && *secs > 0.0)
+                .map(|secs| observed_at_ms.saturating_add((secs * 1000.0).round() as i64))
+        });
     Some(QuotaWindow {
         remaining_fraction,
         reset_time_ms,

@@ -111,10 +111,7 @@ fn state_matches_current_binary(state: &CollectorStateFile, exe_mtime_ms: i64) -
     exe_mtime_matches(state.exe_mtime_ms, exe_mtime_ms)
 }
 
-fn try_connect_ready(
-    exe_mtime_ms: i64,
-    deadline: Instant,
-) -> Option<(IpcStream, String)> {
+fn try_connect_ready(exe_mtime_ms: i64, deadline: Instant) -> Option<(IpcStream, String)> {
     let state = read_collector_state()?;
     if !platform::is_process_alive(state.pid) {
         return None;
@@ -261,7 +258,8 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
     let has_warm_snapshot = warm_snap.is_some();
 
     let wait_budget = resolve_wait_budget(hard_cap, has_warm_snapshot);
-    let soft_budget_ms = (app::STATUSLINE_POST_STDIN_BUDGET.min(hard_cap).as_millis() as u64).max(100);
+    let soft_budget_ms =
+        (app::STATUSLINE_POST_STDIN_BUDGET.min(hard_cap).as_millis() as u64).max(100);
     let env_overrides = collect_forwarded_env_overrides();
 
     let rpc_deadline = Instant::now() + wait_budget;
@@ -304,10 +302,8 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
                     ready_summary = Some(if !payload.enabled {
                         payload.summary
                     } else {
-                        let (output, render_ms) = app::render_snapshot_for_terminal(
-                            &payload.snapshot,
-                            &payload.config,
-                        );
+                        let (output, render_ms) =
+                            app::render_snapshot_for_terminal(&payload.snapshot, &payload.config);
                         write_stdout_safely(&output);
                         format!("{} render={render_ms}", payload.summary)
                     });
@@ -367,8 +363,14 @@ mod tests {
 
     #[test]
     fn client_state_matches_current_binary_handles_zero_and_mismatch_mtimes() {
-        assert!(state_matches_current_binary(&sample_state(0), 1_700_000_000_000));
-        assert!(state_matches_current_binary(&sample_state(1_700_000_000_000), 0));
+        assert!(state_matches_current_binary(
+            &sample_state(0),
+            1_700_000_000_000
+        ));
+        assert!(state_matches_current_binary(
+            &sample_state(1_700_000_000_000),
+            0
+        ));
         assert!(state_matches_current_binary(
             &sample_state(1_700_000_000_123),
             1_700_000_000_123

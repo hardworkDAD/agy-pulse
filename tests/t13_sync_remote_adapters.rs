@@ -128,7 +128,10 @@ where
     if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
         return;
     }
-    let parts: Vec<&str> = request_line.trim_end_matches(['\r', '\n']).split_whitespace().collect();
+    let parts: Vec<&str> = request_line
+        .trim_end_matches(['\r', '\n'])
+        .split_whitespace()
+        .collect();
     if parts.len() < 2 {
         return;
     }
@@ -204,10 +207,8 @@ fn percent_decode(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(val) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            )
+            && let Ok(val) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
         {
             out.push(val);
             i += 3;
@@ -269,7 +270,11 @@ fn pb_timestamp_ms(field_num: u32, ts_ms: i64) -> Vec<u8> {
 }
 
 fn pb_duration_sec(field_num: u32, sec: u64) -> Vec<u8> {
-    let inner = if sec > 0 { pb_varint(1, sec) } else { Vec::new() };
+    let inner = if sec > 0 {
+        pb_varint(1, sec)
+    } else {
+        Vec::new()
+    };
     pb_bytes(field_num, &inner)
 }
 
@@ -588,9 +593,7 @@ AWS4-HMAC-SHA256
         false,
     )
     .unwrap();
-    let (url_ps, curi_ps, host_ps) = s3_ps
-        .build_request_target(Some("k/v.json"), &[])
-        .unwrap();
+    let (url_ps, curi_ps, host_ps) = s3_ps.build_request_target(Some("k/v.json"), &[]).unwrap();
     assert_eq!(url_ps, "http://127.0.0.1:9000/pulse-bucket/k/v.json");
     assert_eq!(curi_ps, "/pulse-bucket/k/v.json");
     assert_eq!(host_ps, "127.0.0.1:9000");
@@ -695,7 +698,10 @@ fn t13_webdav_mock_e2e_and_two_machine_sync() {
                     {
                         let href = format!(
                             "http://{}/dav/{}/",
-                            req.headers.get("host").map(String::as_str).unwrap_or("127.0.0.1"),
+                            req.headers
+                                .get("host")
+                                .map(String::as_str)
+                                .unwrap_or("127.0.0.1"),
                             uri_encode_path_for_test(dir)
                         );
                         if child_idx.is_multiple_of(2) {
@@ -771,14 +777,8 @@ fn t13_webdav_mock_e2e_and_two_machine_sync() {
     });
 
     let dav_url = server.base_url("dav");
-    let dav = WebDavRemote::new(
-        &dav_url,
-        Some("alice"),
-        Some("dav-secret-999"),
-        None,
-        false,
-    )
-    .unwrap();
+    let dav =
+        WebDavRemote::new(&dav_url, Some("alice"), Some("dav-secret-999"), None, false).unwrap();
     let probe = dav.probe().unwrap();
     assert_eq!(probe.backend, "webdav");
     assert_eq!(probe.detail, dav_url);
@@ -799,9 +799,16 @@ fn t13_webdav_mock_e2e_and_two_machine_sync() {
 
     // CRUD + 404 handling.
     assert_eq!(dav.get("does/not/exist.txt").unwrap(), None);
-    dav.put("tmp/dir/hello.txt", b"world", "text/plain").unwrap();
-    assert_eq!(dav.get("tmp/dir/hello.txt").unwrap().as_deref(), Some(b"world".as_slice()));
-    assert_eq!(dav.list("tmp").unwrap(), vec!["tmp/dir/hello.txt".to_string()]);
+    dav.put("tmp/dir/hello.txt", b"world", "text/plain")
+        .unwrap();
+    assert_eq!(
+        dav.get("tmp/dir/hello.txt").unwrap().as_deref(),
+        Some(b"world".as_slice())
+    );
+    assert_eq!(
+        dav.list("tmp").unwrap(),
+        vec!["tmp/dir/hello.txt".to_string()]
+    );
     dav.delete("tmp/dir/hello.txt").unwrap();
     dav.delete("tmp/dir/hello.txt").unwrap();
     assert_eq!(dav.get("tmp/dir/hello.txt").unwrap(), None);
@@ -812,8 +819,14 @@ fn t13_webdav_mock_e2e_and_two_machine_sync() {
         "OPTIONS" => HttpResponseSpec::new(200, "OK", b""),
         _ => HttpResponseSpec::new(404, "Not Found", b""),
     });
-    let fallback_dav =
-        WebDavRemote::new(&fallback_srv.base_url("dav"), None, None, Some("tok"), false).unwrap();
+    let fallback_dav = WebDavRemote::new(
+        &fallback_srv.base_url("dav"),
+        None,
+        None,
+        Some("tok"),
+        false,
+    )
+    .unwrap();
     assert_eq!(fallback_dav.probe().unwrap().backend, "webdav");
 
     // Full two-machine push/pull over WebDAV via build_remote.
@@ -828,13 +841,20 @@ fn t13_webdav_mock_e2e_and_two_machine_sync() {
     // Password leading/trailing whitespace must be preserved consistently across SyncConfig::normalize()
     // and WebDavRemote Basic auth header encoding.
     let spaced_pw = "  dav secret with spaces  ";
-    let expected_auth = format!("Basic {}", base64_encode(format!("alice:{spaced_pw}").as_bytes()));
+    let expected_auth = format!(
+        "Basic {}",
+        base64_encode(format!("alice:{spaced_pw}").as_bytes())
+    );
     let seen_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let seen_auth_srv = Arc::clone(&seen_auth);
     let pw_srv = MockHttpServer::start(move |req| {
         *seen_auth_srv.lock().unwrap() = req.headers.get("authorization").cloned();
         if req.method == "PROPFIND" {
-            return HttpResponseSpec::new(207, "Multi-Status", b"<D:multistatus xmlns:D=\"DAV:\"/>".to_vec());
+            return HttpResponseSpec::new(
+                207,
+                "Multi-Status",
+                b"<D:multistatus xmlns:D=\"DAV:\"/>".to_vec(),
+            );
         }
         HttpResponseSpec::new(404, "Not Found", b"")
     });
@@ -852,7 +872,9 @@ fn t13_webdav_mock_e2e_and_two_machine_sync() {
     };
     spaced_cfg.normalize();
     match &spaced_cfg.remote {
-        RemoteConfig::WebDav { username, password, .. } => {
+        RemoteConfig::WebDav {
+            username, password, ..
+        } => {
             assert_eq!(username.as_deref(), Some("alice"));
             assert_eq!(password.as_deref(), Some(spaced_pw));
         }
@@ -860,7 +882,10 @@ fn t13_webdav_mock_e2e_and_two_machine_sync() {
     }
     let spaced_remote = build_remote(&spaced_cfg).unwrap();
     spaced_remote.probe().unwrap();
-    assert_eq!(seen_auth.lock().unwrap().as_deref(), Some(expected_auth.as_str()));
+    assert_eq!(
+        seen_auth.lock().unwrap().as_deref(),
+        Some(expected_auth.as_str())
+    );
 }
 
 fn uri_encode_path_for_test(key: &str) -> String {
@@ -911,45 +936,48 @@ fn t13_s3_mock_e2e_pagination_and_two_machine_sync() {
             && req.method == "GET"
             && params.get("list-type").map(String::as_str) == Some("2")
         {
-                list_calls_srv.fetch_add(1, Ordering::Relaxed);
-                let prefix = params.get("prefix").map(String::as_str).unwrap_or("");
-                let max_keys = params
-                    .get("max-keys")
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(2);
-                let start_idx = params
-                    .get("continuation-token")
-                    .and_then(|s| s.strip_prefix("tok-"))
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(0);
+            list_calls_srv.fetch_add(1, Ordering::Relaxed);
+            let prefix = params.get("prefix").map(String::as_str).unwrap_or("");
+            let max_keys = params
+                .get("max-keys")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(2);
+            let start_idx = params
+                .get("continuation-token")
+                .and_then(|s| s.strip_prefix("tok-"))
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
 
-                let guard = obj_srv.lock().unwrap();
-                let matching: Vec<String> = guard
-                    .keys()
-                    .filter(|k| prefix.is_empty() || k.starts_with(prefix))
-                    .cloned()
-                    .collect();
+            let guard = obj_srv.lock().unwrap();
+            let matching: Vec<String> = guard
+                .keys()
+                .filter(|k| prefix.is_empty() || k.starts_with(prefix))
+                .cloned()
+                .collect();
 
-                let end_idx = (start_idx + max_keys).min(matching.len());
-                let slice = &matching[start_idx.min(matching.len())..end_idx];
-                let is_truncated = end_idx < matching.len();
+            let end_idx = (start_idx + max_keys).min(matching.len());
+            let slice = &matching[start_idx.min(matching.len())..end_idx];
+            let is_truncated = end_idx < matching.len();
 
-                let mut items_xml = String::new();
-                for k in slice {
-                    items_xml.push_str(&format!("<Contents><Key>{}</Key></Contents>", xml_escape(k)));
-                }
-                let next_tok_xml = if is_truncated {
-                    format!("<NextContinuationToken>tok-{end_idx}</NextContinuationToken>")
-                } else {
-                    String::new()
-                };
-                let xml = format!(
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+            let mut items_xml = String::new();
+            for k in slice {
+                items_xml.push_str(&format!(
+                    "<Contents><Key>{}</Key></Contents>",
+                    xml_escape(k)
+                ));
+            }
+            let next_tok_xml = if is_truncated {
+                format!("<NextContinuationToken>tok-{end_idx}</NextContinuationToken>")
+            } else {
+                String::new()
+            };
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                      <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
                      <IsTruncated>{is_truncated}</IsTruncated>{next_tok_xml}{items_xml}\
                      </ListBucketResult>"
-                );
-                return HttpResponseSpec::new(200, "OK", xml);
+            );
+            return HttpResponseSpec::new(200, "OK", xml);
         }
 
         let Some(key_part) = decoded_path.strip_prefix(&format!("{bucket_prefix}/")) else {
@@ -1131,7 +1159,11 @@ fn t13_cf_worker_mock_e2e_and_two_machine_sync() {
 
     let server = MockHttpServer::start(move |req| {
         if req.headers.get("authorization").map(String::as_str) != Some(expected_auth.as_str()) {
-            return HttpResponseSpec::new(401, "Unauthorized", br#"{"error":"unauthorized"}"#.to_vec());
+            return HttpResponseSpec::new(
+                401,
+                "Unauthorized",
+                br#"{"error":"unauthorized"}"#.to_vec(),
+            );
         }
 
         let (raw_path, params) = split_target(&req.target);
@@ -1182,7 +1214,9 @@ fn t13_cf_worker_mock_e2e_and_two_machine_sync() {
                 Some((bytes, ct)) => {
                     HttpResponseSpec::new(200, "OK", bytes.clone()).with_header("Content-Type", ct)
                 }
-                None => HttpResponseSpec::new(404, "Not Found", br#"{"error":"not_found"}"#.to_vec()),
+                None => {
+                    HttpResponseSpec::new(404, "Not Found", br#"{"error":"not_found"}"#.to_vec())
+                }
             },
             "PUT" => {
                 let ct = req
@@ -1246,7 +1280,11 @@ fn t13_cf_worker_truncated_without_cursor_subpath_and_413_errors() {
 
     let server = MockHttpServer::start(move |req| {
         if req.headers.get("authorization").map(String::as_str) != Some(expected_auth.as_str()) {
-            return HttpResponseSpec::new(401, "Unauthorized", br#"{"error":"unauthorized"}"#.to_vec());
+            return HttpResponseSpec::new(
+                401,
+                "Unauthorized",
+                br#"{"error":"unauthorized"}"#.to_vec(),
+            );
         }
         let (raw_path, params) = split_target(&req.target);
         if req.method == "GET" && raw_path == "/pulse/v1/health" {
@@ -1303,7 +1341,10 @@ fn t13_cf_worker_truncated_without_cursor_subpath_and_413_errors() {
         .put("oversized.bin", b"data", "application/octet-stream")
         .unwrap_err();
     let err_413_msg = format!("{err_413}");
-    assert!(err_413_msg.contains("413"), "unexpected 413 err: {err_413_msg}");
+    assert!(
+        err_413_msg.contains("413"),
+        "unexpected 413 err: {err_413_msg}"
+    );
     assert!(
         err_413_msg.to_ascii_lowercase().contains("too large") || err_413_msg.contains("25 MiB"),
         "413 error should clearly explain payload size limit: {err_413_msg}"
@@ -1318,10 +1359,17 @@ fn t13_cf_worker_truncated_without_cursor_subpath_and_413_errors() {
 #[test]
 fn t13_http_security_boundaries_redirect_and_size_cap() {
     // Non-loopback http:// rejected by default, allowed when allow_insecure_http = true.
-    let err = validate_remote_url("http://user:topsecret@public.example.com/dav", false).unwrap_err();
+    let err =
+        validate_remote_url("http://user:topsecret@public.example.com/dav", false).unwrap_err();
     let err_str = format!("{err}");
-    assert!(!err_str.contains("topsecret"), "error leaked secret: {err_str}");
-    assert!(!err_str.contains("user"), "error leaked username: {err_str}");
+    assert!(
+        !err_str.contains("topsecret"),
+        "error leaked secret: {err_str}"
+    );
+    assert!(
+        !err_str.contains("user"),
+        "error leaked username: {err_str}"
+    );
     assert!(
         validate_remote_url("http://public.example.com/dav", true).is_ok(),
         "explicit allow_insecure_http=true should permit http://"

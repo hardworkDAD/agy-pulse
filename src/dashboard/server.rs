@@ -202,9 +202,7 @@ impl ServerSharedState {
                 guard.last_sync_instant = Some(Instant::now());
             }
             Err(err) => {
-                platform::write_error_log_safely(&format!(
-                    "Dashboard auto-sync error: {err}"
-                ));
+                platform::write_error_log_safely(&format!("Dashboard auto-sync error: {err}"));
             }
         }
     }
@@ -365,7 +363,9 @@ impl DashboardServer {
         if let Some(handle) = self.accept_thread.take() {
             let _ = handle.join();
         }
-        self.shared.collector_shutdown.store(true, Ordering::Release);
+        self.shared
+            .collector_shutdown
+            .store(true, Ordering::Release);
         if let Some(mut collector) = self.collector.take() {
             collector.shutdown();
         }
@@ -374,7 +374,9 @@ impl DashboardServer {
     /// Signal graceful shutdown and wait for the listener thread to exit.
     pub fn shutdown(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
-        self.shared.collector_shutdown.store(true, Ordering::Release);
+        self.shared
+            .collector_shutdown
+            .store(true, Ordering::Release);
         if let Some(handle) = self.accept_thread.take() {
             let _ = handle.join();
         }
@@ -523,10 +525,9 @@ fn serve_sse_keepalive(
     client_id: Option<&str>,
     conn_guard: Option<AtomicSlotGuard>,
 ) {
-    let Some(_sse_slot_guard) = AtomicSlotGuard::try_acquire(
-        &shared.active_sse_connections,
-        shared.max_sse_connections,
-    ) else {
+    let Some(_sse_slot_guard) =
+        AtomicSlotGuard::try_acquire(&shared.active_sse_connections, shared.max_sse_connections)
+    else {
         let _ = stream.set_write_timeout(Some(OVERLOAD_WRITE_TIMEOUT));
         send_error_json(stream, 503, "Service Unavailable: too many SSE connections");
         finish_early_error_response(stream);
@@ -616,7 +617,15 @@ pub(super) fn send_json_value<T: Serialize>(
 }
 
 fn send_error_json(stream: &mut TcpStream, status: u16, msg: &str) {
-    send_json_value(stream, status, &ErrorPayload { ok: false, error: msg }, &[]);
+    send_json_value(
+        stream,
+        status,
+        &ErrorPayload {
+            ok: false,
+            error: msg,
+        },
+        &[],
+    );
 }
 
 fn check_mutating_route_security(
@@ -672,10 +681,7 @@ fn parse_overview_filter(params: &[(String, String)]) -> (LedgerQueryFilter, Str
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned);
 
-    let include_subagents = !matches!(
-        query_param(params, "includeSubagents"),
-        Some("false" | "0")
-    );
+    let include_subagents = !matches!(query_param(params, "includeSubagents"), Some("false" | "0"));
 
     let from = query_param(params, "from")
         .map(str::trim)
@@ -932,7 +938,8 @@ fn handle_sync_remote(
     };
 
     let before_quotas = store.query_latest_account_quotas().unwrap_or_default();
-    let sync_result = build_remote(&cfg).and_then(|remote| sync_both(&store, remote.as_ref(), &cfg, false));
+    let sync_result =
+        build_remote(&cfg).and_then(|remote| sync_both(&store, remote.as_ref(), &cfg, false));
     let cfg_summary = cfg.to_summary();
 
     match sync_result {

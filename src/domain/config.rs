@@ -31,7 +31,11 @@ pub enum QuotaStyle {
 impl<'de> Deserialize<'de> for QuotaStyle {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = Option::<String>::deserialize(deserializer)?;
-        match raw.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        match raw
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
             Some("compact") => Ok(Self::Compact),
             Some("none") => Ok(Self::None),
             _ => Ok(Self::Table),

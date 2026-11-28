@@ -19,8 +19,7 @@ use crate::platform;
 
 use super::LedgerError;
 use super::query::{
-    ConvLineageMeta, LedgerSource, local_date_key, local_today_bounds,
-    resolve_root_conversation_id,
+    ConvLineageMeta, LedgerSource, local_date_key, local_today_bounds, resolve_root_conversation_id,
 };
 use super::schema::{
     BusyRetryPolicy, read_local_device_id, run_with_busy_retry, run_with_busy_retry_policy,
@@ -211,7 +210,10 @@ fn get_db_signature(db_path: &Path) -> Option<(String, i64)> {
     } else {
         db_mtime
     };
-    Some((format!("{db_len}:{db_mtime}:{wal_len}:{wal_mtime}"), max_mtime))
+    Some((
+        format!("{db_len}:{db_mtime}:{wal_len}:{wal_mtime}"),
+        max_mtime,
+    ))
 }
 
 fn resolve_source_roots(options: &LedgerSyncOptions) -> Vec<SourceRoot> {
@@ -363,9 +365,7 @@ fn resolve_step_timestamp(
     bot_timestamps: &std::collections::BTreeMap<String, i64>,
     fallback_ts_ms: i64,
 ) -> (i64, Option<i64>) {
-    let mut resolved_step_index = step_indices
-        .last()
-        .and_then(|&v| i64::try_from(v).ok());
+    let mut resolved_step_index = step_indices.last().and_then(|&v| i64::try_from(v).ok());
 
     for &idx_u64 in step_indices.iter().rev() {
         if let Ok(idx_i64) = i64::try_from(idx_u64)
@@ -453,7 +453,10 @@ fn build_ingestion_records(target: &IngestionTarget<'_>) -> Option<IngestedConve
         if root_conv_id.is_none() && row.root_cascade_id.is_some() {
             root_conv_id = row.root_cascade_id.clone();
         }
-        let step_parent = row.parent_cascade_id.clone().or_else(|| parent_conv_id.clone());
+        let step_parent = row
+            .parent_cascade_id
+            .clone()
+            .or_else(|| parent_conv_id.clone());
         let step_root = row.root_cascade_id.clone().or_else(|| root_conv_id.clone());
 
         for (entry_idx, entry) in row.steps.iter().enumerate() {
@@ -525,7 +528,9 @@ fn build_ingestion_records(target: &IngestionTarget<'_>) -> Option<IngestedConve
     Some(IngestedConversationBatch { db_row, steps })
 }
 
-fn read_last_observed_email_from_conn(conn: &Connection) -> Result<Option<String>, rusqlite::Error> {
+fn read_last_observed_email_from_conn(
+    conn: &Connection,
+) -> Result<Option<String>, rusqlite::Error> {
     let raw = conn
         .query_row(
             "SELECT value FROM ledger_meta WHERE key = 'last_observed_email'",
@@ -1048,7 +1053,8 @@ fn sync_conversation_inner(
             }
             let prev_is_unassigned = normalize_non_unassigned_account(Some(&prev_acct)).is_none();
             let resolved_acct = policy.resolve_fallback_account(source, last_observed.as_deref());
-            let needs_account_upgrade = prev_is_unassigned && resolved_acct != UNASSIGNED_ACCOUNT_ID;
+            let needs_account_upgrade =
+                prev_is_unassigned && resolved_acct != UNASSIGNED_ACCOUNT_ID;
             if !options.force && !needs_account_upgrade {
                 if prev_sig == sig && prev_src == source {
                     continue;
@@ -1062,8 +1068,16 @@ fn sync_conversation_inner(
             }
         }
 
-        let fb_parent = if is_child { Some(conversation_id) } else { None };
-        let fb_root = if is_child { Some(conversation_id) } else { None };
+        let fb_parent = if is_child {
+            Some(conversation_id)
+        } else {
+            None
+        };
+        let fb_root = if is_child {
+            Some(conversation_id)
+        } else {
+            None
+        };
         if let Some(batch) = build_ingestion_records(&IngestionTarget {
             conversation_id: cid,
             db_path: &db_path,
@@ -1189,9 +1203,18 @@ fn compute_db_cost_by_root(
             let cid: String = row.get(0)?;
             let parent_cid = row.get::<_, Option<String>>(1)?.filter(|s| !s.is_empty());
             let root_cid = row.get::<_, Option<String>>(2)?.filter(|s| !s.is_empty());
-            let total_usd = row.get::<_, Option<f64>>(3)?.filter(|v| is_valid_amount(*v)).unwrap_or(0.0);
-            let today_usd = row.get::<_, Option<f64>>(4)?.filter(|v| is_valid_amount(*v)).unwrap_or(0.0);
-            let week_usd = row.get::<_, Option<f64>>(5)?.filter(|v| is_valid_amount(*v)).unwrap_or(0.0);
+            let total_usd = row
+                .get::<_, Option<f64>>(3)?
+                .filter(|v| is_valid_amount(*v))
+                .unwrap_or(0.0);
+            let today_usd = row
+                .get::<_, Option<f64>>(4)?
+                .filter(|v| is_valid_amount(*v))
+                .unwrap_or(0.0);
+            let week_usd = row
+                .get::<_, Option<f64>>(5)?
+                .filter(|v| is_valid_amount(*v))
+                .unwrap_or(0.0);
 
             conv_meta
                 .entry(cid.clone())
@@ -1247,323 +1270,325 @@ pub(super) fn record_rolling_costs(
         None => now_ms - SEVEN_DAY_WINDOW_MS,
     };
 
-    run_with_busy_retry_policy(retry_policy, || -> Result<Option<RollingCostTotals>, rusqlite::Error> {
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    run_with_busy_retry_policy(
+        retry_policy,
+        || -> Result<Option<RollingCostTotals>, rusqlite::Error> {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        // Aggregate ledger totals inside the Immediate transaction so DB reads and cursor anchor
-        // updates observe a single atomic snapshot under concurrent sync writers.
-        let local_device_id = read_local_device_id(&tx)?;
-        let db_by_root = compute_db_cost_by_root(
-            &tx,
-            &local_device_id,
-            today_start_ms,
-            today_end_ms,
-            db_week_from_ms,
-            now_ms,
-        )?;
+            // Aggregate ledger totals inside the Immediate transaction so DB reads and cursor anchor
+            // updates observe a single atomic snapshot under concurrent sync writers.
+            let local_device_id = read_local_device_id(&tx)?;
+            let db_by_root = compute_db_cost_by_root(
+                &tx,
+                &local_device_id,
+                today_start_ms,
+                today_end_ms,
+                db_week_from_ms,
+                now_ms,
+            )?;
 
-        let read_meta = |key: &str| -> Result<Option<String>, rusqlite::Error> {
-            tx.query_row(
-                "SELECT value FROM ledger_meta WHERE key = ?1",
-                params![key],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-        };
+            let read_meta = |key: &str| -> Result<Option<String>, rusqlite::Error> {
+                tx.query_row(
+                    "SELECT value FROM ledger_meta WHERE key = ?1",
+                    params![key],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+            };
 
-        let mut stored_date = read_meta("rolling_date")?.unwrap_or_else(|| today_key.clone());
-        let mut week_start_ms = read_meta("rolling_week_start_ms")?
-            .and_then(|s| s.parse::<i64>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(now_ms);
-        let mut week_carry = read_meta("rolling_week_carry_usd")?
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|&v| is_valid_amount(v))
-            .unwrap_or(0.0);
+            let mut stored_date = read_meta("rolling_date")?.unwrap_or_else(|| today_key.clone());
+            let mut week_start_ms = read_meta("rolling_week_start_ms")?
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(now_ms);
+            let mut week_carry = read_meta("rolling_week_carry_usd")?
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|&v| is_valid_amount(v))
+                .unwrap_or(0.0);
 
-        let mut cursors: HashMap<String, CursorRow> = HashMap::new();
-        {
-            let mut stmt = tx.prepare(
-                "SELECT cursor_id, cascade_root_id, baseline, week_baseline, week_start_ms,
+            let mut cursors: HashMap<String, CursorRow> = HashMap::new();
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT cursor_id, cascade_root_id, baseline, week_baseline, week_start_ms,
                         total, last_observed_cost, ts_ms, db_total_anchor, db_week_total_anchor
                  FROM rolling_cost_cursors",
-            )?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let cursor_id: String = row.get(0)?;
-                let cascade_root_id: Option<String> = row.get(1)?;
-                let baseline: f64 = row.get(2)?;
-                let week_baseline: f64 = row.get(3)?;
-                let c_week_start: i64 = row.get(4)?;
-                let total: f64 = row.get(5)?;
-                let last_observed_cost: f64 = row.get(6)?;
-                let ts_ms: i64 = row.get(7)?;
-                let db_total_anchor: f64 = row.get(8)?;
-                let db_week_total_anchor: f64 = row.get(9)?;
-                if !is_valid_amount(baseline)
-                    || !is_valid_amount(total)
-                    || ts_ms <= 0
-                {
-                    continue;
+                )?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let cursor_id: String = row.get(0)?;
+                    let cascade_root_id: Option<String> = row.get(1)?;
+                    let baseline: f64 = row.get(2)?;
+                    let week_baseline: f64 = row.get(3)?;
+                    let c_week_start: i64 = row.get(4)?;
+                    let total: f64 = row.get(5)?;
+                    let last_observed_cost: f64 = row.get(6)?;
+                    let ts_ms: i64 = row.get(7)?;
+                    let db_total_anchor: f64 = row.get(8)?;
+                    let db_week_total_anchor: f64 = row.get(9)?;
+                    if !is_valid_amount(baseline) || !is_valid_amount(total) || ts_ms <= 0 {
+                        continue;
+                    }
+                    cursors.insert(
+                        cursor_id.clone(),
+                        CursorRow {
+                            cursor_id,
+                            cascade_root_id,
+                            baseline,
+                            week_baseline: if is_valid_amount(week_baseline) {
+                                week_baseline
+                            } else {
+                                baseline
+                            },
+                            week_start_ms: if c_week_start > 0 {
+                                c_week_start
+                            } else {
+                                week_start_ms
+                            },
+                            total,
+                            last_observed_cost: if is_valid_amount(last_observed_cost) {
+                                last_observed_cost
+                            } else {
+                                total
+                            },
+                            ts_ms,
+                            db_total_anchor: if is_valid_amount(db_total_anchor) {
+                                db_total_anchor
+                            } else {
+                                0.0
+                            },
+                            db_week_total_anchor: if is_valid_amount(db_week_total_anchor) {
+                                db_week_total_anchor
+                            } else {
+                                0.0
+                            },
+                        },
+                    );
                 }
-                cursors.insert(
-                    cursor_id.clone(),
-                    CursorRow {
-                        cursor_id,
-                        cascade_root_id,
-                        baseline,
-                        week_baseline: if is_valid_amount(week_baseline) {
-                            week_baseline
-                        } else {
-                            baseline
-                        },
-                        week_start_ms: if c_week_start > 0 {
-                            c_week_start
-                        } else {
-                            week_start_ms
-                        },
-                        total,
-                        last_observed_cost: if is_valid_amount(last_observed_cost) {
-                            last_observed_cost
-                        } else {
-                            total
-                        },
-                        ts_ms,
-                        db_total_anchor: if is_valid_amount(db_total_anchor) {
-                            db_total_anchor
-                        } else {
-                            0.0
-                        },
-                        db_week_total_anchor: if is_valid_amount(db_week_total_anchor) {
-                            db_week_total_anchor
-                        } else {
-                            0.0
-                        },
-                    },
-                );
             }
-        }
 
-        // 1. Evict cursors unseen for > 24h, carrying any unpersisted weekly increment into week_carry.
-        let quota_window_start = input
-            .seven_day_reset_at_ms
-            .map(|reset| reset - SEVEN_DAY_WINDOW_MS);
-        let should_reset_week = match quota_window_start {
-            Some(ws) => {
-                ws > week_start_ms + WEEK_START_JITTER_MS && ws <= now_ms + WEEK_START_JITTER_MS
+            // 1. Evict cursors unseen for > 24h, carrying any unpersisted weekly increment into week_carry.
+            let quota_window_start = input
+                .seven_day_reset_at_ms
+                .map(|reset| reset - SEVEN_DAY_WINDOW_MS);
+            let should_reset_week = match quota_window_start {
+                Some(ws) => {
+                    ws > week_start_ms + WEEK_START_JITTER_MS && ws <= now_ms + WEEK_START_JITTER_MS
+                }
+                None => now_ms - week_start_ms >= SEVEN_DAY_WINDOW_MS,
+            };
+            let new_week_start_ms = if should_reset_week {
+                quota_window_start
+                    .map(|ws| ws.min(now_ms))
+                    .unwrap_or(now_ms)
+            } else {
+                week_start_ms
+            };
+            if should_reset_week {
+                week_carry = 0.0;
             }
-            None => now_ms - week_start_ms >= SEVEN_DAY_WINDOW_MS,
-        };
-        let new_week_start_ms = if should_reset_week {
-            quota_window_start
-                .map(|ws| ws.min(now_ms))
-                .unwrap_or(now_ms)
-        } else {
-            week_start_ms
-        };
-        if should_reset_week {
-            week_carry = 0.0;
-        }
 
-        let mut stale_ids = Vec::new();
-        for (cid, cur) in &cursors {
-            if now_ms - cur.ts_ms > ROLLING_CURSOR_MAX_AGE_MS {
-                if !should_reset_week || cur.ts_ms >= new_week_start_ms {
+            let mut stale_ids = Vec::new();
+            for (cid, cur) in &cursors {
+                if now_ms - cur.ts_ms > ROLLING_CURSOR_MAX_AGE_MS {
+                    if !should_reset_week || cur.ts_ms >= new_week_start_ms {
+                        let db_total_now = cur
+                            .cascade_root_id
+                            .as_deref()
+                            .and_then(|rid| db_by_root.get(rid))
+                            .map(|s| s.total_usd)
+                            .unwrap_or(0.0);
+                        let cursor_week = (cur.total - cur.week_baseline).max(0.0);
+                        let db_week_delta = (db_total_now - cur.db_week_total_anchor).max(0.0);
+                        let extra_week = (cursor_week - db_week_delta).max(0.0);
+                        week_carry += extra_week;
+                    }
+                    stale_ids.push(cid.clone());
+                }
+            }
+            for cid in stale_ids {
+                cursors.remove(&cid);
+            }
+
+            // 2. Midnight day rollover -> carry active cursors over only when date genuinely advances.
+            //    If system clock regresses (today_key < stored_date), keep current stored_date & baselines.
+            let stored_date_valid =
+                stored_date.len() == 8 && stored_date.bytes().all(|b| b.is_ascii_digit());
+            if !stored_date_valid || today_key > stored_date {
+                stored_date = today_key.clone();
+                for cur in cursors.values_mut() {
                     let db_total_now = cur
                         .cascade_root_id
                         .as_deref()
                         .and_then(|rid| db_by_root.get(rid))
                         .map(|s| s.total_usd)
                         .unwrap_or(0.0);
-                    let cursor_week = (cur.total - cur.week_baseline).max(0.0);
-                    let db_week_delta = (db_total_now - cur.db_week_total_anchor).max(0.0);
-                    let extra_week = (cursor_week - db_week_delta).max(0.0);
-                    week_carry += extra_week;
+                    cur.baseline = cur.total;
+                    cur.db_total_anchor = db_total_now;
                 }
-                stale_ids.push(cid.clone());
             }
-        }
-        for cid in stale_ids {
-            cursors.remove(&cid);
-        }
 
-        // 2. Midnight day rollover -> carry active cursors over only when date genuinely advances.
-        //    If system clock regresses (today_key < stored_date), keep current stored_date & baselines.
-        let stored_date_valid =
-            stored_date.len() == 8 && stored_date.bytes().all(|b| b.is_ascii_digit());
-        if !stored_date_valid || today_key > stored_date {
-            stored_date = today_key.clone();
-            for cur in cursors.values_mut() {
-                let db_total_now = cur
-                    .cascade_root_id
-                    .as_deref()
-                    .and_then(|rid| db_by_root.get(rid))
-                    .map(|s| s.total_usd)
-                    .unwrap_or(0.0);
-                cur.baseline = cur.total;
-                cur.db_total_anchor = db_total_now;
-            }
-        }
-
-        // 3. Weekly rolling / quota window rollover.
-        if should_reset_week {
-            let new_week_date_key = local_date_key(new_week_start_ms);
-            week_start_ms = new_week_start_ms;
-            for cur in cursors.values_mut() {
-                let db_total_now = cur
-                    .cascade_root_id
-                    .as_deref()
-                    .and_then(|rid| db_by_root.get(rid))
-                    .map(|s| s.total_usd)
-                    .unwrap_or(0.0);
-                let preserved_unpersisted = if cur.ts_ms >= new_week_start_ms {
-                    let cursor_delta_week = (cur.total - cur.week_baseline).max(0.0);
-                    let db_delta_week = (db_total_now - cur.db_week_total_anchor).max(0.0);
-                    let unpersisted_week = (cursor_delta_week - db_delta_week).max(0.0);
-                    if new_week_date_key == stored_date {
-                        let cursor_delta_today = (cur.total - cur.baseline).max(0.0);
-                        let db_delta_today = (db_total_now - cur.db_total_anchor).max(0.0);
-                        let unpersisted_today = (cursor_delta_today - db_delta_today).max(0.0);
-                        unpersisted_week.min(unpersisted_today)
+            // 3. Weekly rolling / quota window rollover.
+            if should_reset_week {
+                let new_week_date_key = local_date_key(new_week_start_ms);
+                week_start_ms = new_week_start_ms;
+                for cur in cursors.values_mut() {
+                    let db_total_now = cur
+                        .cascade_root_id
+                        .as_deref()
+                        .and_then(|rid| db_by_root.get(rid))
+                        .map(|s| s.total_usd)
+                        .unwrap_or(0.0);
+                    let preserved_unpersisted = if cur.ts_ms >= new_week_start_ms {
+                        let cursor_delta_week = (cur.total - cur.week_baseline).max(0.0);
+                        let db_delta_week = (db_total_now - cur.db_week_total_anchor).max(0.0);
+                        let unpersisted_week = (cursor_delta_week - db_delta_week).max(0.0);
+                        if new_week_date_key == stored_date {
+                            let cursor_delta_today = (cur.total - cur.baseline).max(0.0);
+                            let db_delta_today = (db_total_now - cur.db_total_anchor).max(0.0);
+                            let unpersisted_today = (cursor_delta_today - db_delta_today).max(0.0);
+                            unpersisted_week.min(unpersisted_today)
+                        } else {
+                            unpersisted_week
+                        }
                     } else {
-                        unpersisted_week
+                        0.0
+                    };
+                    cur.week_baseline = (cur.total - preserved_unpersisted).max(0.0);
+                    cur.week_start_ms = new_week_start_ms;
+                    cur.db_week_total_anchor = db_total_now;
+                }
+            }
+
+            // 4. Observe current live conversation cost (with >50% compaction drop anti-regression).
+            let cursor_id = input.cursor_id.trim();
+            let cascade_root = input
+                .cascade_root_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or((!cursor_id.is_empty()).then_some(cursor_id));
+
+            if !cursor_id.is_empty()
+                && let Some(cost) = input.live_cost_usd.filter(|&c| is_valid_amount(c))
+            {
+                let db_total_now = cascade_root
+                    .and_then(|rid| db_by_root.get(rid))
+                    .map(|s| s.total_usd)
+                    .unwrap_or(0.0);
+
+                if let Some(cur) = cursors.get_mut(cursor_id) {
+                    if cur.cascade_root_id.is_none() && cascade_root.is_some() {
+                        cur.cascade_root_id = cascade_root.map(ToOwned::to_owned);
                     }
+                    if cost > cur.last_observed_cost {
+                        cur.total += cost - cur.last_observed_cost;
+                        cur.last_observed_cost = cost;
+                    } else if cost < cur.last_observed_cost * 0.5 {
+                        // Significant compaction or counter reset (>50% drop): advance cursor
+                        // without subtracting previously accrued spend.
+                        cur.last_observed_cost = cost;
+                    }
+                    cur.ts_ms = now_ms;
                 } else {
-                    0.0
-                };
-                cur.week_baseline = (cur.total - preserved_unpersisted).max(0.0);
-                cur.week_start_ms = new_week_start_ms;
-                cur.db_week_total_anchor = db_total_now;
-            }
-        }
-
-        // 4. Observe current live conversation cost (with >50% compaction drop anti-regression).
-        let cursor_id = input.cursor_id.trim();
-        let cascade_root = input
-            .cascade_root_id
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .or((!cursor_id.is_empty()).then_some(cursor_id));
-
-        if !cursor_id.is_empty()
-            && let Some(cost) = input.live_cost_usd.filter(|&c| is_valid_amount(c))
-        {
-            let db_total_now = cascade_root
-                .and_then(|rid| db_by_root.get(rid))
-                .map(|s| s.total_usd)
-                .unwrap_or(0.0);
-
-            if let Some(cur) = cursors.get_mut(cursor_id) {
-                if cur.cascade_root_id.is_none() && cascade_root.is_some() {
-                    cur.cascade_root_id = cascade_root.map(ToOwned::to_owned);
+                    cursors.insert(
+                        cursor_id.to_string(),
+                        CursorRow {
+                            cursor_id: cursor_id.to_string(),
+                            cascade_root_id: cascade_root.map(ToOwned::to_owned),
+                            baseline: cost,
+                            week_baseline: cost,
+                            week_start_ms,
+                            total: cost,
+                            last_observed_cost: cost,
+                            ts_ms: now_ms,
+                            db_total_anchor: db_total_now,
+                            db_week_total_anchor: db_total_now,
+                        },
+                    );
                 }
-                if cost > cur.last_observed_cost {
-                    cur.total += cost - cur.last_observed_cost;
-                    cur.last_observed_cost = cost;
-                } else if cost < cur.last_observed_cost * 0.5 {
-                    // Significant compaction or counter reset (>50% drop): advance cursor
-                    // without subtracting previously accrued spend.
-                    cur.last_observed_cost = cost;
-                }
-                cur.ts_ms = now_ms;
-            } else {
-                cursors.insert(
-                    cursor_id.to_string(),
-                    CursorRow {
-                        cursor_id: cursor_id.to_string(),
-                        cascade_root_id: cascade_root.map(ToOwned::to_owned),
-                        baseline: cost,
-                        week_baseline: cost,
-                        week_start_ms,
-                        total: cost,
-                        last_observed_cost: cost,
-                        ts_ms: now_ms,
-                        db_total_anchor: db_total_now,
-                        db_week_total_anchor: db_total_now,
-                    },
-                );
             }
-        }
 
-        // Persist updated rolling state cleanly inside the transaction.
-        tx.execute(
-            "INSERT OR REPLACE INTO ledger_meta (key, value) VALUES ('rolling_date', ?1)",
-            params![stored_date],
-        )?;
-        tx.execute(
+            // Persist updated rolling state cleanly inside the transaction.
+            tx.execute(
+                "INSERT OR REPLACE INTO ledger_meta (key, value) VALUES ('rolling_date', ?1)",
+                params![stored_date],
+            )?;
+            tx.execute(
             "INSERT OR REPLACE INTO ledger_meta (key, value) VALUES ('rolling_week_start_ms', ?1)",
             params![week_start_ms.to_string()],
         )?;
-        tx.execute(
+            tx.execute(
             "INSERT OR REPLACE INTO ledger_meta (key, value) VALUES ('rolling_week_carry_usd', ?1)",
             params![format!("{week_carry:.12}")],
         )?;
-        tx.execute("DELETE FROM rolling_cost_cursors", [])?;
-        {
-            let mut ins = tx.prepare(
-                "INSERT INTO rolling_cost_cursors (
+            tx.execute("DELETE FROM rolling_cost_cursors", [])?;
+            {
+                let mut ins = tx.prepare(
+                    "INSERT INTO rolling_cost_cursors (
                    cursor_id, cascade_root_id, baseline, week_baseline, week_start_ms,
                    total, last_observed_cost, ts_ms, db_total_anchor, db_week_total_anchor
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            )?;
+                )?;
+                for cur in cursors.values() {
+                    ins.execute(params![
+                        cur.cursor_id,
+                        cur.cascade_root_id,
+                        cur.baseline,
+                        cur.week_baseline,
+                        cur.week_start_ms,
+                        cur.total,
+                        cur.last_observed_cost,
+                        cur.ts_ms,
+                        cur.db_total_anchor,
+                        cur.db_week_total_anchor,
+                    ])?;
+                }
+            }
+            tx.commit()?;
+
+            if cursors.is_empty() && week_carry == 0.0 && db_by_root.is_empty() {
+                return Ok(None);
+            }
+
+            let mut today_usd = 0.0f64;
+            let mut week_usd = week_carry;
+            let mut matched_roots: HashSet<&str> = HashSet::new();
+
             for cur in cursors.values() {
-                ins.execute(params![
-                    cur.cursor_id,
-                    cur.cascade_root_id,
-                    cur.baseline,
-                    cur.week_baseline,
-                    cur.week_start_ms,
-                    cur.total,
-                    cur.last_observed_cost,
-                    cur.ts_ms,
-                    cur.db_total_anchor,
-                    cur.db_week_total_anchor,
-                ])?;
+                let matched_root = cur
+                    .cascade_root_id
+                    .as_deref()
+                    .filter(|rid| db_by_root.contains_key(*rid));
+                let db_stats = matched_root
+                    .and_then(|rid| {
+                        matched_roots.insert(rid);
+                        db_by_root.get(rid).copied()
+                    })
+                    .unwrap_or_default();
+
+                let cursor_delta_today = (cur.total - cur.baseline).max(0.0);
+                let db_delta_today = (db_stats.total_usd - cur.db_total_anchor).max(0.0);
+                let unpersisted_today = (cursor_delta_today - db_delta_today).max(0.0);
+                today_usd += db_stats.today_usd + unpersisted_today;
+
+                let cursor_delta_week = (cur.total - cur.week_baseline).max(0.0);
+                let db_delta_week = (db_stats.total_usd - cur.db_week_total_anchor).max(0.0);
+                let unpersisted_week = (cursor_delta_week - db_delta_week).max(0.0);
+                week_usd += db_stats.week_usd + unpersisted_week;
             }
-        }
-        tx.commit()?;
 
-        if cursors.is_empty() && week_carry == 0.0 && db_by_root.is_empty() {
-            return Ok(None);
-        }
-
-        let mut today_usd = 0.0f64;
-        let mut week_usd = week_carry;
-        let mut matched_roots: HashSet<&str> = HashSet::new();
-
-        for cur in cursors.values() {
-            let matched_root = cur
-                .cascade_root_id
-                .as_deref()
-                .filter(|rid| db_by_root.contains_key(*rid));
-            let db_stats = matched_root.and_then(|rid| {
-                matched_roots.insert(rid);
-                db_by_root.get(rid).copied()
-            }).unwrap_or_default();
-
-            let cursor_delta_today = (cur.total - cur.baseline).max(0.0);
-            let db_delta_today = (db_stats.total_usd - cur.db_total_anchor).max(0.0);
-            let unpersisted_today = (cursor_delta_today - db_delta_today).max(0.0);
-            today_usd += db_stats.today_usd + unpersisted_today;
-
-            let cursor_delta_week = (cur.total - cur.week_baseline).max(0.0);
-            let db_delta_week = (db_stats.total_usd - cur.db_week_total_anchor).max(0.0);
-            let unpersisted_week = (cursor_delta_week - db_delta_week).max(0.0);
-            week_usd += db_stats.week_usd + unpersisted_week;
-        }
-
-        for (root_id, stats) in &db_by_root {
-            if !matched_roots.contains(root_id.as_str()) {
-                today_usd += stats.today_usd;
-                week_usd += stats.week_usd;
+            for (root_id, stats) in &db_by_root {
+                if !matched_roots.contains(root_id.as_str()) {
+                    today_usd += stats.today_usd;
+                    week_usd += stats.week_usd;
+                }
             }
-        }
 
-        Ok(Some(RollingCostTotals {
-            today_usd,
-            week_usd,
-        }))
-    })
+            Ok(Some(RollingCostTotals {
+                today_usd,
+                week_usd,
+            }))
+        },
+    )
     .map_err(LedgerError::from)
 }
 
@@ -2184,17 +2209,19 @@ pub(super) fn import_remote_chunk(
         )));
     }
 
-    let steps_opt = run_with_busy_retry_policy(retry_policy, || -> Result<Option<usize>, rusqlite::Error> {
-        let tx = ImmediateTxGuard::begin(conn)?;
-        let tx_local_device_id = read_local_device_id(conn)?;
-        if trimmed_device == tx_local_device_id {
-            return Ok(None);
-        }
+    let steps_opt = run_with_busy_retry_policy(
+        retry_policy,
+        || -> Result<Option<usize>, rusqlite::Error> {
+            let tx = ImmediateTxGuard::begin(conn)?;
+            let tx_local_device_id = read_local_device_id(conn)?;
+            if trimmed_device == tx_local_device_id {
+                return Ok(None);
+            }
 
-        let mut steps_imported = 0usize;
-        {
-            let mut db_stmt = conn.prepare(
-                "INSERT INTO ingested_dbs (
+            let mut steps_imported = 0usize;
+            {
+                let mut db_stmt = conn.prepare(
+                    "INSERT INTO ingested_dbs (
                    conversation_id, db_path, sig, last_synced_ms,
                    workspace, branch, created_at_ms, cascade_id,
                    parent_conversation_id, root_conversation_id, db_mtime_ms, source,
@@ -2214,26 +2241,26 @@ pub(super) fn import_remote_chunk(
                    source = excluded.source,
                    account_id = excluded.account_id
                  WHERE ingested_dbs.device_id = excluded.device_id",
-            )?;
+                )?;
 
-            for conv in convs {
-                let db_mtime_ms = conv.created_at_ms.unwrap_or(now_ms);
-                let source = LedgerSource::from_raw(&conv.source).as_str();
-                db_stmt.execute(params![
-                    &conv.conversation_id,
-                    now_ms,
-                    conv.created_at_ms,
-                    &conv.cascade_id,
-                    &conv.parent_conversation_id,
-                    &conv.root_conversation_id,
-                    db_mtime_ms,
-                    source,
-                    &normalized_account,
-                    trimmed_device,
-                ])?;
-            }
+                for conv in convs {
+                    let db_mtime_ms = conv.created_at_ms.unwrap_or(now_ms);
+                    let source = LedgerSource::from_raw(&conv.source).as_str();
+                    db_stmt.execute(params![
+                        &conv.conversation_id,
+                        now_ms,
+                        conv.created_at_ms,
+                        &conv.cascade_id,
+                        &conv.parent_conversation_id,
+                        &conv.root_conversation_id,
+                        db_mtime_ms,
+                        source,
+                        &normalized_account,
+                        trimmed_device,
+                    ])?;
+                }
 
-            let mut step_stmt = conn.prepare(
+                let mut step_stmt = conn.prepare(
                 "INSERT INTO telemetry_steps (
                    step_uid, conversation_id, gen_idx, entry_idx, step_index, ts_ms,
                    model, raw_model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
@@ -2291,54 +2318,55 @@ pub(super) fn import_remote_chunk(
                    )",
             )?;
 
-            for step in steps {
-                let source = LedgerSource::from_raw(&step.source).as_str();
-                let changed = step_stmt.execute(params![
-                    &step.step_uid,
-                    &step.conversation_id,
-                    step.gen_idx,
-                    step.entry_idx,
-                    step.step_index,
-                    step.ts_ms,
-                    &step.model,
-                    &step.raw_model,
-                    step.input_tokens,
-                    step.cache_read_tokens,
-                    step.cache_write_tokens,
-                    step.output_tokens,
-                    step.cost_usd,
-                    step.stream_sec,
-                    step.ttft_sec,
-                    step.valid_stream,
-                    step.valid_ttft,
-                    &step.parent_conversation_id,
-                    &step.root_conversation_id,
-                    source,
-                    &normalized_account,
-                    trimmed_device,
-                ])?;
-                if changed > 0 {
-                    steps_imported += 1;
+                for step in steps {
+                    let source = LedgerSource::from_raw(&step.source).as_str();
+                    let changed = step_stmt.execute(params![
+                        &step.step_uid,
+                        &step.conversation_id,
+                        step.gen_idx,
+                        step.entry_idx,
+                        step.step_index,
+                        step.ts_ms,
+                        &step.model,
+                        &step.raw_model,
+                        step.input_tokens,
+                        step.cache_read_tokens,
+                        step.cache_write_tokens,
+                        step.output_tokens,
+                        step.cost_usd,
+                        step.stream_sec,
+                        step.ttft_sec,
+                        step.valid_stream,
+                        step.valid_ttft,
+                        &step.parent_conversation_id,
+                        &step.root_conversation_id,
+                        source,
+                        &normalized_account,
+                        trimmed_device,
+                    ])?;
+                    if changed > 0 {
+                        steps_imported += 1;
+                    }
                 }
             }
-        }
 
-        conn.execute(
-            "INSERT OR REPLACE INTO sync_chunk_state (
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_chunk_state (
                account_id, device_id, month_key, direction, content_sha256, updated_at_ms
              ) VALUES (?1, ?2, ?3, 'pull', ?4, ?5)",
-            params![
-                &normalized_account,
-                trimmed_device,
-                month_key,
-                sha256,
-                now_ms
-            ],
-        )?;
+                params![
+                    &normalized_account,
+                    trimmed_device,
+                    month_key,
+                    sha256,
+                    now_ms
+                ],
+            )?;
 
-        tx.commit()?;
-        Ok(Some(steps_imported))
-    })?;
+            tx.commit()?;
+            Ok(Some(steps_imported))
+        },
+    )?;
 
     steps_opt.ok_or_else(|| {
         LedgerError::InvalidSyncOperation(format!(
@@ -2498,8 +2526,8 @@ pub(super) fn has_pending_local_sync_changes(
         return Ok(true);
     };
 
-    let (max_synced, max_quota, max_seen): (Option<i64>, Option<i64>, Option<i64>) =
-        conn.query_row(
+    let (max_synced, max_quota, max_seen): (Option<i64>, Option<i64>, Option<i64>) = conn
+        .query_row(
             "SELECT
                (SELECT MAX(last_synced_ms) FROM ingested_dbs WHERE device_id = ?1),
                (SELECT MAX(observed_at_ms) FROM quota_snapshots WHERE device_id = ?1),
@@ -2508,6 +2536,9 @@ pub(super) fn has_pending_local_sync_changes(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
 
-    let latest = [max_synced, max_quota, max_seen].into_iter().flatten().max();
+    let latest = [max_synced, max_quota, max_seen]
+        .into_iter()
+        .flatten()
+        .max();
     Ok(latest.is_some_and(|ts| ts > prev_push_ms))
 }

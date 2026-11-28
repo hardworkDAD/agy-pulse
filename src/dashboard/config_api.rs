@@ -448,11 +448,7 @@ fn handle_get_pulse_config(stream: &mut TcpStream, shared: &ServerSharedState) {
     send_json_value(stream, 200, &payload, &[]);
 }
 
-fn handle_put_pulse_config(
-    stream: &mut TcpStream,
-    req: &HttpRequest,
-    shared: &ServerSharedState,
-) {
+fn handle_put_pulse_config(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSharedState) {
     let body: PutPulseConfigRequest = match serde_json::from_slice(&req.body) {
         Ok(parsed) => parsed,
         Err(err) => {
@@ -558,10 +554,7 @@ fn handle_post_pulse_preview(stream: &mut TcpStream, req: &HttpRequest) {
         return;
     }
 
-    let cols = body
-        .terminal_cols
-        .map(|c| c.clamp(20, 1000))
-        .unwrap_or(100);
+    let cols = body.terminal_cols.map(|c| c.clamp(20, 1000)).unwrap_or(100);
     let unicode_fallback = platform::detect_unicode_support();
     let locale = platform::read_locale_env();
     let ansi = config::render_statusline_preview(
@@ -1030,7 +1023,10 @@ fn merge_remote_write(
                     "remote.url must not contain control characters".to_string(),
                 ));
             }
-            if username.as_deref().is_some_and(|u| u.chars().any(char::is_control)) {
+            if username
+                .as_deref()
+                .is_some_and(|u| u.chars().any(char::is_control))
+            {
                 return Err((
                     "remote.username".to_string(),
                     "remote.username must not contain control characters".to_string(),
@@ -1093,16 +1089,10 @@ fn merge_remote_write(
                 }) => (access_key.as_deref(), secret_key.as_deref()),
                 _ => (None, None),
             };
-            let access_key = resolve_secret_mutation(
-                &secrets.access_key,
-                prev_ak,
-                "remote.secrets.accessKey",
-            )?;
-            let secret_key = resolve_secret_mutation(
-                &secrets.secret_key,
-                prev_sk,
-                "remote.secrets.secretKey",
-            )?;
+            let access_key =
+                resolve_secret_mutation(&secrets.access_key, prev_ak, "remote.secrets.accessKey")?;
+            let secret_key =
+                resolve_secret_mutation(&secrets.secret_key, prev_sk, "remote.secrets.secretKey")?;
             let trimmed_region = region.trim();
             Ok(RemoteConfig::S3 {
                 endpoint: endpoint.trim().to_string(),
@@ -1397,11 +1387,7 @@ fn handle_get_sync_config(stream: &mut TcpStream, shared: &ServerSharedState) {
     );
 }
 
-fn handle_put_sync_config(
-    stream: &mut TcpStream,
-    req: &HttpRequest,
-    shared: &ServerSharedState,
-) {
+fn handle_put_sync_config(stream: &mut TcpStream, req: &HttpRequest, shared: &ServerSharedState) {
     let body: PutSyncConfigRequest = match serde_json::from_slice(&req.body) {
         Ok(parsed) => parsed,
         Err(err) => {

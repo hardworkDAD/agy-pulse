@@ -88,16 +88,10 @@ fn extrapolate_cumulative_input_tokens(
 
 /// Compute single authoritative cascade cost from native cost or token fallback.
 pub fn resolve_cascade_cost_usd(snapshot: &PulseSnapshot, allow_routed_cost: bool) -> Option<f64> {
-    let model_id = snapshot
-        .model
-        .as_ref()
-        .map(|m| m.id.as_str())
-        .unwrap_or("");
-    if let Some(native) = resolve_native_cost_usd(
-        snapshot.cost.native_total_usd,
-        model_id,
-        allow_routed_cost,
-    ) {
+    let model_id = snapshot.model.as_ref().map(|m| m.id.as_str()).unwrap_or("");
+    if let Some(native) =
+        resolve_native_cost_usd(snapshot.cost.native_total_usd, model_id, allow_routed_cost)
+    {
         if let Some(children) = snapshot.cost.children_cost_usd
             && children.is_finite()
             && children > 0.0

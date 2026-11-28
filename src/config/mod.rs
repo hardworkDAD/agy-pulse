@@ -8,8 +8,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use unicode_width::UnicodeWidthStr;
@@ -24,9 +24,8 @@ use crate::platform;
 pub const ABSENT_CONFIG_VERSION: &str = "absent";
 
 /// Canonical ANSI color names allowed for statusline theme customization.
-pub const ALLOWED_THEME_COLORS: &[&str] = &[
-    "green", "gray", "blue", "magenta", "yellow", "cyan", "red",
-];
+pub const ALLOWED_THEME_COLORS: &[&str] =
+    &["green", "gray", "blue", "magenta", "yellow", "cyan", "red"];
 
 /// Built-in statusline theme preset definition shared by wizard and dashboard config API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -178,7 +177,13 @@ fn deserialize_theme_tolerant(
         Value::Object(map) => {
             let def = ThemeColors::default();
             ThemeConfig::Colors(ThemeColors {
-                primary: parse_field_or_default(map, "primary", def.primary, "theme.primary", warnings),
+                primary: parse_field_or_default(
+                    map,
+                    "primary",
+                    def.primary,
+                    "theme.primary",
+                    warnings,
+                ),
                 secondary: parse_field_or_default(
                     map,
                     "secondary",
@@ -186,7 +191,13 @@ fn deserialize_theme_tolerant(
                     "theme.secondary",
                     warnings,
                 ),
-                warning: parse_field_or_default(map, "warning", def.warning, "theme.warning", warnings),
+                warning: parse_field_or_default(
+                    map,
+                    "warning",
+                    def.warning,
+                    "theme.warning",
+                    warnings,
+                ),
                 critical: parse_field_or_default(
                     map,
                     "critical",
@@ -531,8 +542,8 @@ pub(crate) fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
 }
 
 fn load_config_inner(workspace_dir: Option<&Path>) -> PulseConfig {
-    let mut merged = serde_json::to_value(PulseConfig::default())
-        .unwrap_or_else(|_| Value::Object(Map::new()));
+    let mut merged =
+        serde_json::to_value(PulseConfig::default()).unwrap_or_else(|_| Value::Object(Map::new()));
 
     let global_path = platform::resolve_global_config_dir().join("agy-pulse.config.json");
     if let Some(global_val) = read_json_object(&global_path) {
@@ -584,24 +595,23 @@ pub fn read_pulse_env_overrides() -> PulseEnvOverrides {
         }
     });
 
-    let dashboard_port = platform::env_var("AGY_PULSE_DASHBOARD_PORT")
-        .and_then(|raw| {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            trimmed
-                .parse::<u16>()
-                .ok()
-                .filter(|&port| port >= 1)
-                .map(|port| PulseEnvOverride {
-                    env_var: "AGY_PULSE_DASHBOARD_PORT",
-                    value: port.to_string(),
-                })
-        });
+    let dashboard_port = platform::env_var("AGY_PULSE_DASHBOARD_PORT").and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        trimmed
+            .parse::<u16>()
+            .ok()
+            .filter(|&port| port >= 1)
+            .map(|port| PulseEnvOverride {
+                env_var: "AGY_PULSE_DASHBOARD_PORT",
+                value: port.to_string(),
+            })
+    });
 
-    let dashboard_idle_timeout_sec = platform::env_var("AGY_PULSE_DASHBOARD_IDLE_SEC")
-        .and_then(|raw| {
+    let dashboard_idle_timeout_sec =
+        platform::env_var("AGY_PULSE_DASHBOARD_IDLE_SEC").and_then(|raw| {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 return None;
@@ -744,7 +754,9 @@ pub fn validate_pulse_config(cfg: &PulseConfig) -> Result<(), (String, String)> 
                 if !is_allowed_theme_color(val) {
                     return Err((
                         field.to_string(),
-                        format!("{field} must be one of: green, gray, blue, magenta, yellow, cyan, red"),
+                        format!(
+                            "{field} must be one of: green, gray, blue, magenta, yellow, cyan, red"
+                        ),
                     ));
                 }
             }

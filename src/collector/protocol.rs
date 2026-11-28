@@ -154,7 +154,10 @@ impl Write for IpcStream {
 }
 
 /// Connect to the IPC endpoint described by `state` within `connect_timeout`.
-pub fn connect_to_state(state: &CollectorStateFile, connect_timeout: Duration) -> io::Result<IpcStream> {
+pub fn connect_to_state(
+    state: &CollectorStateFile,
+    connect_timeout: Duration,
+) -> io::Result<IpcStream> {
     #[cfg(unix)]
     {
         let _ = connect_timeout;
@@ -173,7 +176,10 @@ pub fn connect_to_state(state: &CollectorStateFile, connect_timeout: Duration) -
             .filter(|&p| p > 0)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing tcp_port"))?;
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        let stream = std::net::TcpStream::connect_timeout(&addr, connect_timeout.max(Duration::from_millis(1)))?;
+        let stream = std::net::TcpStream::connect_timeout(
+            &addr,
+            connect_timeout.max(Duration::from_millis(1)),
+        )?;
         let _ = stream.set_nodelay(true);
         Ok(IpcStream::Tcp(stream))
     }
@@ -181,8 +187,8 @@ pub fn connect_to_state(state: &CollectorStateFile, connect_timeout: Duration) -
 
 /// Write a 4-byte big-endian length-prefixed JSON frame.
 pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()> {
-    let payload = serde_json::to_vec(msg)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let payload =
+        serde_json::to_vec(msg).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     if payload.len() > MAX_FRAME_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -360,7 +366,9 @@ pub(super) fn exe_mtime_matches(existing_mtime_ms: i64, current_mtime_ms: i64) -
 mod tests {
     use std::io::Cursor;
 
-    use super::{CollectorWireResponse, MAX_FRAME_BYTES, exe_mtime_matches, read_frame, write_frame};
+    use super::{
+        CollectorWireResponse, MAX_FRAME_BYTES, exe_mtime_matches, read_frame, write_frame,
+    };
 
     #[test]
     fn exe_mtime_matches_treats_non_positive_as_compatible_and_positive_as_strict() {

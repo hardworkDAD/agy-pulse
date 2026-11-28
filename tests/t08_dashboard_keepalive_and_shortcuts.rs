@@ -294,7 +294,8 @@ fn t08_background_daemon_single_instance_reuse_status_stop_and_stale_recovery() 
         "expected started in background message, got: {open1_out}"
     );
 
-    let state_raw = fs::read_to_string(env.state_file_path()).expect("discovery state file written");
+    let state_raw =
+        fs::read_to_string(env.state_file_path()).expect("discovery state file written");
     let state1: Value = serde_json::from_str(&state_raw).unwrap();
     assert_eq!(state1["app"], DASHBOARD_APP_ID);
     assert_eq!(state1["port"], port);
@@ -569,8 +570,7 @@ fn t08_keepalive_survives_background_idle_survives_reload_and_exits_after_close_
     assert!(ready, "background serve child did not become ready");
 
     let orphan_reclaimed = wait_until(Duration::from_secs(3), || {
-        matches!(guard.0.try_wait(), Ok(Some(_)))
-            && !env.state_file_path().exists()
+        matches!(guard.0.try_wait(), Ok(Some(_))) && !env.state_file_path().exists()
     });
     assert!(
         orphan_reclaimed,
@@ -878,7 +878,10 @@ fn t08_app_window_command_construction_and_fingerprint_safe_shortcuts() {
         assert!(!installed_icon.exists());
         assert!(!installed_start_lnk.exists());
         assert!(!installed_desktop_lnk.exists());
-        assert!(user_start_file.exists(), "user Start Menu file was wrongly deleted");
+        assert!(
+            user_start_file.exists(),
+            "user Start Menu file was wrongly deleted"
+        );
         assert!(
             user_desktop_file.exists(),
             "user desktop file was wrongly deleted"

@@ -36,8 +36,9 @@ pub(super) fn create_progress_bar(percent: f64, style: &ProgressBarStyle<'_>) ->
     } else {
         0.0
     };
-    let completed =
-        ((safe_pct / 100.0) * style.width as f64).round().clamp(0.0, style.width as f64) as usize;
+    let completed = ((safe_pct / 100.0) * style.width as f64)
+        .round()
+        .clamp(0.0, style.width as f64) as usize;
     let remaining = style.width.saturating_sub(completed);
 
     let final_color = if style.is_usage {
@@ -322,11 +323,18 @@ pub(super) fn render_context_monitor_line(
         if cols >= 80 && !model_name.is_empty() {
             match opts.model_display_mode {
                 ModelDisplayMode::Full => {
-                    parts.push(format!("{}{} {model_name}{RESET}", palette.magenta, model_glyph));
+                    parts.push(format!(
+                        "{}{} {model_name}{RESET}",
+                        palette.magenta, model_glyph
+                    ));
                 }
                 ModelDisplayMode::Compact => {
                     let short = compact_model_name(&model_name);
-                    let label = if short.is_empty() { &model_name } else { &short };
+                    let label = if short.is_empty() {
+                        &model_name
+                    } else {
+                        &short
+                    };
                     parts.push(format!("{}{} {label}{RESET}", palette.magenta, model_glyph));
                 }
                 ModelDisplayMode::None => {}
@@ -494,9 +502,7 @@ pub(super) fn render_model_cache_line(
                          uncached_in: u64,
                          c_read: u64,
                          c_write: u64| {
-        let total_prompt = uncached_in
-            .saturating_add(c_read)
-            .saturating_add(c_write);
+        let total_prompt = uncached_in.saturating_add(c_read).saturating_add(c_write);
         if total_prompt == 0 {
             return;
         }
@@ -587,7 +593,10 @@ pub(super) fn render_model_cache_line(
     let cols = term.columns.filter(|&c| c > 0).unwrap_or(120) as usize;
 
     let icon = if unicode { "⟳" } else { "~" };
-    let prefix = format!("{}{icon}{RESET} {DIM}{}{RESET}", palette.cyan, text.model_cache_label);
+    let prefix = format!(
+        "{}{icon}{RESET} {DIM}{}{RESET}",
+        palette.cyan, text.model_cache_label
+    );
     let normal_sep = if unicode {
         format!("{DIM} · {RESET}")
     } else {
@@ -601,7 +610,8 @@ pub(super) fn render_model_cache_line(
     let inner_dot = if unicode { " · " } else { ", " };
 
     let format_entry = |entry: &ModelCacheEntry, detail_mode: CacheDetailMode| -> String {
-        let hit_pct = ((entry.cache_read as f64 * 100.0) / entry.total_prompt as f64).clamp(0.0, 100.0);
+        let hit_pct =
+            ((entry.cache_read as f64 * 100.0) / entry.total_prompt as f64).clamp(0.0, 100.0);
         let hit_color = resolve_cache_hit_color(
             hit_pct,
             palette,
@@ -639,19 +649,20 @@ pub(super) fn render_model_cache_line(
         format!("{head} {DIM}({detail}){RESET}")
     };
 
-    let build_line = |detail_mode: CacheDetailMode, use_compact_sep: bool, limit: usize| -> String {
-        let active_sep = if use_compact_sep {
-            &compact_sep
-        } else {
-            &normal_sep
+    let build_line =
+        |detail_mode: CacheDetailMode, use_compact_sep: bool, limit: usize| -> String {
+            let active_sep = if use_compact_sep {
+                &compact_sep
+            } else {
+                &normal_sep
+            };
+            let mut parts: Vec<String> = Vec::with_capacity(limit + 1);
+            parts.push(prefix.clone());
+            for entry in entries.iter().take(limit) {
+                parts.push(format_entry(entry, detail_mode));
+            }
+            parts.join(active_sep)
         };
-        let mut parts: Vec<String> = Vec::with_capacity(limit + 1);
-        parts.push(prefix.clone());
-        for entry in entries.iter().take(limit) {
-            parts.push(format_entry(entry, detail_mode));
-        }
-        parts.join(active_sep)
-    };
 
     let mut detail_mode = CacheDetailMode::Full;
     let mut use_compact_sep = false;

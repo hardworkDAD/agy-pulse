@@ -11,12 +11,7 @@ use super::width::{
     truncate_ansi_to_display_width,
 };
 
-fn quota_pct_color(
-    pct: u8,
-    warn_thresh: f64,
-    crit_thresh: f64,
-    palette: &ThemePalette,
-) -> &str {
+fn quota_pct_color(pct: u8, warn_thresh: f64, crit_thresh: f64, palette: &ThemePalette) -> &str {
     let pct_f = pct as f64;
     let crit_limit = 100.0 - crit_thresh * 100.0;
     let warn_limit = 100.0 - warn_thresh * 100.0;
@@ -160,8 +155,7 @@ fn render_provider_quota_table(
         format!("  {gw} {}{}{RESET} {cw}", palette.secondary, glyph.vbar),
     ];
 
-    let mut extra_providers: Vec<(String, ProviderQuota)> =
-        vec![("Argon".to_string(), argon)];
+    let mut extra_providers: Vec<(String, ProviderQuota)> = vec![("Argon".to_string(), argon)];
     for extra in &summary.extras {
         if is_openai_provider_key(&extra.key) {
             continue;
@@ -201,7 +195,10 @@ fn render_provider_quota_table(
                     palette,
                     glyph,
                 );
-                rows.push(format!("  {w5} {}{}{RESET} {ww}", palette.secondary, glyph.vbar));
+                rows.push(format!(
+                    "  {w5} {}{}{RESET} {ww}",
+                    palette.secondary, glyph.vbar
+                ));
             }
             (None, Some(week)) => {
                 let ww = render_window_item(
@@ -302,7 +299,10 @@ fn render_compact_quota_line(
         };
         let pct = format_quota_percent(critical.window.remaining_fraction);
         let pct_color = quota_pct_color(pct, warn_thresh, crit_thresh, palette);
-        segments.push(format!("{}{label}:{RESET} {pct_color}{pct}%{RESET}", palette.secondary));
+        segments.push(format!(
+            "{}{label}:{RESET} {pct_color}{pct}%{RESET}",
+            palette.secondary
+        ));
     }
 
     if segments.is_empty() {

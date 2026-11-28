@@ -13,8 +13,8 @@ use tempfile::TempDir;
 
 use agy_pulse::config::LanguageSetting;
 use agy_pulse::dashboard::{
-    DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_DASHBOARD_PORT, DashboardAction,
-    DashboardServer, DashboardServerConfig, parse_dashboard_args,
+    DASHBOARD_APP_ID, DASHBOARD_ICON_SVG, DEFAULT_DASHBOARD_PORT, DashboardAction, DashboardServer,
+    DashboardServerConfig, parse_dashboard_args,
 };
 
 fn agypl_bin() -> PathBuf {
@@ -266,12 +266,7 @@ impl HttpResponse {
     }
 }
 
-fn send_raw_http(
-    port: u16,
-    method: &str,
-    target: &str,
-    headers: &[(&str, &str)],
-) -> HttpResponse {
+fn send_raw_http(port: u16, method: &str, target: &str, headers: &[(&str, &str)]) -> HttpResponse {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -429,7 +424,11 @@ fn t07_loopback_binding_port_fallback_security_headers_and_403_405_404() {
     assert!(html_res.body.starts_with("<!DOCTYPE html>"));
     assert!(html_res.body.contains("<html lang=\"zh-CN\""));
     assert!(html_res.body.contains("var INITIAL_LANG = \"zh\";"));
-    assert!(html_res.body.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+    assert!(
+        html_res
+            .body
+            .contains(concat!("v", env!("CARGO_PKG_VERSION")))
+    );
     assert!(
         !html_res.body.contains("http://") && !html_res.body.contains("https://"),
         "embedded HTML must contain zero external URLs"
@@ -458,31 +457,17 @@ fn t07_loopback_binding_port_fallback_security_headers_and_403_405_404() {
     let head_res = send_raw_http(info.port, "HEAD", "/index.html", &[]);
     assert_eq!(head_res.status, 200);
     assert!(head_res.body.is_empty());
-    let head_len: usize = head_res
-        .header("content-length")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let head_len: usize = head_res.header("content-length").unwrap().parse().unwrap();
     assert!(head_len > 50_000);
 
     // 5. Host header DNS rebinding protection -> 403
     let evil_host = format!("evil.com:{}", info.port);
-    let bad_host_res = send_raw_http(
-        info.port,
-        "GET",
-        "/api/overview",
-        &[("Host", &evil_host)],
-    );
+    let bad_host_res = send_raw_http(info.port, "GET", "/api/overview", &[("Host", &evil_host)]);
     assert_eq!(bad_host_res.status, 403);
 
     // localhost:<port> Host is allowed
     let local_host = format!("localhost:{}", info.port);
-    let ok_host_res = send_raw_http(
-        info.port,
-        "GET",
-        "/api/health",
-        &[("Host", &local_host)],
-    );
+    let ok_host_res = send_raw_http(info.port, "GET", "/api/health", &[("Host", &local_host)]);
     assert_eq!(ok_host_res.status, 200);
 
     // 6. Origin + CSRF token validation on POST /api/ping and POST /api/sync -> 403 for cross-site or missing CSRF
@@ -494,7 +479,10 @@ fn t07_loopback_binding_port_fallback_security_headers_and_403_405_404() {
             path,
             &[("Origin", &format!("http://localhost:{}", info.port))],
         );
-        assert_eq!(missing_csrf.status, 403, "{path} must reject missing CSRF token");
+        assert_eq!(
+            missing_csrf.status, 403,
+            "{path} must reject missing CSRF token"
+        );
 
         let bad_origin = send_raw_http(
             info.port,
@@ -524,18 +512,27 @@ fn t07_loopback_binding_port_fallback_security_headers_and_403_405_404() {
             info.port,
             "POST",
             path,
-            &[
-                ("Origin", &good_origin),
-                ("X-Agy-Pulse-Token", &csrf_token),
-            ],
+            &[("Origin", &good_origin), ("X-Agy-Pulse-Token", &csrf_token)],
         );
-        assert_eq!(ok_origin.status, 200, "{path} must allow localhost Origin with valid CSRF token");
+        assert_eq!(
+            ok_origin.status, 200,
+            "{path} must allow localhost Origin with valid CSRF token"
+        );
     }
 
     // 7. 405 Method Not Allowed & 404 Not Found
-    assert_eq!(send_raw_http(info.port, "GET", "/api/sync", &[]).status, 405);
-    assert_eq!(send_raw_http(info.port, "POST", "/api/overview", &[]).status, 405);
-    assert_eq!(send_raw_http(info.port, "DELETE", "/api/health", &[]).status, 405);
+    assert_eq!(
+        send_raw_http(info.port, "GET", "/api/sync", &[]).status,
+        405
+    );
+    assert_eq!(
+        send_raw_http(info.port, "POST", "/api/overview", &[]).status,
+        405
+    );
+    assert_eq!(
+        send_raw_http(info.port, "DELETE", "/api/health", &[]).status,
+        405
+    );
     assert_eq!(send_raw_http(info.port, "GET", "/nope", &[]).status, 404);
 
     server.shutdown();
@@ -713,22 +710,18 @@ fn t07_multidimensional_filtering_cascade_tree_and_cli_e2e() {
     let port = server.info().port;
 
     // 7d overview: cli-root-1 (with 2 subagents) + ide-root-1
-    let ov_7d: Value = serde_json::from_str(
-        &send_raw_http(port, "GET", "/api/overview?range=7d", &[]).body,
-    )
-    .unwrap();
+    let ov_7d: Value =
+        serde_json::from_str(&send_raw_http(port, "GET", "/api/overview?range=7d", &[]).body)
+            .unwrap();
     let expected_cli_tree = cost_cli_main + cost_cli_sub_a + cost_cli_sub_b;
     let expected_7d_total = expected_cli_tree + cost_ide;
-    assert!(
-        (ov_7d["summary"]["totalCostUsd"].as_f64().unwrap() - expected_7d_total).abs() < 1e-9
-    );
+    assert!((ov_7d["summary"]["totalCostUsd"].as_f64().unwrap() - expected_7d_total).abs() < 1e-9);
     assert!(
         (ov_7d["summary"]["mainCostUsd"].as_f64().unwrap() - (cost_cli_main + cost_ide)).abs()
             < 1e-9
     );
     assert!(
-        (ov_7d["summary"]["subagentCostUsd"].as_f64().unwrap()
-            - (cost_cli_sub_a + cost_cli_sub_b))
+        (ov_7d["summary"]["subagentCostUsd"].as_f64().unwrap() - (cost_cli_sub_a + cost_cli_sub_b))
             .abs()
             < 1e-9
     );
@@ -754,10 +747,9 @@ fn t07_multidimensional_filtering_cascade_tree_and_cli_e2e() {
     assert!((children[1]["costUsd"].as_f64().unwrap() - cost_cli_sub_b).abs() < 1e-9);
 
     // 30d includes cli-old-1
-    let ov_30d: Value = serde_json::from_str(
-        &send_raw_http(port, "GET", "/api/overview?range=30d", &[]).body,
-    )
-    .unwrap();
+    let ov_30d: Value =
+        serde_json::from_str(&send_raw_http(port, "GET", "/api/overview?range=30d", &[]).body)
+            .unwrap();
     assert!(
         (ov_30d["summary"]["totalCostUsd"].as_f64().unwrap() - (expected_7d_total + cost_old))
             .abs()
@@ -766,10 +758,9 @@ fn t07_multidimensional_filtering_cascade_tree_and_cli_e2e() {
     assert_eq!(ov_30d["summary"]["rootSessionCount"], 3);
 
     // 24h excludes ide-root-1 (2d ago) and cli-old-1 (20d ago)
-    let ov_24h: Value = serde_json::from_str(
-        &send_raw_http(port, "GET", "/api/overview?range=24h", &[]).body,
-    )
-    .unwrap();
+    let ov_24h: Value =
+        serde_json::from_str(&send_raw_http(port, "GET", "/api/overview?range=24h", &[]).body)
+            .unwrap();
     assert!((ov_24h["summary"]["totalCostUsd"].as_f64().unwrap() - expected_cli_tree).abs() < 1e-9);
     assert_eq!(ov_24h["summary"]["rootSessionCount"], 1);
 
@@ -789,13 +780,7 @@ fn t07_multidimensional_filtering_cascade_tree_and_cli_e2e() {
 
     // Model filter (percent-encoded space)
     let ov_haiku: Value = serde_json::from_str(
-        &send_raw_http(
-            port,
-            "GET",
-            "/api/overview?range=7d&model=Haiku%204.5",
-            &[],
-        )
-        .body,
+        &send_raw_http(port, "GET", "/api/overview?range=7d&model=Haiku%204.5", &[]).body,
     )
     .unwrap();
     assert!((ov_haiku["summary"]["totalCostUsd"].as_f64().unwrap() - cost_cli_sub_a).abs() < 1e-9);
@@ -884,13 +869,10 @@ fn t07_multidimensional_filtering_cascade_tree_and_cli_e2e() {
     assert_eq!(cli_html.status, 200);
     assert!(cli_html.body.contains("var INITIAL_LANG = \"zh\";"));
 
-    let cli_ov: Value = serde_json::from_str(
-        &send_raw_http(cli_port, "GET", "/api/overview?range=7d", &[]).body,
-    )
-    .unwrap();
-    assert!(
-        (cli_ov["summary"]["totalCostUsd"].as_f64().unwrap() - expected_7d_total).abs() < 1e-9
-    );
+    let cli_ov: Value =
+        serde_json::from_str(&send_raw_http(cli_port, "GET", "/api/overview?range=7d", &[]).body)
+            .unwrap();
+    assert!((cli_ov["summary"]["totalCostUsd"].as_f64().unwrap() - expected_7d_total).abs() < 1e-9);
 
     // Also verify `agy-pulse --dashboard --help` prints dashboard usage and exits 0
     let help_out = env
@@ -1007,12 +989,19 @@ fn t07_csv_json_exports_static_routes_and_sync_api() {
     // /api/export.csv for timeseries, models, sessions
     let csv_ts = send_raw_http(port, "GET", "/api/export.csv?kind=timeseries&range=7d", &[]);
     assert_eq!(csv_ts.status, 200);
-    assert_eq!(csv_ts.header("content-type"), Some("text/csv; charset=utf-8"));
+    assert_eq!(
+        csv_ts.header("content-type"),
+        Some("text/csv; charset=utf-8")
+    );
     assert_eq!(
         csv_ts.header("content-disposition"),
         Some("attachment; filename=\"agy-pulse-telemetry-7d.csv\"")
     );
-    assert!(csv_ts.body.starts_with("bucketKey,bucketStartMs,label,costUsd,"));
+    assert!(
+        csv_ts
+            .body
+            .starts_with("bucketKey,bucketStartMs,label,costUsd,")
+    );
     assert!(csv_ts.body.lines().count() >= 2);
 
     let csv_models = send_raw_http(port, "GET", "/api/export.csv?kind=models&range=7d", &[]);
@@ -1020,18 +1009,17 @@ fn t07_csv_json_exports_static_routes_and_sync_api() {
     assert!(csv_models.body.starts_with("model,costUsd,costSharePct,"));
     assert!(csv_models.body.contains("Carbon"));
 
-    let csv_sessions = send_raw_http(
-        port,
-        "GET",
-        "/api/export.csv?kind=sessions&range=all",
-        &[],
-    );
+    let csv_sessions = send_raw_http(port, "GET", "/api/export.csv?kind=sessions&range=all", &[]);
     assert_eq!(csv_sessions.status, 200);
     assert_eq!(
         csv_sessions.header("content-disposition"),
         Some("attachment; filename=\"agy-pulse-telemetry-all.csv\"")
     );
-    assert!(csv_sessions.body.starts_with("rootConversationId,source,workspace,"));
+    assert!(
+        csv_sessions
+            .body
+            .starts_with("rootConversationId,source,workspace,")
+    );
     assert!(csv_sessions.body.contains("exp-cli"));
 
     // /api/export.json
@@ -1170,7 +1158,9 @@ fn t07_multi_account_device_overview_quotas_and_exports() {
 
     // 1. Unassigned IDE conversation on local device
     write_conv_db(
-        &env.ide_data_dir.join("conversations").join("local-ide-unassigned.db"),
+        &env.ide_data_dir
+            .join("conversations")
+            .join("local-ide-unassigned.db"),
         Some(&build_trajectory_blob(
             "file:///work/unassigned-proj",
             "main",
@@ -1211,7 +1201,9 @@ fn t07_multi_account_device_overview_quotas_and_exports() {
 
     // 2. Alice CLI conversation on local device
     write_conv_db(
-        &env.cli_data_dir.join("conversations").join("local-cli-alice.db"),
+        &env.cli_data_dir
+            .join("conversations")
+            .join("local-cli-alice.db"),
         Some(&build_trajectory_blob(
             "file:///work/alice-proj",
             "feat/sync",
@@ -1502,7 +1494,13 @@ fn t07_multi_account_device_overview_quotas_and_exports() {
     )
     .unwrap();
     assert_eq!(ov_alice["meta"]["account"], "alice@gmail.com");
-    assert_eq!(ov_alice["meta"]["availableAccounts"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        ov_alice["meta"]["availableAccounts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
     assert!((ov_alice["summary"]["totalCostUsd"].as_f64().unwrap() - 0.50).abs() < 1e-9);
     assert_eq!(ov_alice["summary"]["rootSessionCount"], 2);
     assert_eq!(ov_alice["accountQuotas"].as_array().unwrap().len(), 1);
@@ -1687,7 +1685,10 @@ fn t07_sync_remote_pull_throttle_offline_and_dashboard_html_hooks() {
         assert!(html.contains(hook), "dashboard.html missing hook: {hook}");
     }
     for forbidden in ["HUD", "账户余额", "管理后台"] {
-        assert!(!html.contains(forbidden), "forbidden term in HTML: {forbidden}");
+        assert!(
+            !html.contains(forbidden),
+            "forbidden term in HTML: {forbidden}"
+        );
     }
 
     // 2. GET /api/overview returns immediately before remote sync
@@ -1839,7 +1840,10 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
         .as_millis() as i64;
     let step_ts = now - 60_000;
 
-    let conv1_db = env.cli_data_dir.join("conversations").join("hint-conv-1.db");
+    let conv1_db = env
+        .cli_data_dir
+        .join("conversations")
+        .join("hint-conv-1.db");
     let step1 = pb_timestamp_ms(1, step_ts);
     let gen1 = build_gen_blob(
         &[0],
@@ -1917,7 +1921,9 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
         match stream.read(&mut buf_413) {
             Ok(0) => break,
             Ok(n) => raw_413.extend_from_slice(&buf_413[..n]),
-            Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset && !raw_413.is_empty() => {
+            Err(err)
+                if err.kind() == std::io::ErrorKind::ConnectionReset && !raw_413.is_empty() =>
+            {
                 break;
             }
             Err(err) => panic!("unexpected read error for 413 response: {err}"),
@@ -1960,10 +1966,9 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
     assert_eq!(padded_json["throttled"], false);
 
     // 3. Initial ledger scan picked up defaultAccount + deviceName from agy-pulse-sync.json
-    let ov1: Value = serde_json::from_str(
-        &send_raw_http(port, "GET", "/api/overview?range=all", &[]).body,
-    )
-    .unwrap();
+    let ov1: Value =
+        serde_json::from_str(&send_raw_http(port, "GET", "/api/overview?range=all", &[]).body)
+            .unwrap();
     assert_eq!(ov1["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(ov1["sessions"][0]["accountId"], "alpha@example.com");
     assert_eq!(ov1["sessions"][0]["deviceName"], "studio-alpha");
@@ -1976,7 +1981,10 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
     };
     save_sync_config_to(&sync_cfg_path, &cfg_v2).unwrap();
 
-    let conv2_db = env.cli_data_dir.join("conversations").join("hint-conv-2.db");
+    let conv2_db = env
+        .cli_data_dir
+        .join("conversations")
+        .join("hint-conv-2.db");
     let step2 = pb_timestamp_ms(1, step_ts + 5_000);
     let gen2 = build_gen_blob(
         &[0],
@@ -1993,7 +2001,12 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
     );
     write_conv_db(
         &conv2_db,
-        Some(&build_trajectory_blob("ws-hint-2", "main", step_ts + 5_000, None)),
+        Some(&build_trajectory_blob(
+            "ws-hint-2",
+            "main",
+            step_ts + 5_000,
+            None,
+        )),
         &[(0, step2)],
         &[(0, gen2)],
     );
@@ -2006,10 +2019,9 @@ fn t07_csrf_token_413_large_body_and_sync_identity_hints_linkage() {
     );
     assert_eq!(sync_res.status, 200);
 
-    let ov2: Value = serde_json::from_str(
-        &send_raw_http(port, "GET", "/api/overview?range=all", &[]).body,
-    )
-    .unwrap();
+    let ov2: Value =
+        serde_json::from_str(&send_raw_http(port, "GET", "/api/overview?range=all", &[]).body)
+            .unwrap();
     let sessions = ov2["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 2);
     let conv2_session = sessions
@@ -2034,13 +2046,23 @@ fn t07_http_wire_rejects_malformed_content_length_and_transfer_encoding_with_400
     let port = server.info().port;
 
     for raw_req in [
-        format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: abc\r\nConnection: close\r\n\r\n"),
-        format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: -1\r\nConnection: close\r\n\r\n"),
-        format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 2\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"),
-        format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"),
+        format!(
+            "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: abc\r\nConnection: close\r\n\r\n"
+        ),
+        format!(
+            "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: -1\r\nConnection: close\r\n\r\n"
+        ),
+        format!(
+            "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 2\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi"
+        ),
+        format!(
+            "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"
+        ),
     ] {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
         stream.write_all(raw_req.as_bytes()).unwrap();
         stream.flush().unwrap();
         let mut raw_resp = Vec::new();
@@ -2082,7 +2104,11 @@ fn t07_bounded_concurrency_and_sse_limits_return_503() {
     std::thread::sleep(Duration::from_millis(80));
 
     let overloaded = send_raw_http(port, "GET", "/api/health", &[]);
-    assert_eq!(overloaded.status, 503, "expected 503 when saturated: {}", overloaded.body);
+    assert_eq!(
+        overloaded.status, 503,
+        "expected 503 when saturated: {}",
+        overloaded.body
+    );
     let overloaded_json: Value = serde_json::from_str(&overloaded.body).unwrap();
     assert_eq!(overloaded_json["ok"], false);
 
@@ -2096,7 +2122,10 @@ fn t07_bounded_concurrency_and_sse_limits_return_503() {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    assert!(recovered, "server must recover after held connections close");
+    assert!(
+        recovered,
+        "server must recover after held connections close"
+    );
 
     // 2. Open 2 SSE connections -> normal /api/health still works, 3rd SSE gets 503
     let mut sse_streams = Vec::new();
@@ -2123,7 +2152,11 @@ fn t07_bounded_concurrency_and_sse_limits_return_503() {
         "/api/keepalive?client=c-overflow",
         &[("Origin", &format!("http://127.0.0.1:{port}"))],
     );
-    assert_eq!(sse_3rd.status, 503, "expected 503 on 3rd SSE: {}", sse_3rd.body);
+    assert_eq!(
+        sse_3rd.status, 503,
+        "expected 503 on 3rd SSE: {}",
+        sse_3rd.body
+    );
     let sse_json: Value = serde_json::from_str(&sse_3rd.body).unwrap();
     assert_eq!(sse_json["ok"], false);
 
@@ -2146,7 +2179,10 @@ fn t07_bounded_concurrency_and_sse_limits_return_503() {
         }
         std::thread::sleep(Duration::from_millis(30));
     }
-    assert!(sse_recovered, "SSE slot must be released after SSE client closes");
+    assert!(
+        sse_recovered,
+        "SSE slot must be released after SSE client closes"
+    );
 
     drop(sse_streams);
     server.shutdown();
@@ -2167,7 +2203,12 @@ fn t07_mutating_routes_require_csrf_and_origin_and_keepalive_checks_same_origin(
     let token = server.csrf_token().to_string();
     let good_origin = format!("http://127.0.0.1:{port}");
 
-    for path in ["/api/sync", "/api/sync-remote", "/api/ping", "/api/disconnect"] {
+    for path in [
+        "/api/sync",
+        "/api/sync-remote",
+        "/api/ping",
+        "/api/disconnect",
+    ] {
         // Missing CSRF token even with valid Origin -> 403
         let no_csrf = send_raw_http(port, "POST", path, &[("Origin", &good_origin)]);
         assert_eq!(no_csrf.status, 403, "{path} must reject missing CSRF token");
@@ -2196,7 +2237,10 @@ fn t07_mutating_routes_require_csrf_and_origin_and_keepalive_checks_same_origin(
                 ("Sec-Fetch-Site", "cross-site"),
             ],
         );
-        assert_eq!(cross_site.status, 403, "{path} must reject cross-site Sec-Fetch-Site");
+        assert_eq!(
+            cross_site.status, 403,
+            "{path} must reject cross-site Sec-Fetch-Site"
+        );
 
         // Valid Origin + valid CSRF + same-origin -> 200
         let ok = send_raw_http(
@@ -2209,7 +2253,11 @@ fn t07_mutating_routes_require_csrf_and_origin_and_keepalive_checks_same_origin(
                 ("Sec-Fetch-Site", "same-origin"),
             ],
         );
-        assert_eq!(ok.status, 200, "{path} must allow valid Origin + CSRF: {}", ok.body);
+        assert_eq!(
+            ok.status, 200,
+            "{path} must allow valid Origin + CSRF: {}",
+            ok.body
+        );
     }
 
     // GET /api/keepalive rejects bad Sec-Fetch-Site & evil Origin, allows same-origin without Origin
@@ -2296,7 +2344,9 @@ fn t07_reads_and_sync_config_do_not_block_during_inflight_sync_write() {
     let env = IsolatedEnv::new();
     let now = current_ms();
     write_conv_db(
-        &env.cli_data_dir.join("conversations").join("conv-concurrent.db"),
+        &env.cli_data_dir
+            .join("conversations")
+            .join("conv-concurrent.db"),
         Some(&build_trajectory_blob(
             "file:///work/conc",
             "main",
@@ -2382,7 +2432,10 @@ fn t07_reads_and_sync_config_do_not_block_during_inflight_sync_write() {
     drop(tx);
     drop(lock_conn);
 
-    let sync_res = sync_handle.join().unwrap().expect("POST /api/sync completes");
+    let sync_res = sync_handle
+        .join()
+        .unwrap()
+        .expect("POST /api/sync completes");
     assert_eq!(sync_res.status, 200);
 
     let cfg = cfg_res.expect("GET /api/config/sync must not block on inflight sync");

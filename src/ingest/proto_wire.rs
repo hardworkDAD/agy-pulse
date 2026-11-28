@@ -455,8 +455,10 @@ pub(super) fn extract_gen_metadata_row_details(idx: i64, buf: &[u8]) -> Generati
             });
         let valid_ttft =
             ttft_sec.is_some_and(|t| t.is_finite() && (0.0..=MAX_VALID_TTFT_SEC).contains(&t));
-        let has_other_tokens =
-            raw_input_tokens > 0 || output_tokens > 0 || cache_read_tokens > 0 || cache_write_tokens > 0;
+        let has_other_tokens = raw_input_tokens > 0
+            || output_tokens > 0
+            || cache_read_tokens > 0
+            || cache_write_tokens > 0;
         if system_prompt_tokens == 0 && !has_other_tokens && !valid_ttft {
             continue;
         }
@@ -537,7 +539,9 @@ fn normalize_workspace_uri(raw: Option<Cow<'_, str>>) -> Option<String> {
         return None;
     }
     s = percent_decode_lossy(&s);
-    if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("file://")) {
+    if s.get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+    {
         let rest = &s[7..];
         if rest.starts_with('/')
             && rest.len() >= 3
@@ -566,7 +570,8 @@ pub(super) fn extract_trajectory_meta(buf: &[u8]) -> TrajectoryMetadata {
     let mut branch: Option<String> = None;
     for w in pb_get_all_sub(buf, 1) {
         if workspace.is_none() {
-            workspace = normalize_workspace_uri(pb_get_string(w, 1).or_else(|| pb_get_string(w, 2)));
+            workspace =
+                normalize_workspace_uri(pb_get_string(w, 1).or_else(|| pb_get_string(w, 2)));
         }
         if branch.is_none()
             && let Some(br) = pb_get_string(w, 4)
@@ -620,7 +625,9 @@ mod tests {
             Some("/path/c++/%a€".to_string())
         );
         assert_eq!(
-            normalize_workspace_uri(Some(Cow::Borrowed("file:///path/%E4%B8%AD%E6%96%87/proj%201/"))),
+            normalize_workspace_uri(Some(Cow::Borrowed(
+                "file:///path/%E4%B8%AD%E6%96%87/proj%201/"
+            ))),
             Some("/path/中文/proj 1".to_string())
         );
         assert_eq!(

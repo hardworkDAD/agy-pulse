@@ -185,7 +185,10 @@ pub fn truncate_ansi_to_display_width(input: &str, max_width: usize, ellipsis: &
         // Collect a maximal contiguous non-escape text slice so VS16 lookahead works cleanly.
         let text_start = i;
         while i < bytes.len() {
-            if bytes[i] == 0x1B && i + 1 < bytes.len() && (bytes[i + 1] == b'[' || bytes[i + 1] == b']') {
+            if bytes[i] == 0x1B
+                && i + 1 < bytes.len()
+                && (bytes[i + 1] == b'[' || bytes[i + 1] == b']')
+            {
                 break;
             }
             if let Some(ch) = input[i..].chars().next() {

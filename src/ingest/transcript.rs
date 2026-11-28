@@ -17,9 +17,7 @@ use crate::domain::{
 };
 use crate::platform;
 
-use super::speed_tracker::{
-    PlannerResponseSpan, is_valid_speed, prune_json_cache_dir, sha256_hex,
-};
+use super::speed_tracker::{PlannerResponseSpan, is_valid_speed, prune_json_cache_dir, sha256_hex};
 use super::stdin::{find_context_window_in_map, is_context_window_map};
 
 const TRANSCRIPT_CACHE_VERSION: u32 = 11;
@@ -312,7 +310,10 @@ fn parse_entry_time_ms(entry: &Map<String, Value>) -> Option<i64> {
         .and_then(parse_iso8601_to_epoch_ms)
 }
 
-fn load_full_entries_map(transcript_path: &Path, needed_steps: &HashSet<u64>) -> HashMap<u64, Value> {
+fn load_full_entries_map(
+    transcript_path: &Path,
+    needed_steps: &HashSet<u64>,
+) -> HashMap<u64, Value> {
     let mut map = HashMap::new();
     if needed_steps.is_empty() {
         return map;
@@ -510,8 +511,7 @@ fn has_mention(text: &str, name: &str) -> bool {
         let abs = start + pos;
         let after = abs + needle.len();
         let next_ch = text[after..].chars().next();
-        let boundary = next_ch
-            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        let boundary = next_ch.is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
         if boundary {
             return true;
         }
@@ -588,11 +588,7 @@ fn register_subagent(
     if id.is_empty() || main_conv_id == Some(id) {
         return;
     }
-    if acc
-        .child_agents
-        .get(id)
-        .is_some_and(|e| e.kind == "swarm")
-    {
+    if acc.child_agents.get(id).is_some_and(|e| e.kind == "swarm") {
         return;
     }
     let cur_turn = effective_turn(acc);
@@ -607,7 +603,11 @@ fn register_subagent(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| hint.as_ref().map(|h| h.model.clone()).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            hint.as_ref()
+                .map(|h| h.model.clone())
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| existing.map(|e| e.model_hint.clone()))
         .unwrap_or_default();
     let resolved_name = role_hint
@@ -836,8 +836,8 @@ fn process_planner_tool_calls(
                 }
             }
             "post_message" => {
-                if let Some(msg_text) = args
-                    .and_then(|a| extract_tool_arg_str(a.get("text").or_else(|| a.get("Text"))))
+                if let Some(msg_text) =
+                    args.and_then(|a| extract_tool_arg_str(a.get("text").or_else(|| a.get("Text"))))
                 {
                     let mention_all = has_mention(&msg_text, "all");
                     for child in acc.child_agents.values_mut() {
@@ -1076,11 +1076,18 @@ fn parse_duration_to_ms(duration_str: &str) -> i64 {
         let mut matched = false;
         for cap in re.captures_iter(duration_str) {
             matched = true;
-            let val: f64 = cap.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
+            let val: f64 = cap
+                .get(1)
+                .and_then(|m| m.as_str().parse().ok())
+                .unwrap_or(0.0);
             if !val.is_finite() {
                 continue;
             }
-            match cap.get(2).map(|m| m.as_str().to_ascii_lowercase()).as_deref() {
+            match cap
+                .get(2)
+                .map(|m| m.as_str().to_ascii_lowercase())
+                .as_deref()
+            {
                 Some("ms") => ms += val,
                 Some("h") => ms += val * 3_600_000.0,
                 Some("m") => ms += val * 60_000.0,
@@ -1100,11 +1107,7 @@ fn parse_duration_to_ms(duration_str: &str) -> i64 {
     0
 }
 
-fn process_error_rate_limit(
-    entry: &Map<String, Value>,
-    acc: &mut TranscriptAccState,
-    now_ms: i64,
-) {
+fn process_error_rate_limit(entry: &Map<String, Value>, acc: &mut TranscriptAccState, now_ms: i64) {
     let is_structured_error = entry.get("status").and_then(Value::as_str) == Some("ERROR")
         || entry.get("error").is_some_and(Value::is_object)
         || entry.get("type").and_then(Value::as_str) == Some("ERROR");
@@ -1265,7 +1268,11 @@ fn process_transcript_entry(
             if !acc.last_known_model.is_empty() && ts > 0 {
                 let end_model_key = compact_model_name(&acc.last_known_model);
                 if !end_model_key.is_empty() {
-                    let prev = acc.model_last_active_ms.get(&end_model_key).copied().unwrap_or(0);
+                    let prev = acc
+                        .model_last_active_ms
+                        .get(&end_model_key)
+                        .copied()
+                        .unwrap_or(0);
                     acc.model_last_active_ms.insert(end_model_key, prev.max(ts));
                 }
             }
@@ -1415,8 +1422,13 @@ fn process_transcript_entry(
         let step_model_str = raw_model.as_deref().unwrap_or(&acc.last_known_model);
         let step_model_key = compact_model_name(step_model_str);
         if !step_model_key.is_empty() {
-            let prev = acc.model_last_active_ms.get(&step_model_key).copied().unwrap_or(0);
-            acc.model_last_active_ms.insert(step_model_key, prev.max(ts));
+            let prev = acc
+                .model_last_active_ms
+                .get(&step_model_key)
+                .copied()
+                .unwrap_or(0);
+            acc.model_last_active_ms
+                .insert(step_model_key, prev.max(ts));
         }
     }
 
@@ -1465,9 +1477,7 @@ fn process_transcript_entry(
             acc.peak_raw_turn_tokens = exclusive_turn;
         }
 
-        let step_model = raw_model
-            .as_deref()
-            .unwrap_or(&acc.last_known_model);
+        let step_model = raw_model.as_deref().unwrap_or(&acc.last_known_model);
         let model_key = {
             let k = compact_model_name(step_model);
             if k.is_empty() {
@@ -1495,7 +1505,8 @@ fn process_transcript_entry(
             cache_exclusive: cw_opt.is_none(),
         };
         let step_cost_usd =
-            calculate_token_cost(step_model, &usage_for_cost, cache_inclusive, false).unwrap_or(0.0);
+            calculate_token_cost(step_model, &usage_for_cost, cache_inclusive, false)
+                .unwrap_or(0.0);
 
         acc.transcript_cost_usd += step_cost_usd;
         acc.token_steps_count = acc.token_steps_count.saturating_add(1);
@@ -1535,7 +1546,10 @@ fn process_transcript_entry(
                 .as_ref()
                 .and_then(|u| as_u64_val(u.get("context_window_size")));
             let mut synthetic = Map::new();
-            synthetic.insert("total_input_tokens".to_string(), Value::from(acc.total_input_tokens));
+            synthetic.insert(
+                "total_input_tokens".to_string(),
+                Value::from(acc.total_input_tokens),
+            );
             synthetic.insert(
                 "total_output_tokens".to_string(),
                 Value::from(acc.total_output_tokens),
@@ -1612,7 +1626,13 @@ fn extract_child_output_tokens(
             .get("context_window")
             .and_then(|cw| cw.get("total_output_tokens")),
     )
-    .or_else(|| as_u64_val(entry.get("usage").and_then(|u| u.get("total_output_tokens"))));
+    .or_else(|| {
+        as_u64_val(
+            entry
+                .get("usage")
+                .and_then(|u| u.get("total_output_tokens")),
+        )
+    });
 
     if let Some(total_out) = raw_total {
         if let Some(prev) = prev_total_out {
@@ -1685,16 +1705,15 @@ fn read_child_tail_telemetry(
         let entry_source = entry.get("source").and_then(Value::as_str).unwrap_or("");
 
         if let Some(pending) = pending_planner.take() {
-            let is_interrupting = matches!(entry_type, "USER_INPUT" | "SYSTEM_MESSAGE")
-                || entry_source == "SYSTEM";
+            let is_interrupting =
+                matches!(entry_type, "USER_INPUT" | "SYSTEM_MESSAGE") || entry_source == "SYSTEM";
             if !is_interrupting
                 && let Some(ts) = valid_time_ms
                 && ts >= pending.start_ms
             {
                 let duration_ms = ts - pending.start_ms;
                 if duration_ms >= MIN_CHILD_API_DELTA_MS && pending.output_tokens > 0 {
-                    let candidate =
-                        pending.output_tokens as f64 / (duration_ms as f64 / 1000.0);
+                    let candidate = pending.output_tokens as f64 / (duration_ms as f64 / 1000.0);
                     if is_valid_speed(candidate) {
                         let model = if !pending.model.is_empty() {
                             pending.model
@@ -1801,14 +1820,14 @@ fn read_child_tail_telemetry(
 
     let speed_event_ms = speed_result.as_ref().map(|s| s.event_ms).unwrap_or(0);
     let latest_event_ms = latest_planner_ms.max(speed_event_ms);
-    let raw_latest_model = if latest_planner_ms >= speed_event_ms && !latest_planner_model.is_empty()
-    {
-        latest_planner_model.as_str()
-    } else if !latest_model.is_empty() {
-        latest_model.as_str()
-    } else {
-        child.model_hint.as_str()
-    };
+    let raw_latest_model =
+        if latest_planner_ms >= speed_event_ms && !latest_planner_model.is_empty() {
+            latest_planner_model.as_str()
+        } else if !latest_model.is_empty() {
+            latest_model.as_str()
+        } else {
+            child.model_hint.as_str()
+        };
     let latest_model_label = {
         let c = compact_model_name(raw_latest_model);
         if !c.is_empty() {
@@ -1866,8 +1885,8 @@ fn merge_child_candidate(
             );
         }
         Some(existing) => {
-            let is_newer =
-                event_ms > existing.event_ms || (event_ms == existing.event_ms && mtime_ms > existing.mtime_ms);
+            let is_newer = event_ms > existing.event_ms
+                || (event_ms == existing.event_ms && mtime_ms > existing.mtime_ms);
             if is_newer {
                 existing.speed = speed;
                 existing.event_ms = event_ms;
@@ -1908,9 +1927,7 @@ fn resolve_child_model_speeds(
         };
     }
     let (brain_dir, _) = resolve_brain_context(transcript_path);
-    let current_turns = acc
-        .user_turns
-        .max(u64::from(acc.has_planner_response));
+    let current_turns = acc.user_turns.max(u64::from(acc.has_planner_response));
 
     let mut registered: Vec<ChildAgentRecord> = acc.child_agents.values().cloned().collect();
     registered.sort_by(|a, b| {
@@ -1929,31 +1946,29 @@ fn resolve_child_model_speeds(
     let mut child_activities: Vec<ChildActivitySummary> = Vec::with_capacity(registered.len());
 
     for (child_idx, child) in registered.iter().enumerate() {
-        let tail = if child_idx < MAX_CHILD_TAIL_READS
-            && !deadline.is_some_and(|d| Instant::now() >= d)
-        {
-            brain_dir.as_ref().and_then(|bd| {
-                let cp = bd
-                    .join(&child.id)
-                    .join(".system_generated")
-                    .join("logs")
-                    .join("transcript.jsonl");
-                read_child_tail_telemetry(&cp, child, now_ms)
-            })
-        } else {
-            None
-        };
+        let tail =
+            if child_idx < MAX_CHILD_TAIL_READS && !deadline.is_some_and(|d| Instant::now() >= d) {
+                brain_dir.as_ref().and_then(|bd| {
+                    let cp = bd
+                        .join(&child.id)
+                        .join(".system_generated")
+                        .join("logs")
+                        .join("transcript.jsonl");
+                    read_child_tail_telemetry(&cp, child, now_ms)
+                })
+            } else {
+                None
+            };
 
         let tail_latest_ms = tail.as_ref().map(|t| t.latest_event_ms).unwrap_or(0);
         let child_last_active_ms = child.last_active_ms.max(tail_latest_ms);
         let base_turn = child.last_active_turn.max(child.added_turn);
-        let child_last_active_turn = if acc.last_user_input_ms > 0
-            && tail_latest_ms >= acc.last_user_input_ms
-        {
-            current_turns
-        } else {
-            base_turn
-        };
+        let child_last_active_turn =
+            if acc.last_user_input_ms > 0 && tail_latest_ms >= acc.last_user_input_ms {
+                current_turns
+            } else {
+                base_turn
+            };
 
         let resolved_model_hint = tail
             .as_ref()
@@ -1979,7 +1994,8 @@ fn resolve_child_model_speeds(
                 .get(&t.latest_model_label)
                 .copied()
                 .unwrap_or(0);
-            model_last_active_ms.insert(t.latest_model_label.clone(), prev.max(child_last_active_ms));
+            model_last_active_ms
+                .insert(t.latest_model_label.clone(), prev.max(child_last_active_ms));
         } else if !child.model_hint.is_empty() && child.last_active_ms > 0 {
             let hint_key = compact_model_name(&child.model_hint);
             if !hint_key.is_empty() {
@@ -1989,9 +2005,12 @@ fn resolve_child_model_speeds(
         }
 
         if let Some(sample) = tail.and_then(|t| t.speed_result) {
-            let cand_last_active_ms = child_last_active_ms
-                .max(sample.event_ms)
-                .max(model_last_active_ms.get(&sample.model_label).copied().unwrap_or(0));
+            let cand_last_active_ms = child_last_active_ms.max(sample.event_ms).max(
+                model_last_active_ms
+                    .get(&sample.model_label)
+                    .copied()
+                    .unwrap_or(0),
+            );
             merge_child_candidate(
                 &mut live_by_model,
                 &sample.model_label,
@@ -2073,8 +2092,16 @@ fn resolve_child_model_speeds(
             MergedChildCandidate {
                 model: entry.model.clone(),
                 speed: entry.speed,
-                event_ms: if entry.event_ms > 0 { entry.event_ms } else { entry.updated_at },
-                mtime_ms: if entry.mtime_ms > 0 { entry.mtime_ms } else { entry.updated_at },
+                event_ms: if entry.event_ms > 0 {
+                    entry.event_ms
+                } else {
+                    entry.updated_at
+                },
+                mtime_ms: if entry.mtime_ms > 0 {
+                    entry.mtime_ms
+                } else {
+                    entry.updated_at
+                },
                 first_order: entry.first_order,
                 last_active_turn: entry_turn,
                 last_active_ms: entry_last_ms,
@@ -2267,9 +2294,7 @@ fn matches_signal_len5_at(tail: &[u8], b4: u8) -> bool {
         b'_' => tail.starts_with(b"USER_INPUT") || tail.starts_with(b"used_percentage"),
         b'N' => tail.starts_with(b"PLANNER_RESPONSE"),
         b'c' => tail.starts_with(b"truncated_fields"),
-        b'l' => {
-            tail.starts_with(b"total_input_tokens") || tail.starts_with(b"total_output_tokens")
-        }
+        b'l' => tail.starts_with(b"total_input_tokens") || tail.starts_with(b"total_output_tokens"),
         _ => false,
     }
 }
@@ -2508,9 +2533,7 @@ fn process_clean_zone_bytes(
             break;
         };
         *pass2_lines += 1;
-        if (*pass2_lines).is_multiple_of(1024)
-            && deadline.is_some_and(|d| Instant::now() >= d)
-        {
+        if (*pass2_lines).is_multiple_of(1024) && deadline.is_some_and(|d| Instant::now() >= d) {
             return (false, pos as u64);
         }
         let end = pos + rel_nl;
@@ -2654,7 +2677,10 @@ fn scan_transcript_two_pass(
     let full_map = if needed_full_steps.is_empty() {
         None
     } else {
-        Some(load_full_entries_map(ctx.transcript_path, &needed_full_steps))
+        Some(load_full_entries_map(
+            ctx.transcript_path,
+            &needed_full_steps,
+        ))
     };
 
     if ctx.deadline.is_some_and(|d| Instant::now() >= d)
@@ -2951,7 +2977,8 @@ pub(super) fn scan_transcript_incremental(
                             },
                             next_off,
                         ));
-                    } else if let Some(obj) = parse_transcript_json_object(&view[cur_start..line_end])
+                    } else if let Some(obj) =
+                        parse_transcript_json_object(&view[cur_start..line_end])
                     {
                         if obj
                             .get("truncated_fields")
@@ -3079,7 +3106,11 @@ pub(super) fn scan_transcript_incremental(
 
     let main_last_active_ms = {
         let model_ts = if !main_model_key.is_empty() {
-            state.model_last_active_ms.get(&main_model_key).copied().unwrap_or(0)
+            state
+                .model_last_active_ms
+                .get(&main_model_key)
+                .copied()
+                .unwrap_or(0)
         } else {
             0
         };
@@ -3374,7 +3405,11 @@ mod tests {
         // 2. Place PLANNER_RESPONSE straddling the 2nd 64KB chunk boundary.
         let planner_line = r#"{"step_index":1000,"type":"PLANNER_RESPONSE","created_at":"2026-10-01T00:00:03.000Z","model":"gemini-4-carbon-high","output_tokens":77,"input_tokens":500}"#;
         let planner_key_offset = planner_line.find("PLANNER_RESPONSE").unwrap();
-        push_clean_until(&mut raw, &mut step, 2 * FULL_CHUNK_BYTES - planner_key_offset - 8);
+        push_clean_until(
+            &mut raw,
+            &mut step,
+            2 * FULL_CHUNK_BYTES - planner_key_offset - 8,
+        );
         assert!(raw.len() < 2 * FULL_CHUNK_BYTES);
         assert!(raw.len() + planner_line.len() > 2 * FULL_CHUNK_BYTES);
         raw.push_str(planner_line);
@@ -3427,7 +3462,13 @@ mod tests {
         for line in raw.lines() {
             let trimmed = line.trim();
             if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
-                process_transcript_entry(obj, &mut full_state, Some(main_id), Some(&full_map), now_ms);
+                process_transcript_entry(
+                    obj,
+                    &mut full_state,
+                    Some(main_id),
+                    Some(&full_map),
+                    now_ms,
+                );
             }
         }
 

@@ -5,8 +5,8 @@ use crate::render::{
 };
 
 use super::query::{
-    CsvExportKind, LedgerOverview, LedgerSource, LedgerSourceFilter, LedgerTimeRange,
-    LedgerGranularity, format_datetime_short, format_date_short,
+    CsvExportKind, LedgerGranularity, LedgerOverview, LedgerSource, LedgerSourceFilter,
+    LedgerTimeRange, format_date_short, format_datetime_short,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -523,11 +523,17 @@ pub fn render_stats_text(
     let meta = &overview.meta;
     let summary = &overview.summary;
     let active_src = meta.source.to_ascii_lowercase();
-    let has_ide = overview.by_source.iter().any(|s| s.source == LedgerSource::Ide);
+    let has_ide = overview
+        .by_source
+        .iter()
+        .any(|s| s.source == LedgerSource::Ide);
     let show_source_tags = active_src == "ide"
         || overview.by_source.len() > 1
         || has_ide
-        || overview.cascades.iter().any(|s| s.source == LedgerSource::Ide);
+        || overview
+            .cascades
+            .iter()
+            .any(|s| s.source == LedgerSource::Ide);
 
     let mut lines: Vec<String> = Vec::new();
     let rule = format!("{}{}{}", c.gray, "═".repeat(72), c.reset);
@@ -577,7 +583,10 @@ pub fn render_stats_text(
     }
 
     lines.push(String::new());
-    lines.push(format!("{}{}▌ {}{}", c.bold, c.magenta, t.kpi_title, c.reset));
+    lines.push(format!(
+        "{}{}▌ {}{}",
+        c.bold, c.magenta, t.kpi_title, c.reset
+    ));
 
     let samples_label = |n: u64| -> String {
         if t.is_zh {
@@ -639,16 +648,12 @@ pub fn render_stats_text(
     let cascades_detail = if t.is_zh {
         format!(
             "{} 根任务树 + {} 子代理 ({} 步)",
-            summary.root_cascade_count,
-            summary.subagent_conversation_count,
-            summary.total_steps
+            summary.root_cascade_count, summary.subagent_conversation_count, summary.total_steps
         )
     } else {
         format!(
             "{} root + {} subagents ({} steps)",
-            summary.root_cascade_count,
-            summary.subagent_conversation_count,
-            summary.total_steps
+            summary.root_cascade_count, summary.subagent_conversation_count, summary.total_steps
         )
     };
 
@@ -733,16 +738,46 @@ pub fn render_stats_text(
             c.bold, c.magenta, t.models_title, c.reset
         ));
         let cols = [
-            TableCol { label: t.col_model, align: Align::Left },
-            TableCol { label: t.col_cost, align: Align::Right },
-            TableCol { label: t.col_share, align: Align::Right },
-            TableCol { label: t.col_cache, align: Align::Right },
-            TableCol { label: t.col_input, align: Align::Right },
-            TableCol { label: t.col_cache_read, align: Align::Right },
-            TableCol { label: t.col_output, align: Align::Right },
-            TableCol { label: t.col_speed, align: Align::Right },
-            TableCol { label: t.col_ttft, align: Align::Right },
-            TableCol { label: t.col_steps, align: Align::Right },
+            TableCol {
+                label: t.col_model,
+                align: Align::Left,
+            },
+            TableCol {
+                label: t.col_cost,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_share,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_cache,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_input,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_cache_read,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_output,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_speed,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_ttft,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_steps,
+                align: Align::Right,
+            },
         ];
         let rows: Vec<Vec<String>> = overview
             .by_model
@@ -813,14 +848,7 @@ pub fn render_stats_text(
             let cost_str = pad_cell(&format_usd(b.cost_usd), 8, Align::Right);
             lines.push(format!(
                 "  {}{lbl}{} │ {bar} {}{cost_str}{} {}({:>3} steps, {:.0}% cache){}",
-                c.gray,
-                c.reset,
-                c.green,
-                c.reset,
-                c.gray,
-                b.steps,
-                b.cache_hit_rate,
-                c.reset
+                c.gray, c.reset, c.green, c.reset, c.gray, b.steps, b.cache_hit_rate, c.reset
             ));
         }
     }
@@ -832,14 +860,38 @@ pub fn render_stats_text(
             c.bold, c.magenta, t.top_cascades_title, c.reset
         ));
         let cols = [
-            TableCol { label: t.col_workspace, align: Align::Left },
-            TableCol { label: t.col_branch, align: Align::Left },
-            TableCol { label: t.col_cost, align: Align::Right },
-            TableCol { label: t.col_subs, align: Align::Right },
-            TableCol { label: t.col_steps, align: Align::Right },
-            TableCol { label: t.col_cache, align: Align::Right },
-            TableCol { label: t.col_model, align: Align::Left },
-            TableCol { label: t.col_last_active, align: Align::Right },
+            TableCol {
+                label: t.col_workspace,
+                align: Align::Left,
+            },
+            TableCol {
+                label: t.col_branch,
+                align: Align::Left,
+            },
+            TableCol {
+                label: t.col_cost,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_subs,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_steps,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_cache,
+                align: Align::Right,
+            },
+            TableCol {
+                label: t.col_model,
+                align: Align::Left,
+            },
+            TableCol {
+                label: t.col_last_active,
+                align: Align::Right,
+            },
         ];
         let rows: Vec<Vec<String>> = overview
             .cascades
@@ -869,7 +921,11 @@ pub fn render_stats_text(
                     "…",
                 );
                 let ws_cell = format!("{src_prefix}{}", ws_trunc.trim_end());
-                let br_raw = if s.branch.is_empty() { "--" } else { s.branch.as_str() };
+                let br_raw = if s.branch.is_empty() {
+                    "--"
+                } else {
+                    s.branch.as_str()
+                };
                 let br_cell = truncate_plain_to_display_width(br_raw, 16, "…");
                 let models_joined = if s.models.is_empty() {
                     "--".to_string()
@@ -885,7 +941,12 @@ pub fn render_stats_text(
                     s.steps.to_string(),
                     color_cache_rate(s.cache_hit_rate, &c),
                     models_cell.trim_end().to_string(),
-                    format!("{}{}{}", c.gray, format_datetime_short(s.last_activity_ms), c.reset),
+                    format!(
+                        "{}{}{}",
+                        c.gray,
+                        format_datetime_short(s.last_activity_ms),
+                        c.reset
+                    ),
                 ]
             })
             .collect();

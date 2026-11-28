@@ -24,11 +24,8 @@ thread_local! {
 
 /// Read an environment variable, honoring any active thread-local `with_env_overrides` scope first.
 pub fn env_var(key: &str) -> Option<String> {
-    let overridden = THREAD_ENV_OVERRIDES.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|map| map.get(key).cloned())
-    });
+    let overridden = THREAD_ENV_OVERRIDES
+        .with(|cell| cell.borrow().as_ref().and_then(|map| map.get(key).cloned()));
     match overridden {
         Some(val) => val,
         None => env::var(key).ok(),
@@ -37,11 +34,8 @@ pub fn env_var(key: &str) -> Option<String> {
 
 /// Read an environment variable as `OsString`, honoring any active thread-local override scope.
 pub fn env_var_os(key: &str) -> Option<OsString> {
-    let overridden = THREAD_ENV_OVERRIDES.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|map| map.get(key).cloned())
-    });
+    let overridden = THREAD_ENV_OVERRIDES
+        .with(|cell| cell.borrow().as_ref().and_then(|map| map.get(key).cloned()));
     match overridden {
         Some(val) => val.map(OsString::from),
         None => env::var_os(key),
@@ -362,7 +356,8 @@ pub fn get_antigravity_ide_roots() -> Vec<PathBuf> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut deduped = Vec::new();
     for candidate in raw_candidates {
-        let key = fs::canonicalize(&candidate).unwrap_or_else(|_| normalize_lexical_path(&candidate));
+        let key =
+            fs::canonicalize(&candidate).unwrap_or_else(|_| normalize_lexical_path(&candidate));
         if seen.insert(key) {
             deduped.push(candidate);
         }
@@ -1251,7 +1246,10 @@ mod tests {
 
     #[test]
     fn with_env_overrides_supports_override_unset_nesting_and_panic_restore() {
-        assert_eq!(env_var("AGY_PULSE_DATA_DIR"), env::var("AGY_PULSE_DATA_DIR").ok());
+        assert_eq!(
+            env_var("AGY_PULSE_DATA_DIR"),
+            env::var("AGY_PULSE_DATA_DIR").ok()
+        );
 
         let mut outer = HashMap::new();
         outer.insert(
@@ -1265,7 +1263,10 @@ mod tests {
                 env_var("AGY_PULSE_DATA_DIR").as_deref(),
                 Some("/tmp/outer-data")
             );
-            assert_eq!(get_antigravity_roots(), vec![PathBuf::from("/tmp/outer-data")]);
+            assert_eq!(
+                get_antigravity_roots(),
+                vec![PathBuf::from("/tmp/outer-data")]
+            );
             assert_eq!(read_language_env_override().as_deref(), Some("zh"));
 
             let mut inner = HashMap::new();
@@ -1281,8 +1282,14 @@ mod tests {
             assert_eq!(env_var("AGY_PULSE_LANGUAGE").as_deref(), Some("zh"));
         });
 
-        assert_eq!(env_var("AGY_PULSE_DATA_DIR"), env::var("AGY_PULSE_DATA_DIR").ok());
-        assert_eq!(env_var("AGY_PULSE_LANGUAGE"), env::var("AGY_PULSE_LANGUAGE").ok());
+        assert_eq!(
+            env_var("AGY_PULSE_DATA_DIR"),
+            env::var("AGY_PULSE_DATA_DIR").ok()
+        );
+        assert_eq!(
+            env_var("AGY_PULSE_LANGUAGE"),
+            env::var("AGY_PULSE_LANGUAGE").ok()
+        );
     }
 
     #[test]
@@ -1336,7 +1343,10 @@ mod tests {
     fn os_csprng_primitives_generate_unique_nonempty_tokens() {
         let mut buf = [0u8; 24];
         fill_random_bytes(&mut buf).expect("fill_random_bytes");
-        assert!(buf.iter().any(|&b| b != 0), "expected non-zero CSPRNG bytes");
+        assert!(
+            buf.iter().any(|&b| b != 0),
+            "expected non-zero CSPRNG bytes"
+        );
 
         let mut empty = [];
         fill_random_bytes(&mut empty).expect("empty fill_random_bytes");
@@ -1351,7 +1361,10 @@ mod tests {
         assert_eq!(h1.len(), 64);
         assert_eq!(h2.len(), 64);
         assert_ne!(h1, h2);
-        assert!(h1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            h1.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
 
         let t1 = random_128bit_hex();
         let t2 = random_128bit_hex();
@@ -1379,10 +1392,16 @@ mod tests {
             "http://127.0.0.1:8080/\0evil",
             "http://127.0.0.1:8080/ with space",
         ] {
-            assert!(!is_safe_browser_url(bad), "should reject unsafe URL: {bad:?}");
+            assert!(
+                !is_safe_browser_url(bad),
+                "should reject unsafe URL: {bad:?}"
+            );
         }
 
-        assert!(!open_url_default_browser(DesktopOs::Linux, "javascript:alert(1)"));
+        assert!(!open_url_default_browser(
+            DesktopOs::Linux,
+            "javascript:alert(1)"
+        ));
         assert!(!open_url_default_browser(
             DesktopOs::Windows,
             "file:///C:/Windows/System32/calc.exe"

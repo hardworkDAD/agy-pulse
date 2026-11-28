@@ -214,10 +214,7 @@ fn write_atomic_0600_inner(path: &Path, bytes: &[u8], sync_disk: bool) -> std::i
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let seq = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("cache");
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("cache");
     let tmp_name = format!(".{file_name}.{}.{nanos}.{seq}.tmp", std::process::id());
     let tmp_path = path.with_file_name(tmp_name);
 
@@ -491,7 +488,10 @@ pub(super) fn set_executable_0755(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, perms)
 }
 
-pub(super) fn replace_executable_atomically(source_file: &Path, target_path: &Path) -> io::Result<()> {
+pub(super) fn replace_executable_atomically(
+    source_file: &Path,
+    target_path: &Path,
+) -> io::Result<()> {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)?;
     }

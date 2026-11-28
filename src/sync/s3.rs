@@ -4,9 +4,9 @@ use url::Url;
 
 use super::config::sanitize_url_for_display;
 use super::http_util::{
-    MAX_REMOTE_OBJECT_BYTES, build_http_agent, format_host_header, hmac_sha256,
-    read_body_capped, redact_error_message, strip_url_credentials, uri_encode_path,
-    uri_encode_segment, validate_remote_url, xml_unescape,
+    MAX_REMOTE_OBJECT_BYTES, build_http_agent, format_host_header, hmac_sha256, read_body_capped,
+    redact_error_message, strip_url_credentials, uri_encode_path, uri_encode_segment,
+    validate_remote_url, xml_unescape,
 };
 use super::protocol::{validate_relative_key, validate_relative_prefix, validate_single_segment};
 use super::{RemoteProbeInfo, SyncError, SyncRemote};
@@ -65,10 +65,7 @@ pub fn sign_aws_v4_headers(
 
     let mut headers: Vec<(String, String)> = vec![
         ("host".to_string(), normalize_header_value(host)),
-        (
-            "x-amz-content-sha256".to_string(),
-            payload_hash.clone(),
-        ),
+        ("x-amz-content-sha256".to_string(), payload_hash.clone()),
         ("x-amz-date".to_string(), normalize_header_value(amz_date)),
     ];
     for (k, v) in extra_headers {
@@ -170,9 +167,8 @@ impl S3Remote {
         let endpoint_url = strip_url_credentials(parsed);
 
         let trimmed_bucket = bucket.trim();
-        validate_single_segment(trimmed_bucket, "s3 bucket").map_err(|err| {
-            SyncError::Config(format!("invalid s3 bucket: {err}"))
-        })?;
+        validate_single_segment(trimmed_bucket, "s3 bucket")
+            .map_err(|err| SyncError::Config(format!("invalid s3 bucket: {err}")))?;
 
         let ak = access_key
             .map(str::trim)
@@ -221,7 +217,9 @@ impl S3Remote {
                 .ok_or_else(|| SyncError::Config("s3 endpoint missing host".to_string()))?;
             let vh_host = format!("{}.{}", self.bucket, orig_host);
             url.set_host(Some(&vh_host)).map_err(|err| {
-                SyncError::Config(format!("invalid virtual-hosted s3 bucket host '{vh_host}': {err}"))
+                SyncError::Config(format!(
+                    "invalid virtual-hosted s3 bucket host '{vh_host}': {err}"
+                ))
             })?;
         }
 
@@ -294,10 +292,7 @@ impl S3Remote {
             .uri(&full_url)
             .header("Host", signed.host.as_str())
             .header("x-amz-date", signed.x_amz_date.as_str())
-            .header(
-                "x-amz-content-sha256",
-                signed.x_amz_content_sha256.as_str(),
-            )
+            .header("x-amz-content-sha256", signed.x_amz_content_sha256.as_str())
             .header("Authorization", signed.authorization.as_str());
 
         for (name, val) in extra_headers {
@@ -306,14 +301,20 @@ impl S3Remote {
 
         let req = builder.body(payload).map_err(|err| {
             SyncError::Remote(redact_error_message(
-                &format!("failed to construct S3 {method} request for {}/{}: {err}", self.display_endpoint, self.bucket),
+                &format!(
+                    "failed to construct S3 {method} request for {}/{}: {err}",
+                    self.display_endpoint, self.bucket
+                ),
                 &self.secrets,
             ))
         })?;
 
         self.agent.run(req).map_err(|err| {
             SyncError::Remote(redact_error_message(
-                &format!("S3 {method} failed for {}/{}: {err}", self.display_endpoint, self.bucket),
+                &format!(
+                    "S3 {method} failed for {}/{}: {err}",
+                    self.display_endpoint, self.bucket
+                ),
                 &self.secrets,
             ))
         })

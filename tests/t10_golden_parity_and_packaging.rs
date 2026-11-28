@@ -109,7 +109,12 @@ impl IsolatedEnv {
         cmd
     }
 
-    fn run_stdin(&self, bin: &Path, stdin_text: &str, extra_env: &[(&str, &str)]) -> (i32, String, String) {
+    fn run_stdin(
+        &self,
+        bin: &Path,
+        stdin_text: &str,
+        extra_env: &[(&str, &str)],
+    ) -> (i32, String, String) {
         let mut cmd = self.base_cmd(bin);
         for (k, v) in extra_env {
             cmd.env(k, v);
@@ -295,9 +300,9 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         .unwrap();
 
         let conv_id = "conv-single-1";
-        let tp = env
-            .cli_data_dir
-            .join(format!("brain/{conv_id}/.system_generated/logs/transcript.jsonl"));
+        let tp = env.cli_data_dir.join(format!(
+            "brain/{conv_id}/.system_generated/logs/transcript.jsonl"
+        ));
         fs::create_dir_all(tp.parent().unwrap()).unwrap();
         let t0 = epoch_secs_to_iso8601_utc(now_secs - 4);
         let t1 = epoch_secs_to_iso8601_utc(now_secs - 2);
@@ -340,8 +345,11 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         })
         .to_string();
 
-        let (code, out, err) =
-            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
+        let (code, out, err) = env.run_stdin(
+            &agy_pulse_bin(),
+            &stdin,
+            &[("AGY_PULSE_FORCE_UNICODE", "1")],
+        );
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
@@ -401,8 +409,11 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         })
         .to_string();
 
-        let (code, out, err) =
-            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
+        let (code, out, err) = env.run_stdin(
+            &agy_pulse_bin(),
+            &stdin,
+            &[("AGY_PULSE_FORCE_UNICODE", "1")],
+        );
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
@@ -438,12 +449,12 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
 
         let main_id = "main-cascade-1";
         let child_id = "child-sub-1";
-        let main_tp = env
-            .cli_data_dir
-            .join(format!("brain/{main_id}/.system_generated/logs/transcript.jsonl"));
-        let child_tp = env
-            .cli_data_dir
-            .join(format!("brain/{child_id}/.system_generated/logs/transcript.jsonl"));
+        let main_tp = env.cli_data_dir.join(format!(
+            "brain/{main_id}/.system_generated/logs/transcript.jsonl"
+        ));
+        let child_tp = env.cli_data_dir.join(format!(
+            "brain/{child_id}/.system_generated/logs/transcript.jsonl"
+        ));
         fs::create_dir_all(main_tp.parent().unwrap()).unwrap();
         fs::create_dir_all(child_tp.parent().unwrap()).unwrap();
 
@@ -497,10 +508,16 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         fs::create_dir_all(&conv_dir).unwrap();
         {
             let conn = Connection::open(conv_dir.join(format!("{main_id}.db"))).unwrap();
-            conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-                .unwrap();
-            conn.execute("CREATE TABLE executor_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-                .unwrap();
+            conn.execute(
+                "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE executor_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+                [],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO executor_metadata (idx, data) VALUES (?1, ?2)",
                 params![1i64, pb_executor_limit_blob(180_000)],
@@ -518,15 +535,24 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
                 kvs: &[("last_step_index", "1")],
                 step_indices: &[1],
             }]);
-            conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-                .unwrap();
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+                params![1i64, blob],
+            )
+            .unwrap();
         }
         {
             let conn = Connection::open(conv_dir.join(format!("{child_id}.db"))).unwrap();
-            conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-                .unwrap();
-            conn.execute("CREATE TABLE executor_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-                .unwrap();
+            conn.execute(
+                "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE executor_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+                [],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO executor_metadata (idx, data) VALUES (?1, ?2)",
                 params![1i64, pb_executor_limit_blob(512_000)],
@@ -544,8 +570,11 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
                 kvs: &[("parent_cascade_id", main_id), ("root_cascade_id", main_id)],
                 step_indices: &[],
             }]);
-            conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-                .unwrap();
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+                params![1i64, blob],
+            )
+            .unwrap();
         }
 
         let stdin = serde_json::json!({
@@ -565,8 +594,11 @@ fn t10_golden_parity_single_turn_compaction_cascade_and_fallback() {
         })
         .to_string();
 
-        let (code, out, err) =
-            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
+        let (code, out, err) = env.run_stdin(
+            &agy_pulse_bin(),
+            &stdin,
+            &[("AGY_PULSE_FORCE_UNICODE", "1")],
+        );
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
@@ -653,19 +685,34 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
         })
         .to_string();
 
-        let (code, out, err) =
-            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
+        let (code, out, err) = env.run_stdin(
+            &agy_pulse_bin(),
+            &stdin,
+            &[("AGY_PULSE_FORCE_UNICODE", "1")],
+        );
         assert_eq!(code, 0, "stderr: {err}");
         let plain = strip_ansi(&out);
         let lines: Vec<&str> = plain.lines().collect();
         assert_eq!(lines.len(), 6, "style={style} got:\n{plain}");
         assert_eq!(lines[0], "ws │ Ultra");
-        assert_eq!(lines[1], "  ───────────────────────────────────────────────────────────────────");
-        assert_eq!(lines[2], "  Google 5h   [█████░]  85% ~2h15m │ Claude 5h   [█░░░░░]  15% ~2h15m");
-        assert_eq!(lines[3], "  Google week [███░░░]  42% ~3d4h  │ Claude week [░░░░░░]   5% ~3d4h ");
+        assert_eq!(
+            lines[1],
+            "  ───────────────────────────────────────────────────────────────────"
+        );
+        assert_eq!(
+            lines[2],
+            "  Google 5h   [█████░]  85% ~2h15m │ Claude 5h   [█░░░░░]  15% ~2h15m"
+        );
+        assert_eq!(
+            lines[3],
+            "  Google week [███░░░]  42% ~3d4h  │ Claude week [░░░░░░]   5% ~3d4h "
+        );
         assert_eq!(lines[4], "  Argon 5h    [████░░]  60% ~2h15m");
         assert!(!plain.contains("Openai") && !plain.contains("OpenAI"));
-        assert_eq!(lines[5], "◈ Gemini 3.1 Pro · Ctx ············ 0.0% (limit 512K) · Out 300 · Cost $0.01");
+        assert_eq!(
+            lines[5],
+            "◈ Gemini 3.1 Pro · Ctx ············ 0.0% (limit 512K) · Out 300 · Cost $0.01"
+        );
     }
 
     // Scenario 4B: Multi-provider quota `compact` mode
@@ -698,8 +745,11 @@ fn t10_golden_parity_quota_modes_narrow_columns_ascii_and_bilingual() {
         })
         .to_string();
 
-        let (code, out, err) =
-            env.run_stdin(&agy_pulse_bin(), &stdin, &[("AGY_PULSE_FORCE_UNICODE", "1")]);
+        let (code, out, err) = env.run_stdin(
+            &agy_pulse_bin(),
+            &stdin,
+            &[("AGY_PULSE_FORCE_UNICODE", "1")],
+        );
         assert_eq!(code, 0, "stderr: {err}");
         assert_eq!(
             strip_ansi(&out),
@@ -920,12 +970,18 @@ mod unix_packaging_e2e {
                                     .to_string();
                                 loop {
                                     let mut line = String::new();
-                                    if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                                    if reader.read_line(&mut line).is_err()
+                                        || line.trim().is_empty()
+                                    {
                                         break;
                                     }
                                 }
                                 let resp = h(&path);
-                                let reason = if resp.status == 200 { "OK" } else { "Not Found" };
+                                let reason = if resp.status == 200 {
+                                    "OK"
+                                } else {
+                                    "Not Found"
+                                };
                                 let mut head = format!(
                                     "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
                                     resp.status,
@@ -1010,10 +1066,16 @@ mod unix_packaging_e2e {
         l.local_addr().unwrap().port()
     }
 
-    fn send_http(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> std::io::Result<(u16, String)> {
+    fn send_http(
+        port: u16,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> std::io::Result<(u16, String)> {
         let mut stream = TcpStream::connect(("127.0.0.1", port))?;
         stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+        let mut req =
+            format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
         for (k, v) in headers {
             req.push_str(&format!("{k}: {v}\r\n"));
         }
@@ -1028,7 +1090,10 @@ mod unix_packaging_e2e {
             .and_then(|l| l.split_whitespace().nth(1))
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(0);
-        let body = raw.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+        let body = raw
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_default();
         Ok((status, body))
     }
 
@@ -1070,7 +1135,10 @@ mod unix_packaging_e2e {
             } else if path == format!("/{asset_name}") {
                 MockResponse {
                     status: 200,
-                    headers: vec![("Content-Type".to_string(), "application/octet-stream".to_string())],
+                    headers: vec![(
+                        "Content-Type".to_string(),
+                        "application/octet-stream".to_string(),
+                    )],
                     body: archive_clone.clone(),
                 }
             } else {
@@ -1115,10 +1183,13 @@ mod unix_packaging_e2e {
 
         // 2. Seed real conversation + run installed statusline binary
         let conv_id = "e2e-conv-1";
-        let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-        let tp = env
-            .cli_data_dir
-            .join(format!("brain/{conv_id}/.system_generated/logs/transcript.jsonl"));
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let tp = env.cli_data_dir.join(format!(
+            "brain/{conv_id}/.system_generated/logs/transcript.jsonl"
+        ));
         fs::create_dir_all(tp.parent().unwrap()).unwrap();
         fs::write(
             &tp,
@@ -1142,8 +1213,11 @@ mod unix_packaging_e2e {
         fs::create_dir_all(&conv_dir).unwrap();
         {
             let conn = Connection::open(conv_dir.join(format!("{conv_id}.db"))).unwrap();
-            conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-                .unwrap();
+            conn.execute(
+                "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+                [],
+            )
+            .unwrap();
             let blob = pb_gen_metadata_blob(&[GenEntrySpec {
                 sys_tokens: 1_000,
                 raw_in: 4_000,
@@ -1155,8 +1229,11 @@ mod unix_packaging_e2e {
                 step_indices: &[1],
                 ..Default::default()
             }]);
-            conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-                .unwrap();
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+                params![1i64, blob],
+            )
+            .unwrap();
         }
 
         let stdin_payload = serde_json::json!({
@@ -1174,9 +1251,15 @@ mod unix_packaging_e2e {
         let (sl_code, sl_out, sl_err) = env.run_stdin(&installed_primary, &stdin_payload, &[]);
         assert_eq!(sl_code, 0, "statusline stderr: {sl_err}");
         let sl_plain = strip_ansi(&sl_out);
-        assert!(sl_plain.contains("Claude Sonnet 4.6") && sl_plain.contains("Pro"), "got: {sl_plain}");
+        assert!(
+            sl_plain.contains("Claude Sonnet 4.6") && sl_plain.contains("Pro"),
+            "got: {sl_plain}"
+        );
         let ledger_path = env.cli_data_dir.join("agy-pulse-ledger.sqlite");
-        assert!(ledger_path.is_file(), "statusline must populate SQLite ledger");
+        assert!(
+            ledger_path.is_file(),
+            "statusline must populate SQLite ledger"
+        );
 
         // 3. Verify `agypl stats --json`
         let stats_out = env
@@ -1230,7 +1313,8 @@ mod unix_packaging_e2e {
         }
         assert!(ready, "installed dashboard failed to start");
 
-        let (ov_status, ov_body) = send_http(dash_port, "GET", "/api/overview?range=all", &[]).unwrap();
+        let (ov_status, ov_body) =
+            send_http(dash_port, "GET", "/api/overview?range=all", &[]).unwrap();
         assert_eq!(ov_status, 200);
         let ov_json: Value = serde_json::from_str(&ov_body).unwrap();
         assert!(
@@ -1285,13 +1369,19 @@ mod unix_packaging_e2e {
             }
             thread::sleep(Duration::from_millis(25));
         }
-        assert!(exited, "dashboard daemon must exit cleanly after page close grace");
+        assert!(
+            exited,
+            "dashboard daemon must exit cleanly after page close grace"
+        );
 
         // 6. Verify `agypl update` against local release feed
         let update_out = env
             .base_cmd(&installed_alias)
             .arg("update")
-            .env("AGY_PULSE_UPDATE_URL", format!("{}/latest.json", server.base_url))
+            .env(
+                "AGY_PULSE_UPDATE_URL",
+                format!("{}/latest.json", server.base_url),
+            )
             .env("AGY_PULSE_RELEASE_BASE_URL", &server.base_url)
             .output()
             .unwrap();
@@ -1323,12 +1413,24 @@ mod unix_packaging_e2e {
             String::from_utf8_lossy(&uninstall_out.stderr)
         );
 
-        assert!(!installed_primary.exists(), "agy-pulse binary must be removed");
+        assert!(
+            !installed_primary.exists(),
+            "agy-pulse binary must be removed"
+        );
         assert!(!installed_alias.exists(), "agypl binary must be removed");
-        assert!(!plugin_dir.exists(), "plugin dir must be cleaned by uninstall.sh");
+        assert!(
+            !plugin_dir.exists(),
+            "plugin dir must be cleaned by uninstall.sh"
+        );
         let settings_after: Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
-        assert!(settings_after.get("statusLine").is_none(), "statusLine must be cleared");
-        assert!(ledger_path.is_file(), "ledger SQLite must be preserved by default");
+        assert!(
+            settings_after.get("statusLine").is_none(),
+            "statusLine must be cleared"
+        );
+        assert!(
+            ledger_path.is_file(),
+            "ledger SQLite must be preserved by default"
+        );
     }
 }

@@ -106,12 +106,18 @@ impl IsolatedEnv {
         );
         guard.set("XDG_CONFIG_HOME", self.xdg_cfg_dir.to_str().unwrap());
         guard.set("AGY_PULSE_DATA_DIR", self.cli_data_dir.to_str().unwrap());
-        guard.set("AGY_PULSE_IDE_DATA_DIR", self.ide_data_dir.to_str().unwrap());
+        guard.set(
+            "AGY_PULSE_IDE_DATA_DIR",
+            self.ide_data_dir.to_str().unwrap(),
+        );
         guard.set(
             "AGY_PULSE_GLOBAL_CONFIG_DIR",
             self.global_cfg_dir.to_str().unwrap(),
         );
-        guard.set("AGY_PULSE_SYNC_CONFIG", self.sync_cfg_path.to_str().unwrap());
+        guard.set(
+            "AGY_PULSE_SYNC_CONFIG",
+            self.sync_cfg_path.to_str().unwrap(),
+        );
         guard.set("LC_ALL", "en_US.UTF-8");
         guard.set("LANG", "en_US.UTF-8");
         guard.remove("LC_CTYPE");
@@ -574,7 +580,11 @@ fn t15_pulse_config_get_absent_put_preserve_unknown_clear_optionals_and_restart_
     assert!(disk_after["display"].get("username").is_none());
     assert!(disk_after["display"].get("cacheHitThresholds").is_none());
     assert!(disk_after["display"].get("modelSpeedExpireTurns").is_none());
-    assert!(disk_after["display"].get("modelSpeedExpireMinutes").is_none());
+    assert!(
+        disk_after["display"]
+            .get("modelSpeedExpireMinutes")
+            .is_none()
+    );
     assert_eq!(disk_after["icons"]["plan"], "P");
     assert_eq!(disk_after["icons"]["model"], "M");
     assert!(disk_after["icons"].get("branch").is_none());
@@ -708,7 +718,10 @@ fn t15_pulse_config_409_conflict_and_validation_errors() {
             "display.username",
             json!({ "display": { "username": "bad\nuser" } }),
         ),
-        ("icons.branch", json!({ "icons": { "branch": "123456789" } })),
+        (
+            "icons.branch",
+            json!({ "icons": { "branch": "123456789" } }),
+        ),
         ("icons.branch", json!({ "icons": { "branch": "a\tb" } })),
     ];
 
@@ -845,12 +858,7 @@ fn t15_pulse_config_env_overrides_and_corrupt_json_recovery() {
     let jc: Value = serde_json::from_str(&get_corrupt.body).unwrap();
     assert_eq!(jc["exists"], true);
     assert_eq!(jc["version"], corrupt_ver);
-    assert!(
-        jc["parseError"]
-            .as_str()
-            .unwrap()
-            .contains("invalid JSON")
-    );
+    assert!(jc["parseError"].as_str().unwrap().contains("invalid JSON"));
 
     let recover_body = serde_json::to_string(&json!({
         "expectedVersion": corrupt_ver,
@@ -930,7 +938,10 @@ fn t15_pulse_preview_endpoint_no_disk_write() {
     let zh_json: Value = serde_json::from_str(&zh_res.body).unwrap();
     assert_eq!(zh_json["resolvedLanguage"], "zh");
     let zh_ansi = zh_json["ansi"].as_str().unwrap();
-    assert!(zh_ansi.contains("\x1b[34m"), "expected blue ANSI SGR in {zh_ansi:?}");
+    assert!(
+        zh_ansi.contains("\x1b[34m"),
+        "expected blue ANSI SGR in {zh_ansi:?}"
+    );
     assert!(
         zh_ansi.contains("上下文") || zh_ansi.contains("目录"),
         "expected localized Chinese preview output in {zh_ansi:?}"
@@ -1368,7 +1379,11 @@ fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(&env.sync_cfg_path).unwrap().permissions().mode() & 0o777;
+        let mode = fs::metadata(&env.sync_cfg_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
     }
 
@@ -1416,9 +1431,18 @@ fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
     let jdav: Value = serde_json::from_str(&p_dav.body).unwrap();
     assert_eq!(jdav["remoteChanged"], true);
     assert_eq!(jdav["config"]["remote"]["type"], "webdav");
-    assert_eq!(jdav["config"]["remote"]["url"], "https://dav.example.com/pulse");
-    assert_eq!(jdav["config"]["remote"]["secrets"]["password"]["configured"], true);
-    assert_eq!(jdav["config"]["remote"]["secrets"]["token"]["configured"], true);
+    assert_eq!(
+        jdav["config"]["remote"]["url"],
+        "https://dav.example.com/pulse"
+    );
+    assert_eq!(
+        jdav["config"]["remote"]["secrets"]["password"]["configured"],
+        true
+    );
+    assert_eq!(
+        jdav["config"]["remote"]["secrets"]["token"]["configured"],
+        true
+    );
     cur_ver = jdav["version"].as_str().unwrap().to_string();
 
     // Verify GET also never echoes plaintext
@@ -1435,8 +1459,7 @@ fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
     assert!(!gdav.body.contains(url_secret));
 
     // Verify disk JSON keeps snake_case keys inside `remote`
-    let disk_dav: Value =
-        serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
+    let disk_dav: Value = serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
     assert!(disk_dav["remote"].get("allow_insecure_http").is_some());
     assert_eq!(disk_dav["remote"]["password"], dav_pass);
     assert_eq!(disk_dav["remote"]["token"], dav_tok);
@@ -1476,10 +1499,15 @@ fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
     assert_eq!(p_keep.status, 200, "{}", p_keep.body);
     let jkeep: Value = serde_json::from_str(&p_keep.body).unwrap();
     assert_eq!(jkeep["remoteChanged"], false);
-    assert_eq!(jkeep["config"]["remote"]["secrets"]["password"]["configured"], true);
-    assert_eq!(jkeep["config"]["remote"]["secrets"]["token"]["configured"], true);
-    let disk_keep: Value =
-        serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
+    assert_eq!(
+        jkeep["config"]["remote"]["secrets"]["password"]["configured"],
+        true
+    );
+    assert_eq!(
+        jkeep["config"]["remote"]["secrets"]["token"]["configured"],
+        true
+    );
+    let disk_keep: Value = serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
     assert_eq!(disk_keep["remote"]["password"], dav_pass);
     assert_eq!(disk_keep["remote"]["token"], dav_tok);
     cur_ver = jkeep["version"].as_str().unwrap().to_string();
@@ -1518,8 +1546,14 @@ fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
     );
     assert_eq!(p_clear.status, 200, "{}", p_clear.body);
     let jclear: Value = serde_json::from_str(&p_clear.body).unwrap();
-    assert_eq!(jclear["config"]["remote"]["secrets"]["password"]["configured"], false);
-    assert_eq!(jclear["config"]["remote"]["secrets"]["token"]["configured"], true);
+    assert_eq!(
+        jclear["config"]["remote"]["secrets"]["password"]["configured"],
+        false
+    );
+    assert_eq!(
+        jclear["config"]["remote"]["secrets"]["token"]["configured"],
+        true
+    );
     cur_ver = jclear["version"].as_str().unwrap().to_string();
 
     // 5. Cross-type switch webdav -> cf-worker with mode=keep must NOT inherit webdav token!
@@ -1587,8 +1621,15 @@ fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
     assert_eq!(p_switch_ok.status, 200, "{}", p_switch_ok.body);
     let jsw: Value = serde_json::from_str(&p_switch_ok.body).unwrap();
     assert_eq!(jsw["config"]["remote"]["type"], "cf-worker");
-    assert_eq!(jsw["config"]["remote"]["secrets"]["token"]["configured"], false);
-    assert!(!fs::read_to_string(&env.sync_cfg_path).unwrap().contains(dav_tok));
+    assert_eq!(
+        jsw["config"]["remote"]["secrets"]["token"]["configured"],
+        false
+    );
+    assert!(
+        !fs::read_to_string(&env.sync_cfg_path)
+            .unwrap()
+            .contains(dav_tok)
+    );
     cur_ver = jsw["version"].as_str().unwrap().to_string();
 
     // 6. Save S3 with snake_case persistence & zero plaintext echo
@@ -1631,10 +1672,15 @@ fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
     let js3: Value = serde_json::from_str(&p_s3.body).unwrap();
     assert_eq!(js3["config"]["remote"]["type"], "s3");
     assert_eq!(js3["config"]["remote"]["pathStyle"], false);
-    assert_eq!(js3["config"]["remote"]["secrets"]["accessKey"]["configured"], true);
-    assert_eq!(js3["config"]["remote"]["secrets"]["secretKey"]["configured"], true);
-    let disk_s3: Value =
-        serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
+    assert_eq!(
+        js3["config"]["remote"]["secrets"]["accessKey"]["configured"],
+        true
+    );
+    assert_eq!(
+        js3["config"]["remote"]["secrets"]["secretKey"]["configured"],
+        true
+    );
+    let disk_s3: Value = serde_json::from_slice(&fs::read(&env.sync_cfg_path).unwrap()).unwrap();
     assert_eq!(disk_s3["remote"]["path_style"], false);
     assert_eq!(disk_s3["remote"]["allow_insecure_http"], false);
     assert_eq!(disk_s3["remote"]["access_key"], s3_ak);
@@ -1674,7 +1720,10 @@ fn t15_sync_config_all_remotes_secret_lifecycle_and_zero_plaintext_echo() {
     assert!(!p_cf.body.contains(cf_tok));
     let jcf: Value = serde_json::from_str(&p_cf.body).unwrap();
     assert_eq!(jcf["config"]["remote"]["type"], "cf-worker");
-    assert_eq!(jcf["config"]["remote"]["secrets"]["token"]["configured"], true);
+    assert_eq!(
+        jcf["config"]["remote"]["secrets"]["token"]["configured"],
+        true
+    );
 
     // 8. Field validation checks -> 400 with exact field
     let cur_ver = jcf["version"].as_str().unwrap().to_string();
@@ -1802,7 +1851,10 @@ fn t15_sync_config_env_overrides_never_persisted_to_disk() {
     assert!(!p_res.body.contains(env_token));
     let jp: Value = serde_json::from_str(&p_res.body).unwrap();
     assert_eq!(jp["envOverrides"]["token"], "AGY_PULSE_SYNC_TOKEN");
-    assert_eq!(jp["config"]["remote"]["secrets"]["token"]["configured"], false);
+    assert_eq!(
+        jp["config"]["remote"]["secrets"]["token"]["configured"],
+        false
+    );
     assert_eq!(
         jp["config"]["remote"]["secrets"]["token"]["overriddenByEnv"],
         "AGY_PULSE_SYNC_TOKEN"
@@ -1824,7 +1876,10 @@ fn t15_sync_config_env_overrides_never_persisted_to_disk() {
     assert!(!g_res.body.contains(env_token));
     let jg: Value = serde_json::from_str(&g_res.body).unwrap();
     assert_eq!(jg["envOverrides"]["token"], "AGY_PULSE_SYNC_TOKEN");
-    assert_eq!(jg["config"]["remote"]["secrets"]["token"]["configured"], false);
+    assert_eq!(
+        jg["config"]["remote"]["secrets"]["token"]["configured"],
+        false
+    );
     assert_eq!(
         jg["config"]["remote"]["secrets"]["token"]["overriddenByEnv"],
         "AGY_PULSE_SYNC_TOKEN"
@@ -1876,7 +1931,9 @@ fn t15_sync_config_test_endpoint_probes_and_redacts_without_disk_writes() {
     assert!(!env.sync_cfg_path.exists());
 
     // 2. Mock CF Worker server: success then 401 failure echoing secret
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String, Option<String>)>::new()));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<(String, String, Option<String>)>::new(),
+    ));
     let fail_mode = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let secret_tok = "mock-cf-secret-token-4321";
     let url_pass = "mock-url-pass-8765";
@@ -1938,7 +1995,10 @@ fn t15_sync_config_test_endpoint_probes_and_redacts_without_disk_writes() {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].0, "GET");
         assert_eq!(log[0].1, "/v1/health");
-        assert_eq!(log[0].2.as_deref(), Some("Bearer mock-cf-secret-token-4321"));
+        assert_eq!(
+            log[0].2.as_deref(),
+            Some("Bearer mock-cf-secret-token-4321")
+        );
     }
 
     fail_mode.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1975,7 +2035,8 @@ fn t15_sync_config_test_endpoint_probes_and_redacts_without_disk_writes() {
     assert!(!jcf_fail["error"].as_str().unwrap().is_empty());
 
     // 3. Mock WebDAV probe success
-    let dav_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
+    let dav_seen =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Option<String>)>::new()));
     let dav_seen_srv = std::sync::Arc::clone(&dav_seen);
     let mock_dav = MockSyncHttpServer::start(move |method, _target, headers, _body| {
         let auth = headers
@@ -2312,7 +2373,12 @@ fn t15_dashboard_html_settings_ui_anchors_placeholders_and_security_headers() {
         );
     }
 
-    for settings_route in ["/settings", "/settings/", "/settings/pulse", "/settings/sync"] {
+    for settings_route in [
+        "/settings",
+        "/settings/",
+        "/settings/pulse",
+        "/settings/sync",
+    ] {
         let s_res = send_http(port, "GET", settings_route, &[], "");
         assert_eq!(
             s_res.status, 200,

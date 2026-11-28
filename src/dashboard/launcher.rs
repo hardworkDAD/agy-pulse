@@ -581,7 +581,9 @@ pub fn ping_dashboard(host: &str, port: u16, timeout_ms: u64) -> bool {
         }
     }
     let text = String::from_utf8_lossy(&raw);
-    text.lines().next().is_some_and(|line| line.contains(" 200 "))
+    text.lines()
+        .next()
+        .is_some_and(|line| line.contains(" 200 "))
 }
 
 /// Throttled keep-alive ping and self-healing respawn for a running dashboard instance.
@@ -605,9 +607,7 @@ pub fn touch_running_dashboard(
     }
 
     let throttle_ms = (info.idle_timeout_ms / 3).clamp(1_000, DASHBOARD_PING_THROTTLE_MS);
-    if info.state_mtime_ms > 0
-        && now_ms.saturating_sub(info.state_mtime_ms) < throttle_ms as i64
-    {
+    if info.state_mtime_ms > 0 && now_ms.saturating_sub(info.state_mtime_ms) < throttle_ms as i64 {
         return TouchDashboardResult::Skipped("throttled");
     }
 
@@ -641,9 +641,8 @@ pub fn probe_dashboard_health(host: &str, port: u16) -> Option<RunningDashboardI
     let _ = stream.set_read_timeout(Some(HEALTH_PROBE_TIMEOUT));
     let _ = stream.set_write_timeout(Some(HEALTH_PROBE_TIMEOUT));
 
-    let req = format!(
-        "GET /api/health HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-    );
+    let req =
+        format!("GET /api/health HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
     stream.flush().ok()?;
 
@@ -718,8 +717,8 @@ pub fn ensure_background_dashboard(
         });
     }
 
-    let exe_path = env::current_exe()
-        .map_err(|err| format!("Failed to locate current executable: {err}"))?;
+    let exe_path =
+        env::current_exe().map_err(|err| format!("Failed to locate current executable: {err}"))?;
 
     let effective_idle = if idle_timeout_sec > 0 {
         idle_timeout_sec
@@ -998,8 +997,8 @@ pub fn install_desktop_shortcuts(
     let os = platform::current_desktop_os();
     let paths = resolve_shortcut_paths(os)
         .ok_or_else(|| "Unable to resolve user home/data directory for shortcuts".to_string())?;
-    let exe_path = env::current_exe()
-        .map_err(|err| format!("Failed to locate current executable: {err}"))?;
+    let exe_path =
+        env::current_exe().map_err(|err| format!("Failed to locate current executable: {err}"))?;
     let exe_str = exe_path.to_string_lossy();
     let port_flag = match port {
         Some(p) if p > 0 => format!(" --port {p}"),
@@ -1071,7 +1070,10 @@ pub fn install_desktop_shortcuts(
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
             }
-            let vbs_cmd = format!("\"\"{}\"\" dashboard open{port_flag}", escape_vbs_string(&exe_str));
+            let vbs_cmd = format!(
+                "\"\"{}\"\" dashboard open{port_flag}",
+                escape_vbs_string(&exe_str)
+            );
             let vbs_content = format!(
                 "' {DASHBOARD_SHORTCUT_MARKER}\r\nSet WshShell = CreateObject(\"WScript.Shell\")\r\nWshShell.Run \"{vbs_cmd}\", 0, False\r\n"
             );
@@ -1086,7 +1088,8 @@ pub fn install_desktop_shortcuts(
             if include_desktop && let Some(ref desk) = paths.secondary_path {
                 targets.push(desk.clone());
             }
-            let mut ps_commands = vec!["$WshShell = New-Object -ComObject WScript.Shell;".to_string()];
+            let mut ps_commands =
+                vec!["$WshShell = New-Object -ComObject WScript.Shell;".to_string()];
             let vbs_str = vbs_path.to_string_lossy();
             for lnk in &targets {
                 if let Some(parent) = lnk.parent() {
@@ -1199,7 +1202,10 @@ pub fn uninstall_desktop_shortcuts() -> ShortcutUninstallReport {
                     .extra_script_path
                     .as_deref()
                     .is_some_and(is_our_shortcut_file)
-                    || paths.plist_path.as_deref().is_some_and(is_our_shortcut_file);
+                    || paths
+                        .plist_path
+                        .as_deref()
+                        .is_some_and(is_our_shortcut_file);
                 if has_marker && fs::remove_dir_all(&paths.primary_path).is_ok() {
                     removed.push(paths.primary_path);
                 } else {
@@ -1284,7 +1290,10 @@ pub fn get_desktop_shortcut_status() -> ShortcutStatus {
                 .extra_script_path
                 .as_deref()
                 .is_some_and(is_our_shortcut_file)
-                || paths.plist_path.as_deref().is_some_and(is_our_shortcut_file);
+                || paths
+                    .plist_path
+                    .as_deref()
+                    .is_some_and(is_our_shortcut_file);
             if has_marker {
                 ShortcutStatus {
                     installed: true,

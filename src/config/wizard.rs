@@ -432,10 +432,16 @@ impl WizardState {
                 QuotaStyle::None => "None".to_string(),
             },
             MenuItem::WarningThreshold => {
-                format!("{}%", (self.config.thresholds.warning * 100.0).round() as i64)
+                format!(
+                    "{}%",
+                    (self.config.thresholds.warning * 100.0).round() as i64
+                )
             }
             MenuItem::CriticalThreshold => {
-                format!("{}%", (self.config.thresholds.critical * 100.0).round() as i64)
+                format!(
+                    "{}%",
+                    (self.config.thresholds.critical * 100.0).round() as i64
+                )
             }
             MenuItem::IconSet => {
                 if self.config.display.use_nerd_fonts == Some(true) {
@@ -455,7 +461,12 @@ impl WizardState {
                     "Disabled".to_string()
                 }
             }
-            MenuItem::BreadcrumbCount => self.config.display.breadcrumb_count.unwrap_or(3).to_string(),
+            MenuItem::BreadcrumbCount => self
+                .config
+                .display
+                .breadcrumb_count
+                .unwrap_or(3)
+                .to_string(),
             MenuItem::Enabled => {
                 if self.config.enabled {
                     "Enabled".to_string()
@@ -545,9 +556,10 @@ impl WizardState {
             MenuItem::BoolDisplay(field) => {
                 let next = !read_display_bool(&self.config, field);
                 write_display_bool(&mut self.config, field, next);
-                self.changes
-                    .display_bools
-                    .insert(bool_field_meta(field).json_key.to_string(), Value::Bool(next));
+                self.changes.display_bools.insert(
+                    bool_field_meta(field).json_key.to_string(),
+                    Value::Bool(next),
+                );
             }
             MenuItem::BreadcrumbCount => {
                 let cur = self.config.display.breadcrumb_count.unwrap_or(3);
@@ -967,8 +979,8 @@ fn save_wizard_config(state: &WizardState) -> io::Result<SaveAttempt> {
         display_map.remove("unicode");
     }
 
-    let defaults = serde_json::to_value(PulseConfig::default())
-        .unwrap_or_else(|_| Value::Object(Map::new()));
+    let defaults =
+        serde_json::to_value(PulseConfig::default()).unwrap_or_else(|_| Value::Object(Map::new()));
     let full_merged = deep_merge_value(defaults, merged.clone());
     let (candidate, _) = deserialize_pulse_config_tolerant(&full_merged);
     if let Err((field, message)) = validate_pulse_config(&candidate) {
@@ -1283,9 +1295,9 @@ pub fn run_config_cli() -> i32 {
     let mut input = ChannelByteSource::from_stdin();
     let mut stdout = io::stdout().lock();
     match run_wizard_loop_with_source(&mut input, &mut stdout, &options) {
-        Ok(WizardRunOutcome::Saved | WizardRunOutcome::Cancelled | WizardRunOutcome::EndOfInput) => {
-            0
-        }
+        Ok(
+            WizardRunOutcome::Saved | WizardRunOutcome::Cancelled | WizardRunOutcome::EndOfInput,
+        ) => 0,
         Ok(WizardRunOutcome::Aborted) => 1,
         Err(err) => {
             eprintln!("\n\x1b[31mConfiguration wizard error: {err}\x1b[0m\n");

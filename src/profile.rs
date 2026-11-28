@@ -176,7 +176,8 @@ impl Profiler {
                             let elapsed = started.elapsed().as_millis() as u64;
                             if elapsed >= cp {
                                 let ts = chrono::Local::now().format("%H:%M:%S%.3f");
-                                let cur = Stage::from_u8(watch_stage.load(Ordering::Acquire)).as_str();
+                                let cur =
+                                    Stage::from_u8(watch_stage.load(Ordering::Acquire)).as_str();
                                 let line = format!(
                                     "[{ts}] pid={pid} STALL elapsed={elapsed}ms stage={cur}\n"
                                 );

@@ -247,8 +247,5 @@ pub fn redact_sync_secrets(msg: &str, secrets: &[String]) -> String {
             out = out.replace(secret, "[REDACTED]");
         }
     }
-    out.chars()
-        .filter(|c| !c.is_control())
-        .take(512)
-        .collect()
+    out.chars().filter(|c| !c.is_control()).take(512).collect()
 }

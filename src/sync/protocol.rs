@@ -107,9 +107,7 @@ fn validate_account_string_safety(s: &str, label: &str) -> Result<(), SyncError>
         || s.contains('\\')
         || contains_disallowed_chars(s)
     {
-        return Err(SyncError::InvalidKey(format!(
-            "unsafe {label} value: {s}"
-        )));
+        return Err(SyncError::InvalidKey(format!("unsafe {label} value: {s}")));
     }
     Ok(())
 }
@@ -168,9 +166,8 @@ pub fn decode_account_key(account_key: &str) -> Result<String, SyncError> {
         }
     }
 
-    let s = String::from_utf8(decoded).map_err(|_| {
-        SyncError::InvalidKey(format!("non-UTF-8 account_key: {account_key}"))
-    })?;
+    let s = String::from_utf8(decoded)
+        .map_err(|_| SyncError::InvalidKey(format!("non-UTF-8 account_key: {account_key}")))?;
     validate_account_string_safety(&s, "decoded account_id")?;
     Ok(s)
 }
@@ -276,9 +273,7 @@ pub fn key_belongs_to_device(prefix: &str, key: &str, target_device_id: &str) ->
     let Some(_tail) = parts.next() else {
         return false;
     };
-    devices_lit == "devices"
-        && decode_account_key(acct_key).is_ok()
-        && dev_id == target_device_id
+    devices_lit == "devices" && decode_account_key(acct_key).is_ok() && dev_id == target_device_id
 }
 
 /// Quota snapshot payload embedded inside `DeviceManifest`.
@@ -398,10 +393,9 @@ pub fn encode_chunk_gz(records: &[ChunkRecord]) -> Result<(Vec<u8>, String), Syn
         ) => ca.cmp(cb),
         (ChunkRecord::Conv { .. }, ChunkRecord::Step { .. }) => std::cmp::Ordering::Less,
         (ChunkRecord::Step { .. }, ChunkRecord::Conv { .. }) => std::cmp::Ordering::Greater,
-        (
-            ChunkRecord::Step { step_uid: sa, .. },
-            ChunkRecord::Step { step_uid: sb, .. },
-        ) => sa.cmp(sb),
+        (ChunkRecord::Step { step_uid: sa, .. }, ChunkRecord::Step { step_uid: sb, .. }) => {
+            sa.cmp(sb)
+        }
     });
 
     let mut encoder = GzBuilder::new()

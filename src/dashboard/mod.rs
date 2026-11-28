@@ -242,10 +242,7 @@ pub fn render_dashboard_html(initial_lang: LanguageSetting) -> String {
 }
 
 /// Render the zero-CDN embedded HTML dashboard page with sanitized language, version, and CSRF token.
-pub fn render_dashboard_html_with_token(
-    initial_lang: LanguageSetting,
-    csrf_token: &str,
-) -> String {
+pub fn render_dashboard_html_with_token(initial_lang: LanguageSetting, csrf_token: &str) -> String {
     let (html_lang, js_lang) = match initial_lang {
         LanguageSetting::Zh => ("zh-CN", "zh"),
         LanguageSetting::En | LanguageSetting::Auto => ("en", "en"),
@@ -413,10 +410,7 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
                 if is_zh {
                     println!("看板状态: 运行中 | URL: {} | PID: {}", info.url, info.pid);
                 } else {
-                    println!(
-                        "Dashboard: running | URL: {} | PID: {}",
-                        info.url, info.pid
-                    );
+                    println!("Dashboard: running | URL: {} | PID: {}", info.url, info.pid);
                 }
             } else if is_zh {
                 println!("看板状态: 未运行");
@@ -572,10 +566,7 @@ pub fn run_dashboard_cli(argv: &[String]) -> i32 {
             }
 
             if is_zh {
-                println!(
-                    "agy-pulse 本地看板已启动: {}（按 Ctrl+C 退出）",
-                    info.url
-                );
+                println!("agy-pulse 本地看板已启动: {}（按 Ctrl+C 退出）", info.url);
             } else {
                 println!(
                     "agy-pulse dashboard listening at {} (press Ctrl+C to stop)",

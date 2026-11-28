@@ -8,21 +8,21 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+use agy_pulse::config::{
+    CacheHitThresholdsConfig, DisplayConfig, LanguageSetting, PulseConfig, ThemeConfig,
+    ThresholdsConfig,
+};
 use agy_pulse::domain::{
     ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity, ModelTokenTotals,
     PulseSnapshot, TokenUsage, WorkspaceInfo, WorkspaceMetadata, calculate_token_cost,
     is_usage_cache_inclusive, model_includes_cache_in_input, resolve_cascade_cost_usd,
     resolve_native_cost_usd,
 };
+use agy_pulse::platform::TerminalCaps;
 use agy_pulse::render::{
     ansi_display_width, display_width, render_statusline, strip_ansi,
     truncate_ansi_to_display_width,
 };
-use agy_pulse::config::{
-    CacheHitThresholdsConfig, DisplayConfig, LanguageSetting, PulseConfig, ThemeConfig,
-    ThresholdsConfig,
-};
-use agy_pulse::platform::TerminalCaps;
 
 fn agy_pulse_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_agy-pulse"))
@@ -97,7 +97,12 @@ impl IsolatedEnv {
         cmd
     }
 
-    fn run_stdin(&self, bin: &PathBuf, stdin_text: &str, extra_env: &[(&str, &str)]) -> (i32, String, String) {
+    fn run_stdin(
+        &self,
+        bin: &PathBuf,
+        stdin_text: &str,
+        extra_env: &[(&str, &str)],
+    ) -> (i32, String, String) {
         let mut cmd = self.cmd(bin);
         for (k, v) in extra_env {
             cmd.env(k, v);
@@ -153,7 +158,11 @@ fn end_to_end_statusline_renders_first_line_git_branch_cost_and_context_bar() {
     let env = IsolatedEnv::new();
     let repo_dir = env.workspace_dir.join("my-project");
     fs::create_dir_all(repo_dir.join(".git/refs/heads")).unwrap();
-    fs::write(repo_dir.join(".git/HEAD"), "ref: refs/heads/feat/tracer-bullet\n").unwrap();
+    fs::write(
+        repo_dir.join(".git/HEAD"),
+        "ref: refs/heads/feat/tracer-bullet\n",
+    )
+    .unwrap();
 
     fs::write(
         env.global_cfg_dir.join("agy-pulse.config.json"),
@@ -202,17 +211,35 @@ fn end_to_end_statusline_renders_first_line_git_branch_cost_and_context_bar() {
 
     let line1 = lines[0];
     assert!(line1.contains("my-project"), "line1 missing dir: {line1}");
-    assert!(line1.contains("feat/tracer-bullet"), "line1 missing branch: {line1}");
+    assert!(
+        line1.contains("feat/tracer-bullet"),
+        "line1 missing branch: {line1}"
+    );
     assert!(line1.contains("Pro"), "line1 missing plan tier: {line1}");
     assert!(line1.contains("auto"), "line1 missing cycle mode: {line1}");
-    assert!(!line1.contains("Opus"), "line1 must not duplicate model name: {line1}");
-    assert!(!line1.contains("Cost"), "line1 must not duplicate conversation cost: {line1}");
+    assert!(
+        !line1.contains("Opus"),
+        "line1 must not duplicate model name: {line1}"
+    );
+    assert!(
+        !line1.contains("Cost"),
+        "line1 must not duplicate conversation cost: {line1}"
+    );
 
     let monitor = lines.last().unwrap();
-    assert!(monitor.contains("Claude Opus 4.6 (Thinking)"), "monitor missing full model+effort: {monitor}");
+    assert!(
+        monitor.contains("Claude Opus 4.6 (Thinking)"),
+        "monitor missing full model+effort: {monitor}"
+    );
     assert!(monitor.contains("42.0%"), "monitor missing pct: {monitor}");
-    assert!(monitor.contains("(210K/500K)"), "monitor missing K ratio: {monitor}");
-    assert!(monitor.contains("Cost $0.45"), "monitor missing cost: {monitor}");
+    assert!(
+        monitor.contains("(210K/500K)"),
+        "monitor missing K ratio: {monitor}"
+    );
+    assert!(
+        monitor.contains("Cost $0.45"),
+        "monitor missing cost: {monitor}"
+    );
 }
 
 #[test]
@@ -222,7 +249,11 @@ fn git_worktree_dot_git_file_resolves_branch_without_error() {
     let wt_dir = env.workspace_dir.join("wt-proj");
     fs::create_dir_all(&real_git_dir).unwrap();
     fs::create_dir_all(&wt_dir).unwrap();
-    fs::write(real_git_dir.join("HEAD"), "ref: refs/heads/fix/worktree-branch\n").unwrap();
+    fs::write(
+        real_git_dir.join("HEAD"),
+        "ref: refs/heads/fix/worktree-branch\n",
+    )
+    .unwrap();
     fs::write(
         wt_dir.join(".git"),
         format!("gitdir: {}\n", real_git_dir.to_string_lossy()),
@@ -306,14 +337,25 @@ fn config_merges_priority_ignores_retired_v1_fields_and_respects_enabled_false()
     assert_eq!(code, 0);
     assert_eq!(stderr, "");
     let plain = strip_ansi(&stdout);
-    assert!(plain.contains("Gemini 3.1 Pro (High)"), "global showContextMonitor=true should render model on monitor: {plain}");
-    assert!(plain.contains("上下文"), "workspace language=zh should override global en: {plain}");
+    assert!(
+        plain.contains("Gemini 3.1 Pro (High)"),
+        "global showContextMonitor=true should render model on monitor: {plain}"
+    );
+    assert!(
+        plain.contains("上下文"),
+        "workspace language=zh should override global en: {plain}"
+    );
     let first_line = plain.lines().next().unwrap_or("");
     assert!(
-        !first_line.contains("Gemini") && !first_line.contains("费用") && !first_line.contains("$1.25"),
+        !first_line.contains("Gemini")
+            && !first_line.contains("费用")
+            && !first_line.contains("$1.25"),
         "retired showModel/showCost must stay silently ignored on line 1: {plain}"
     );
-    assert!(stdout.contains("\x1b[34m"), "Ocean Blue theme primary should apply blue ANSI: {stdout:?}");
+    assert!(
+        stdout.contains("\x1b[34m"),
+        "Ocean Blue theme primary should apply blue ANSI: {stdout:?}"
+    );
 
     // Now disable via workspace config -> silent exit 0
     fs::write(
@@ -358,13 +400,26 @@ fn language_auto_detection_and_ascii_fallback() {
     let (code, stdout, _) = env.run_stdin(
         &agy_pulse_bin(),
         &payload,
-        &[("COLUMNS", "120"), ("LC_ALL", "zh_CN.UTF-8"), ("AGY_PULSE_FORCE_ASCII", "1")],
+        &[
+            ("COLUMNS", "120"),
+            ("LC_ALL", "zh_CN.UTF-8"),
+            ("AGY_PULSE_FORCE_ASCII", "1"),
+        ],
     );
     assert_eq!(code, 0);
     let plain = strip_ansi(&stdout);
-    assert!(plain.contains("费用 $2.50"), "zh locale must render 费用: {plain}");
-    assert!(plain.contains("上下文"), "zh locale must render 上下文: {plain}");
-    assert!(plain.contains(" | "), "ASCII mode must use | divider: {plain}");
+    assert!(
+        plain.contains("费用 $2.50"),
+        "zh locale must render 费用: {plain}"
+    );
+    assert!(
+        plain.contains("上下文"),
+        "zh locale must render 上下文: {plain}"
+    );
+    assert!(
+        plain.contains(" | "),
+        "ASCII mode must use | divider: {plain}"
+    );
     assert!(!plain.contains('│'), "ASCII mode must not emit │: {plain}");
     assert!(!plain.contains('█'), "ASCII mode must not emit █: {plain}");
     assert!(!plain.contains('◈'), "ASCII mode must not emit ◈: {plain}");
@@ -373,11 +428,18 @@ fn language_auto_detection_and_ascii_fallback() {
     let (code2, stdout2, _) = env.run_stdin(
         &agy_pulse_bin(),
         &payload,
-        &[("LC_ALL", "C"), ("LANG", "C"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+        &[
+            ("LC_ALL", "C"),
+            ("LANG", "C"),
+            ("AGY_PULSE_FORCE_UNICODE", "1"),
+        ],
     );
     assert_eq!(code2, 0);
     let plain2 = strip_ansi(&stdout2);
-    assert!(plain2.contains(" │ "), "forced Unicode must emit │: {plain2}");
+    assert!(
+        plain2.contains(" │ "),
+        "forced Unicode must emit │: {plain2}"
+    );
     assert!(plain2.contains('◈'), "forced Unicode must emit ◈: {plain2}");
 }
 
@@ -386,7 +448,11 @@ fn narrow_terminal_truncates_cjk_emoji_and_ansi_safely() {
     let env = IsolatedEnv::new();
     let cjk_dir = env.workspace_dir.join("前端项目🚀测试目录");
     fs::create_dir_all(cjk_dir.join(".git/refs/heads")).unwrap();
-    fs::write(cjk_dir.join(".git/HEAD"), "ref: refs/heads/功能/长分支名称测试\n").unwrap();
+    fs::write(
+        cjk_dir.join(".git/HEAD"),
+        "ref: refs/heads/功能/长分支名称测试\n",
+    )
+    .unwrap();
 
     fs::write(
         env.global_cfg_dir.join("agy-pulse.config.json"),
@@ -409,11 +475,7 @@ fn narrow_terminal_truncates_cjk_emoji_and_ansi_safely() {
     })
     .to_string();
 
-    let (code, stdout, stderr) = env.run_stdin(
-        &agy_pulse_bin(),
-        &payload,
-        &[("COLUMNS", "36")],
-    );
+    let (code, stdout, stderr) = env.run_stdin(&agy_pulse_bin(), &payload, &[("COLUMNS", "36")]);
     assert_eq!(code, 0);
     assert_eq!(stderr, "");
     for line in stdout.lines() {
@@ -461,11 +523,17 @@ fn empty_and_malformed_stdin_exit_zero_and_log_safely_without_following_symlink(
 
         assert_eq!(fs::read_to_string(&sentinel).unwrap(), "untouched");
         let meta = fs::symlink_metadata(&log_path).unwrap();
-        assert!(!meta.file_type().is_symlink(), "error log symlink must be replaced");
+        assert!(
+            !meta.file_type().is_symlink(),
+            "error log symlink must be replaced"
+        );
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode & 0o177, 0, "error log must be 0o600, got {:o}", mode);
         let log_content = fs::read_to_string(&log_path).unwrap();
-        assert!(!log_content.is_empty(), "diagnostic info should be logged on malformed JSON");
+        assert!(
+            !log_content.is_empty(),
+            "diagnostic info should be logged on malformed JSON"
+        );
     }
 }
 
@@ -624,7 +692,11 @@ fn statusline_exits_before_host_timeout_when_stdout_pipe_is_full() {
 fn pure_domain_and_render_boundary_invariants() {
     // 1) Routed cost filtering (Bedrock & Vertex)
     assert_eq!(
-        resolve_native_cost_usd(Some(1.23), "anthropic.claude-3-5-sonnet-20241022-v2:0", false),
+        resolve_native_cost_usd(
+            Some(1.23),
+            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            false
+        ),
         None
     );
     assert_eq!(
@@ -650,7 +722,10 @@ fn pure_domain_and_render_boundary_invariants() {
         cache_creation_input_tokens: 100,
         cache_exclusive: false,
     };
-    assert!(is_usage_cache_inclusive("Claude Opus 4.6", &anthropic_folded));
+    assert!(is_usage_cache_inclusive(
+        "Claude Opus 4.6",
+        &anthropic_folded
+    ));
     assert!(!is_usage_cache_inclusive(
         "Claude Opus 4.6",
         &TokenUsage {
@@ -672,7 +747,10 @@ fn pure_domain_and_render_boundary_invariants() {
         },
         ..Default::default()
     };
-    assert_eq!(resolve_cascade_cost_usd(&cascade_fallback, false), Some(0.77));
+    assert_eq!(
+        resolve_cascade_cost_usd(&cascade_fallback, false),
+        Some(0.77)
+    );
 
     // 2) Display width & ANSI truncation
     assert_eq!(display_width("中文🚀abc"), 9);
@@ -750,12 +828,18 @@ fn profile_log_creates_nested_parent_dirs_and_refuses_symlink_without_tampering_
         &agy_pulse_bin(),
         &payload,
         &[
-            ("AGY_PULSE_PROFILE_LOG", nested_log.to_string_lossy().as_ref()),
+            (
+                "AGY_PULSE_PROFILE_LOG",
+                nested_log.to_string_lossy().as_ref(),
+            ),
             ("AGY_PULSE_PROFILE_MIN_MS", "0"),
         ],
     );
     assert_eq!(code, 0, "stderr: {err}");
-    assert!(nested_log.exists(), "profile log should be created with missing nested parents");
+    assert!(
+        nested_log.exists(),
+        "profile log should be created with missing nested parents"
+    );
     let content = fs::read_to_string(&nested_log).unwrap();
     assert!(
         content.contains("DONE total="),
@@ -770,13 +854,21 @@ fn profile_log_creates_nested_parent_dirs_and_refuses_symlink_without_tampering_
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(parent_mode & 0o077, 0, "parent dir must be 0o700, got {parent_mode:o}");
+        assert_eq!(
+            parent_mode & 0o077,
+            0,
+            "parent dir must be 0o700, got {parent_mode:o}"
+        );
         let file_mode = fs::symlink_metadata(&nested_log)
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(file_mode & 0o177, 0, "profile log must be 0o600, got {file_mode:o}");
+        assert_eq!(
+            file_mode & 0o177,
+            0,
+            "profile log must be 0o600, got {file_mode:o}"
+        );
 
         let sentinel = env.data_dir.join("prof_sentinel.txt");
         fs::write(&sentinel, "untouched").unwrap();
@@ -787,7 +879,10 @@ fn profile_log_creates_nested_parent_dirs_and_refuses_symlink_without_tampering_
             &agy_pulse_bin(),
             &payload,
             &[
-                ("AGY_PULSE_PROFILE_LOG", symlink_log.to_string_lossy().as_ref()),
+                (
+                    "AGY_PULSE_PROFILE_LOG",
+                    symlink_log.to_string_lossy().as_ref(),
+                ),
                 ("AGY_PULSE_PROFILE_MIN_MS", "0"),
             ],
         );
@@ -851,7 +946,10 @@ fn bg_ledger_sync_lock_recovers_dead_pid_immediately_and_preserves_live_pid_over
 
     let (code1, _out1, err1) = env.run_stdin(&agy_pulse_bin(), &payload, &[]);
     assert_eq!(code1, 0, "stderr: {err1}");
-    assert!(lock_path.exists(), "live >30s worker lock must be preserved");
+    assert!(
+        lock_path.exists(),
+        "live >30s worker lock must be preserved"
+    );
     let raw1 = fs::read_to_string(&lock_path).unwrap();
     assert!(
         raw1.contains("live-owner-tok"),
@@ -932,7 +1030,10 @@ fn bg_ledger_sync_lock_different_token_never_deletes_foreign_lock() {
         .output()
         .unwrap();
     assert_eq!(out_wrong.status.code(), Some(0));
-    assert!(lock_path.exists(), "foreign lock must not be deleted by mismatched token");
+    assert!(
+        lock_path.exists(),
+        "foreign lock must not be deleted by mismatched token"
+    );
     let raw = fs::read_to_string(&lock_path).unwrap();
     assert!(
         raw.contains("foreign-owner-tok"),
@@ -1028,9 +1129,17 @@ fn cache_hit_thresholds_drive_monitor_and_model_cache_coloring() {
     };
 
     // 1) 92% >= excellent (90) -> both lines use primary + BOLD (\x1b[34m\x1b[1m)
-    let out_high = render_statusline(&make_snapshot(92_000, 100_000), &cfg, &caps, LanguageSetting::En);
+    let out_high = render_statusline(
+        &make_snapshot(92_000, 100_000),
+        &cfg,
+        &caps,
+        LanguageSetting::En,
+    );
     let high_lines: Vec<&str> = out_high.lines().collect();
-    let cache_high = high_lines.iter().find(|l| l.contains("Session Cache")).unwrap();
+    let cache_high = high_lines
+        .iter()
+        .find(|l| l.contains("Session Cache"))
+        .unwrap();
     let mon_high = high_lines.iter().find(|l| l.contains("Ctx")).unwrap();
     assert!(
         cache_high.contains("Carbon \x1b[34m\x1b[1m92%\x1b[0m"),
@@ -1042,9 +1151,17 @@ fn cache_hit_thresholds_drive_monitor_and_model_cache_coloring() {
     );
 
     // 2) 80% in [70, 90) -> partial tier: warning (\x1b[33m), NOT primary+BOLD (would be excellent under 80/50 defaults)
-    let out_mid = render_statusline(&make_snapshot(80_000, 100_000), &cfg, &caps, LanguageSetting::En);
+    let out_mid = render_statusline(
+        &make_snapshot(80_000, 100_000),
+        &cfg,
+        &caps,
+        LanguageSetting::En,
+    );
     let mid_lines: Vec<&str> = out_mid.lines().collect();
-    let cache_mid = mid_lines.iter().find(|l| l.contains("Session Cache")).unwrap();
+    let cache_mid = mid_lines
+        .iter()
+        .find(|l| l.contains("Session Cache"))
+        .unwrap();
     let mon_mid = mid_lines.iter().find(|l| l.contains("Ctx")).unwrap();
     assert!(
         cache_mid.contains("Carbon \x1b[33m80%\x1b[0m"),
@@ -1056,9 +1173,17 @@ fn cache_hit_thresholds_drive_monitor_and_model_cache_coloring() {
     );
 
     // 3) 60% < partial (70) -> low tier: DIM (\x1b[2m), NOT warning (would be warning under 80/50 defaults)
-    let out_low = render_statusline(&make_snapshot(60_000, 100_000), &cfg, &caps, LanguageSetting::En);
+    let out_low = render_statusline(
+        &make_snapshot(60_000, 100_000),
+        &cfg,
+        &caps,
+        LanguageSetting::En,
+    );
     let low_lines: Vec<&str> = out_low.lines().collect();
-    let cache_low = low_lines.iter().find(|l| l.contains("Session Cache")).unwrap();
+    let cache_low = low_lines
+        .iter()
+        .find(|l| l.contains("Session Cache"))
+        .unwrap();
     let mon_low = low_lines.iter().find(|l| l.contains("Ctx")).unwrap();
     assert!(
         cache_low.contains("Carbon \x1b[2m60%\x1b[0m"),
@@ -1146,10 +1271,22 @@ fn display_config_none_fallbacks_match_builtin_defaults() {
     );
 
     let plain = strip_ansi(&out_none);
-    assert!(plain.contains("Session Cache"), "showModelCache=None must default to true: {plain}");
-    assert!(plain.contains("Ctx"), "showContextMonitor=None must default to true: {plain}");
-    assert!(!plain.contains("feat/should-stay-hidden"), "showGitBranch=None must default to false: {plain}");
-    assert!(!plain.contains("hidden_crumb.rs"), "showBreadcrumbs=None must default to false: {plain}");
+    assert!(
+        plain.contains("Session Cache"),
+        "showModelCache=None must default to true: {plain}"
+    );
+    assert!(
+        plain.contains("Ctx"),
+        "showContextMonitor=None must default to true: {plain}"
+    );
+    assert!(
+        !plain.contains("feat/should-stay-hidden"),
+        "showGitBranch=None must default to false: {plain}"
+    );
+    assert!(
+        !plain.contains("hidden_crumb.rs"),
+        "showBreadcrumbs=None must default to false: {plain}"
+    );
 
     // showModelCache=None must remain independent even when showContextMonitor=false
     let independent_cfg = PulseConfig {
@@ -1369,12 +1506,12 @@ fn context_monitor_thresholds_honor_0_70_and_0_90_continuously() {
     let cfg_69 = make_cfg(0.69, 0.90);
     let cfg_71 = make_cfg(0.71, 0.90);
     assert!(
-        render_statusline(&make_snap(70_000), &cfg_69, &caps, LanguageSetting::En).contains("\x1b[33m")
+        render_statusline(&make_snap(70_000), &cfg_69, &caps, LanguageSetting::En)
+            .contains("\x1b[33m")
     );
+    assert!(out_70.contains("\x1b[33m"));
     assert!(
-        out_70.contains("\x1b[33m")
-    );
-    assert!(
-        render_statusline(&make_snap(70_000), &cfg_71, &caps, LanguageSetting::En).contains("\x1b[36m")
+        render_statusline(&make_snap(70_000), &cfg_71, &caps, LanguageSetting::En)
+            .contains("\x1b[36m")
     );
 }

@@ -8,7 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 
-use agy_pulse::config::{DisplayConfig, LanguageSetting, PulseConfig, QuotaStyle, ThresholdsConfig};
+use agy_pulse::config::{
+    DisplayConfig, LanguageSetting, PulseConfig, QuotaStyle, ThresholdsConfig,
+};
 use agy_pulse::domain::{
     CriticalWindow, HostIdentity, ProviderQuota, ProviderQuotaSummary, PulseSnapshot, QuotaWindow,
     QuotaWindowKind, format_quota_percent, format_reset_countdown, format_reset_duration,
@@ -303,7 +305,11 @@ fn pure_render_quota_table_compact_none_colors_and_ascii_fallback() {
     );
     let table_plain = strip_ansi(&table_out);
     let lines: Vec<&str> = table_plain.lines().collect();
-    assert_eq!(lines.len(), 5, "expected line1 + divider + 3 rows:\n{table_plain}");
+    assert_eq!(
+        lines.len(),
+        5,
+        "expected line1 + divider + 3 rows:\n{table_plain}"
+    );
     assert_eq!(lines[1], format!("  {}", "─".repeat(67)));
     assert_eq!(
         lines[2],
@@ -313,10 +319,7 @@ fn pure_render_quota_table_compact_none_colors_and_ascii_fallback() {
         lines[3],
         "  Google week [██░░░░]  25% ~4d3h  │ Claude week [██████] 100% ~6d23h"
     );
-    assert_eq!(
-        lines[4],
-        "  Argon week  [████░░]  65% ~5d0h "
-    );
+    assert_eq!(lines[4], "  Argon week  [████░░]  65% ~5d0h ");
     // Verify warning (yellow \x1b[33m) and critical (red \x1b[31m) ANSI colors applied
     assert!(table_out.contains("\x1b[33m[██░░░░]\x1b[0m \x1b[33m 25%\x1b[0m"));
     assert!(table_out.contains("\x1b[31m[░░░░░░]\x1b[0m \x1b[31m  8%\x1b[0m"));
@@ -333,7 +336,9 @@ fn pure_render_quota_table_compact_none_colors_and_ascii_fallback() {
     );
     let ascii_plain = strip_ansi(&ascii_out);
     assert!(ascii_plain.contains(&format!("  {}", "-".repeat(67))));
-    assert!(ascii_plain.contains("Google 5h   [#####-]  87% ~22m   | Claude 5h   [------]   8% ~4h59m"));
+    assert!(
+        ascii_plain.contains("Google 5h   [#####-]  87% ~22m   | Claude 5h   [------]   8% ~4h59m")
+    );
     assert!(!ascii_plain.contains('│'));
     assert!(!ascii_plain.contains('█'));
     assert!(!ascii_plain.contains('─'));
@@ -351,10 +356,7 @@ fn pure_render_quota_table_compact_none_colors_and_ascii_fallback() {
         LanguageSetting::En,
     );
     let compact_plain = strip_ansi(&compact_out);
-    assert_eq!(
-        compact_plain,
-        "Pro\nGoogle: 25% │ Claude: 8% │ Argon: 65%"
-    );
+    assert_eq!(compact_plain, "Pro\nGoogle: 25% │ Claude: 8% │ Argon: 65%");
     assert!(compact_out.contains("\x1b[33m25%\x1b[0m"));
     assert!(compact_out.contains("\x1b[31m8%\x1b[0m"));
     assert!(compact_out.contains("\x1b[32m65%\x1b[0m"));
@@ -429,14 +431,38 @@ fn e2e_stdin_multi_provider_quota_aliases_and_openai_filtering() {
     assert_eq!(stderr, "");
 
     let plain = strip_ansi(&stdout);
-    assert!(plain.contains("Google 5h   [██████]  94% ~4h25m"), "missing Google 5h:\n{plain}");
-    assert!(plain.contains("Google week [█████░]  82% ~5d3h"), "missing Google week:\n{plain}");
-    assert!(plain.contains("Claude 5h   [███░░░]  45% ~2h15m"), "missing Claude 5h:\n{plain}");
-    assert!(plain.contains("Claude week [------]   --") || plain.contains("Claude week [░░░░░░]   --"), "missing Claude week placeholder:\n{plain}");
-    assert!(plain.contains("Argon week  [████░░]  70% ~6d2h"), "missing Argon week:\n{plain}");
-    assert!(!plain.to_ascii_lowercase().contains("openai"), "openai must be filtered:\n{plain}");
-    assert!(!plain.to_ascii_lowercase().contains("codex"), "codex must be filtered:\n{plain}");
-    assert!(!plain.to_ascii_lowercase().contains("gpt"), "gpt must be filtered:\n{plain}");
+    assert!(
+        plain.contains("Google 5h   [██████]  94% ~4h25m"),
+        "missing Google 5h:\n{plain}"
+    );
+    assert!(
+        plain.contains("Google week [█████░]  82% ~5d3h"),
+        "missing Google week:\n{plain}"
+    );
+    assert!(
+        plain.contains("Claude 5h   [███░░░]  45% ~2h15m"),
+        "missing Claude 5h:\n{plain}"
+    );
+    assert!(
+        plain.contains("Claude week [------]   --") || plain.contains("Claude week [░░░░░░]   --"),
+        "missing Claude week placeholder:\n{plain}"
+    );
+    assert!(
+        plain.contains("Argon week  [████░░]  70% ~6d2h"),
+        "missing Argon week:\n{plain}"
+    );
+    assert!(
+        !plain.to_ascii_lowercase().contains("openai"),
+        "openai must be filtered:\n{plain}"
+    );
+    assert!(
+        !plain.to_ascii_lowercase().contains("codex"),
+        "codex must be filtered:\n{plain}"
+    );
+    assert!(
+        !plain.to_ascii_lowercase().contains("gpt"),
+        "gpt must be filtered:\n{plain}"
+    );
 }
 
 #[test]
@@ -478,11 +504,26 @@ fn e2e_quota_styles_models_fallback_compact_none_and_expired_handling() {
     assert_eq!(code1, 0);
     assert_eq!(err1, "");
     let plain1 = strip_ansi(&out1);
-    assert!(plain1.contains("Google 5h   [░░░░░░]   --"), "expired 5h must render --:\n{plain1}");
-    assert!(plain1.contains("Google week [██░░░░]  25% ~5d4h"), "valid weekly must render:\n{plain1}");
-    assert!(plain1.contains("Claude 5h   [░░░░░░]   8% ~3h10m"), "critical 5h must render:\n{plain1}");
-    assert!(out1.contains("\x1b[33m[██░░░░]\x1b[0m \x1b[33m 25%\x1b[0m"), "warning color missing:\n{out1:?}");
-    assert!(out1.contains("\x1b[31m[░░░░░░]\x1b[0m \x1b[31m  8%\x1b[0m"), "critical color missing:\n{out1:?}");
+    assert!(
+        plain1.contains("Google 5h   [░░░░░░]   --"),
+        "expired 5h must render --:\n{plain1}"
+    );
+    assert!(
+        plain1.contains("Google week [██░░░░]  25% ~5d4h"),
+        "valid weekly must render:\n{plain1}"
+    );
+    assert!(
+        plain1.contains("Claude 5h   [░░░░░░]   8% ~3h10m"),
+        "critical 5h must render:\n{plain1}"
+    );
+    assert!(
+        out1.contains("\x1b[33m[██░░░░]\x1b[0m \x1b[33m 25%\x1b[0m"),
+        "warning color missing:\n{out1:?}"
+    );
+    assert!(
+        out1.contains("\x1b[31m[░░░░░░]\x1b[0m \x1b[31m  8%\x1b[0m"),
+        "critical color missing:\n{out1:?}"
+    );
 
     // 2) Compact mode renders single summary line with critical windows
     fs::write(
@@ -500,8 +541,14 @@ fn e2e_quota_styles_models_fallback_compact_none_and_expired_handling() {
     );
     assert_eq!(code2, 0);
     let plain2 = strip_ansi(&out2);
-    assert!(plain2.contains("Google: 25% │ Claude: 8%"), "compact summary mismatch:\n{plain2}");
-    assert!(!plain2.contains("───"), "compact mode must not render divider:\n{plain2}");
+    assert!(
+        plain2.contains("Google: 25% │ Claude: 8%"),
+        "compact summary mismatch:\n{plain2}"
+    );
+    assert!(
+        !plain2.contains("───"),
+        "compact mode must not render divider:\n{plain2}"
+    );
 
     // 3) None mode hides quota output completely
     fs::write(
@@ -515,8 +562,14 @@ fn e2e_quota_styles_models_fallback_compact_none_and_expired_handling() {
     let (code3, out3, _) = env.run_stdin(&agy_pulse_bin(), &payload, &[("COLUMNS", "120")]);
     assert_eq!(code3, 0);
     let plain3 = strip_ansi(&out3);
-    assert!(!plain3.contains("Google"), "none mode must hide Google:\n{plain3}");
-    assert!(!plain3.contains("Claude"), "none mode must hide Claude:\n{plain3}");
+    assert!(
+        !plain3.contains("Google"),
+        "none mode must hide Google:\n{plain3}"
+    );
+    assert!(
+        !plain3.contains("Claude"),
+        "none mode must hide Claude:\n{plain3}"
+    );
 
     // 4) All-expired quota produces no quota panel even in table mode
     fs::write(
@@ -538,7 +591,10 @@ fn e2e_quota_styles_models_fallback_compact_none_and_expired_handling() {
     let (code4, out4, _) = env.run_stdin(&agy_pulse_bin(), &all_expired_payload, &[]);
     assert_eq!(code4, 0);
     let plain4 = strip_ansi(&out4);
-    assert!(!plain4.contains("Google 5h"), "all-expired quota must not render table:\n{plain4}");
+    assert!(
+        !plain4.contains("Google 5h"),
+        "all-expired quota must not render table:\n{plain4}"
+    );
 }
 
 #[test]
@@ -576,14 +632,30 @@ fn e2e_bilingual_zh_en_and_ascii_degradation_with_quota() {
     let (code_zh, out_zh, _) = env.run_stdin(
         &agy_pulse_bin(),
         &payload,
-        &[("COLUMNS", "120"), ("AGY_PULSE_LANGUAGE", "zh"), ("AGY_PULSE_FORCE_ASCII", "1")],
+        &[
+            ("COLUMNS", "120"),
+            ("AGY_PULSE_LANGUAGE", "zh"),
+            ("AGY_PULSE_FORCE_ASCII", "1"),
+        ],
     );
     assert_eq!(code_zh, 0);
     let plain_zh = strip_ansi(&out_zh);
-    assert!(plain_zh.contains("费用 $1.50"), "zh statusline must localize cost:\n{plain_zh}");
-    assert!(plain_zh.contains("上下文"), "zh statusline must localize context:\n{plain_zh}");
-    assert!(plain_zh.contains(&format!("  {}", "-".repeat(67))), "ASCII divider missing:\n{plain_zh}");
-    assert!(plain_zh.contains("Google 5h   [#####-]  75% ~1h45m | Claude 5h   [------]   --"), "ASCII quota row mismatch:\n{plain_zh}");
+    assert!(
+        plain_zh.contains("费用 $1.50"),
+        "zh statusline must localize cost:\n{plain_zh}"
+    );
+    assert!(
+        plain_zh.contains("上下文"),
+        "zh statusline must localize context:\n{plain_zh}"
+    );
+    assert!(
+        plain_zh.contains(&format!("  {}", "-".repeat(67))),
+        "ASCII divider missing:\n{plain_zh}"
+    );
+    assert!(
+        plain_zh.contains("Google 5h   [#####-]  75% ~1h45m | Claude 5h   [------]   --"),
+        "ASCII quota row mismatch:\n{plain_zh}"
+    );
     assert!(!plain_zh.contains('│'));
     assert!(!plain_zh.contains('─'));
     assert!(!plain_zh.contains('█'));
@@ -593,13 +665,26 @@ fn e2e_bilingual_zh_en_and_ascii_degradation_with_quota() {
     let (code_en, out_en, _) = env.run_stdin(
         &agy_pulse_bin(),
         &payload,
-        &[("COLUMNS", "120"), ("AGY_PULSE_LANGUAGE", "en"), ("AGY_PULSE_FORCE_UNICODE", "1")],
+        &[
+            ("COLUMNS", "120"),
+            ("AGY_PULSE_LANGUAGE", "en"),
+            ("AGY_PULSE_FORCE_UNICODE", "1"),
+        ],
     );
     assert_eq!(code_en, 0);
     let plain_en = strip_ansi(&out_en);
-    assert!(plain_en.contains("Cost $1.50"), "en statusline must render Cost:\n{plain_en}");
-    assert!(plain_en.contains("Ctx"), "en statusline must render Ctx:\n{plain_en}");
-    assert!(plain_en.contains("Google 5h   [█████░]  75% ~1h45m │ Claude 5h   [░░░░░░]   --"), "Unicode quota row mismatch:\n{plain_en}");
+    assert!(
+        plain_en.contains("Cost $1.50"),
+        "en statusline must render Cost:\n{plain_en}"
+    );
+    assert!(
+        plain_en.contains("Ctx"),
+        "en statusline must render Ctx:\n{plain_en}"
+    );
+    assert!(
+        plain_en.contains("Google 5h   [█████░]  75% ~1h45m │ Claude 5h   [░░░░░░]   --"),
+        "Unicode quota row mismatch:\n{plain_en}"
+    );
 }
 
 #[test]
@@ -661,11 +746,26 @@ fn e2e_unstarted_epoch_zero_reset_time_not_expired_and_rendered() {
     assert_eq!(code2, 0);
     assert_eq!(err2, "");
     let plain2 = strip_ansi(&out2);
-    assert!(plain2.contains("Google 5h   [██████] 100%"), "missing Google 5h:\n{plain2}");
-    assert!(plain2.contains("Claude 5h   [██████] 100%"), "missing Claude 5h:\n{plain2}");
-    assert!(plain2.contains("Google week [██████] 100%"), "missing Google week:\n{plain2}");
-    assert!(plain2.contains("Claude week [██████] 100%"), "missing Claude week:\n{plain2}");
-    assert!(!plain2.contains("--"), "unstarted windows must not render --:\n{plain2}");
+    assert!(
+        plain2.contains("Google 5h   [██████] 100%"),
+        "missing Google 5h:\n{plain2}"
+    );
+    assert!(
+        plain2.contains("Claude 5h   [██████] 100%"),
+        "missing Claude 5h:\n{plain2}"
+    );
+    assert!(
+        plain2.contains("Google week [██████] 100%"),
+        "missing Google week:\n{plain2}"
+    );
+    assert!(
+        plain2.contains("Claude week [██████] 100%"),
+        "missing Claude week:\n{plain2}"
+    );
+    assert!(
+        !plain2.contains("--"),
+        "unstarted windows must not render --:\n{plain2}"
+    );
 
     // 3) Zero-date 0001-01-01T00:00:00Z (negative epoch ms) is also treated as unstarted countdown
     let payload_zero_date = serde_json::json!({
@@ -765,7 +865,8 @@ fn e2e_reset_in_seconds_fallback_and_disabled_window_handling() {
         }
     })
     .to_string();
-    let (snap_disabled, _) = HostReader::parse_stdin_fallback(&all_disabled_payload, &env.workspace_dir);
+    let (snap_disabled, _) =
+        HostReader::parse_stdin_fallback(&all_disabled_payload, &env.workspace_dir);
     assert!(snap_disabled.quota.is_none());
 
     let (code_dis, out_dis, err_dis) = env.run_stdin(
@@ -776,8 +877,14 @@ fn e2e_reset_in_seconds_fallback_and_disabled_window_handling() {
     assert_eq!(code_dis, 0);
     assert_eq!(err_dis, "");
     let plain_dis = strip_ansi(&out_dis);
-    assert!(!plain_dis.contains("Google 5h"), "all disabled must hide quota table:\n{plain_dis}");
-    assert!(!plain_dis.contains("Claude 5h"), "all disabled must hide quota table:\n{plain_dis}");
+    assert!(
+        !plain_dis.contains("Google 5h"),
+        "all disabled must hide quota table:\n{plain_dis}"
+    );
+    assert!(
+        !plain_dis.contains("Claude 5h"),
+        "all disabled must hide quota table:\n{plain_dis}"
+    );
 }
 
 #[test]

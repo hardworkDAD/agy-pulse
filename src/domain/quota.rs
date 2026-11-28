@@ -171,10 +171,10 @@ pub fn has_valid_provider_quota(summary: &ProviderQuotaSummary, observed_at_ms: 
     pick_critical_window(&summary.google, observed_at_ms).is_some()
         || pick_critical_window(&summary.claude, observed_at_ms).is_some()
         || pick_critical_window(&summary.argon, observed_at_ms).is_some()
-        || summary
-            .extras
-            .iter()
-            .any(|e| !is_openai_provider_key(&e.key) && pick_critical_window(&e.quota, observed_at_ms).is_some())
+        || summary.extras.iter().any(|e| {
+            !is_openai_provider_key(&e.key)
+                && pick_critical_window(&e.quota, observed_at_ms).is_some()
+        })
 }
 
 fn is_leap_year(year: i64) -> bool {
@@ -256,10 +256,7 @@ pub fn parse_iso8601_to_epoch_ms(raw: &str) -> Option<i64> {
     let mut tail = rest.get(8..)?;
     let mut millis: i64 = 0;
     if let Some(after_dot) = tail.strip_prefix('.') {
-        let frac_len = after_dot
-            .bytes()
-            .take_while(|b| b.is_ascii_digit())
-            .count();
+        let frac_len = after_dot.bytes().take_while(|b| b.is_ascii_digit()).count();
         if frac_len == 0 {
             return None;
         }

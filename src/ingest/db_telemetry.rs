@@ -17,9 +17,7 @@ use super::proto_wire::{
     extract_gen_metadata_row_details, extract_step_timestamp_and_bot, extract_trajectory_meta,
     is_valid_compaction_limit,
 };
-use super::sqlite_ro::{
-    is_no_such_table_error, is_sqlite_open_or_access_error, with_readonly_db,
-};
+use super::sqlite_ro::{is_no_such_table_error, is_sqlite_open_or_access_error, with_readonly_db};
 use super::transcript::ModelTokenAcc;
 
 const COMPACTION_CACHE_FILENAME: &str = "agy-pulse-compaction-cache.json";
@@ -173,7 +171,9 @@ pub(super) struct ResolvedModelPerf {
     pub cascade_cost_tree: Option<CascadeDbCostTree>,
 }
 
-pub(super) fn extract_transcript_context(transcript_path: Option<&Path>) -> (Option<PathBuf>, Option<String>) {
+pub(super) fn extract_transcript_context(
+    transcript_path: Option<&Path>,
+) -> (Option<PathBuf>, Option<String>) {
     let Some(tp) = transcript_path else {
         return (None, None);
     };
@@ -211,7 +211,10 @@ fn resolve_compaction_cache_path() -> PathBuf {
     platform::resolve_antigravity_path(COMPACTION_CACHE_FILENAME)
 }
 
-fn resolve_active_db_path(conversation_id: Option<&str>, candidate_roots: &[PathBuf]) -> Option<PathBuf> {
+fn resolve_active_db_path(
+    conversation_id: Option<&str>,
+    candidate_roots: &[PathBuf],
+) -> Option<PathBuf> {
     let conv_id = conversation_id.filter(|s| !s.trim().is_empty())?;
     for root in candidate_roots {
         let candidate = root.join("conversations").join(format!("{conv_id}.db"));
@@ -504,11 +507,8 @@ pub(super) fn resolve_server_compaction_limit(
             .filter(|&lim| is_valid_compaction_limit(lim));
     }
 
-    let recent_dbs = list_recent_conversation_dbs(
-        &candidate_roots,
-        active_db_path.as_deref(),
-        MAX_RECENT_DBS,
-    );
+    let recent_dbs =
+        list_recent_conversation_dbs(&candidate_roots, active_db_path.as_deref(), MAX_RECENT_DBS);
     let newest_recent_mtime = recent_dbs.first().map(|d| d.mtime_ms).unwrap_or(0);
     let last_known_mtime = cache_handle.cache.last_known_mtime.unwrap_or(0);
 
@@ -671,7 +671,9 @@ fn accumulate_decoded_row_into_telemetry(
                 calculate_token_cost(&step.step_model, &usage, false, false).unwrap_or(0.0);
             acc.input_tokens = acc.input_tokens.saturating_add(step.input_tokens);
             acc.cache_read_tokens = acc.cache_read_tokens.saturating_add(step.cache_read_tokens);
-            acc.cache_write_tokens = acc.cache_write_tokens.saturating_add(step.cache_write_tokens);
+            acc.cache_write_tokens = acc
+                .cache_write_tokens
+                .saturating_add(step.cache_write_tokens);
             acc.output_tokens = acc.output_tokens.saturating_add(step.output_tokens);
             acc.cost_usd += step_cost;
             acc.steps = acc.steps.saturating_add(1);
@@ -860,7 +862,8 @@ fn count_user_inputs_in_transcript_file(transcript_path: &Path) -> Option<u64> {
         if trimmed.is_empty() {
             return;
         }
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(trimmed)
+        if let Ok(serde_json::Value::Object(map)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
             && map.get("type").and_then(serde_json::Value::as_str) == Some("USER_INPUT")
         {
             *count += 1;
@@ -904,10 +907,7 @@ fn estimate_db_user_turns(
     telemetry: &RawDbTelemetry,
     candidate_roots: &[PathBuf],
 ) -> u64 {
-    let conv_id = db_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let conv_id = db_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let is_child_db = telemetry.parent_cascade_id.is_some()
         || telemetry
             .root_cascade_id
@@ -962,8 +962,12 @@ pub(super) fn merge_db_models_into(
         let acc = target.entry(model_key.clone()).or_default();
         acc.cost_usd += cost_usd;
         acc.input_tokens = acc.input_tokens.saturating_add(stats.input_tokens);
-        acc.cache_read_tokens = acc.cache_read_tokens.saturating_add(stats.cache_read_tokens);
-        acc.cache_write_tokens = acc.cache_write_tokens.saturating_add(stats.cache_write_tokens);
+        acc.cache_read_tokens = acc
+            .cache_read_tokens
+            .saturating_add(stats.cache_read_tokens);
+        acc.cache_write_tokens = acc
+            .cache_write_tokens
+            .saturating_add(stats.cache_write_tokens);
         acc.output_tokens = acc.output_tokens.saturating_add(stats.output_tokens);
         acc.steps = acc.steps.saturating_add(stats.steps);
     }
@@ -1111,10 +1115,7 @@ pub(super) fn resolve_model_perf_stats(
                 if has_wal {
                     self.uncached_wal_copies += 1;
                 }
-                let conv_stem = db_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let conv_stem = db_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let is_active_or_child = self.active_conv_id == Some(conv_stem)
                     || self.child_ids_set.contains(conv_stem);
                 if is_active_or_child && let Some(ref sig_str) = sig {
@@ -1305,10 +1306,7 @@ pub(super) fn resolve_model_perf_stats(
             let cid = if !record.conversation_id.is_empty() {
                 record.conversation_id.as_str()
             } else {
-                db_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
+                db_path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
             };
             if !cid.is_empty() && lineage_conv_ids.contains(cid) {
                 perf_window_dbs.push(DbPathEntry {
@@ -1571,7 +1569,9 @@ pub(super) fn resolve_model_perf_stats(
 
     for node in historical_roots {
         for m_key in &node.db_models {
-            min_turns_ago.entry(m_key.clone()).or_insert(cumulative_turns);
+            min_turns_ago
+                .entry(m_key.clone())
+                .or_insert(cumulative_turns);
         }
         if !node.is_orphan {
             cumulative_turns = cumulative_turns.saturating_add(node.user_turns.max(1));
@@ -1585,7 +1585,8 @@ pub(super) fn resolve_model_perf_stats(
         } else {
             None
         };
-        let avg_speed = raw_speed.filter(|&s| s.is_finite() && s > 0.0 && s <= MAX_VALID_STREAM_SPEED);
+        let avg_speed =
+            raw_speed.filter(|&s| s.is_finite() && s > 0.0 && s <= MAX_VALID_STREAM_SPEED);
         let avg_ttft_sec = if agg.ttft_samples > 0 {
             Some(agg.sum_ttft_sec / agg.ttft_samples as f64)
         } else {
@@ -1927,12 +1928,18 @@ mod tests {
             .unwrap();
             conn.execute(
                 "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
-                params![1i64, build_test_gen_blob(500_000, 100, 1, "Gemini 4 Neon (High)")],
+                params![
+                    1i64,
+                    build_test_gen_blob(500_000, 100, 1, "Gemini 4 Neon (High)")
+                ],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
-                params![2i64, build_test_gen_blob(200_000, 200, 1, "Claude Sonnet 4.6 (Thinking)")],
+                params![
+                    2i64,
+                    build_test_gen_blob(200_000, 200, 1, "Claude Sonnet 4.6 (Thinking)")
+                ],
             )
             .unwrap();
         }
@@ -1957,7 +1964,11 @@ mod tests {
                 &mut cache_handle,
                 &mut memo,
             );
-            assert_eq!(lim, Some(200_000), "must pick newest gen_metadata compaction limit");
+            assert_eq!(
+                lim,
+                Some(200_000),
+                "must pick newest gen_metadata compaction limit"
+            );
             assert_eq!(memo.len(), 1);
 
             let perf = resolve_model_perf_stats(

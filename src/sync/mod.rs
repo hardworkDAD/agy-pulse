@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub use cf_worker::CfWorkerRemote;
 pub use cli::{run_sync_bg, run_sync_cli};
+pub(crate) use config::sanitize_url_for_display;
 pub use config::{
     DEFAULT_PUSH_INTERVAL_SEC, DEFAULT_SYNC_PREFIX, RawSyncConfigSnapshot, RemoteConfig,
     SyncConfig, SyncEnvOverrides, active_sync_env_overrides, delete_sync_config,
@@ -19,10 +20,7 @@ pub use config::{
     load_sync_config_raw_from, read_raw_sync_config_snapshot, read_raw_sync_config_snapshot_at,
     save_sync_config, save_sync_config_to,
 };
-pub(crate) use config::sanitize_url_for_display;
-pub use engine::{
-    PruneOutcome, SyncOutcome, SyncOutcomeKind, prune_device, pull, push, sync_both,
-};
+pub use engine::{PruneOutcome, SyncOutcome, SyncOutcomeKind, prune_device, pull, push, sync_both};
 pub use http_util::validate_remote_url;
 pub use local_dir::LocalDirRemote;
 pub use protocol::{

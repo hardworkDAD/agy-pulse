@@ -139,7 +139,8 @@ impl HostReader {
             parsed.snapshot.has_conversation_identity = true;
         }
 
-        let (_, derived_conv_id) = db_telemetry::extract_transcript_context(transcript_path.as_deref());
+        let (_, derived_conv_id) =
+            db_telemetry::extract_transcript_context(transcript_path.as_deref());
         let effective_conv_id = parsed
             .snapshot
             .host
@@ -590,8 +591,8 @@ fn enrich_speeds_from_model_perf(
         .values()
         .filter(|p| {
             let norm = compact_model_name(&p.model);
-            let is_main = !main_model_key.is_empty()
-                && (p.model == main_model_key || norm == main_model_key);
+            let is_main =
+                !main_model_key.is_empty() && (p.model == main_model_key || norm == main_model_key);
             !is_main
                 && !seen_models.contains(&p.model)
                 && p.avg_speed.is_some_and(|s| s.is_finite() && s > 0.0)
@@ -605,10 +606,7 @@ fn enrich_speeds_from_model_perf(
     });
     for p in extras {
         if let Some(speed_tok_s) = p.avg_speed {
-            let sess_ts = session_last_active_ms
-                .get(&p.model)
-                .copied()
-                .unwrap_or(0);
+            let sess_ts = session_last_active_ms.get(&p.model).copied().unwrap_or(0);
             snapshot.child_model_speeds.push(ChildModelSpeed {
                 model: p.model.clone(),
                 speed_tok_s,
@@ -648,26 +646,27 @@ fn reconcile_db_and_transcript(
     db_models: &BTreeMap<String, transcript::ModelTokenAcc>,
     sc: &transcript::ScannedTranscript,
 ) -> (f64, BTreeMap<String, transcript::ModelTokenAcc>) {
-    let trailing: &[transcript::TranscriptTokenStepCost] = if let Some(max_db_idx) = db_max_step_index {
-        let split_pos = sc
-            .recent_token_steps
-            .iter()
-            .position(|s| s.step_index.is_some_and(|idx| idx > max_db_idx));
-        match split_pos {
-            Some(pos) => &sc.recent_token_steps[pos..],
-            None => &[],
-        }
-    } else if sc.token_steps_count > db_steps {
-        let extra = (sc.token_steps_count - db_steps) as usize;
-        let len = sc.recent_token_steps.len();
-        if extra <= len {
-            &sc.recent_token_steps[len - extra..]
+    let trailing: &[transcript::TranscriptTokenStepCost] =
+        if let Some(max_db_idx) = db_max_step_index {
+            let split_pos = sc
+                .recent_token_steps
+                .iter()
+                .position(|s| s.step_index.is_some_and(|idx| idx > max_db_idx));
+            match split_pos {
+                Some(pos) => &sc.recent_token_steps[pos..],
+                None => &[],
+            }
+        } else if sc.token_steps_count > db_steps {
+            let extra = (sc.token_steps_count - db_steps) as usize;
+            let len = sc.recent_token_steps.len();
+            if extra <= len {
+                &sc.recent_token_steps[len - extra..]
+            } else {
+                &[]
+            }
         } else {
             &[]
-        }
-    } else {
-        &[]
-    };
+        };
 
     if !trailing.is_empty() {
         let mut combined_cost = db_cost;
@@ -682,7 +681,9 @@ fn reconcile_db_and_transcript(
             let acc = combined_models.entry(step.model_key.clone()).or_default();
             acc.input_tokens = acc.input_tokens.saturating_add(step.input_tokens);
             acc.cache_read_tokens = acc.cache_read_tokens.saturating_add(step.cache_read_tokens);
-            acc.cache_write_tokens = acc.cache_write_tokens.saturating_add(step.cache_write_tokens);
+            acc.cache_write_tokens = acc
+                .cache_write_tokens
+                .saturating_add(step.cache_write_tokens);
             acc.output_tokens = acc.output_tokens.saturating_add(step.output_tokens);
             acc.cost_usd += step.cost_usd;
             acc.steps = acc.steps.saturating_add(1);

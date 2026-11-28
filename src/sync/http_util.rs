@@ -16,9 +16,7 @@ pub fn is_loopback_host(host: &str) -> bool {
     if trimmed.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    trimmed
-        .parse::<IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback())
+    trimmed.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Validate a remote endpoint URL against transport security rules:
@@ -35,7 +33,9 @@ pub fn validate_remote_url(raw: &str, allow_insecure_http: bool) -> Result<Url, 
     }
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(SyncError::Config("remote URL must not be empty".to_string()));
+        return Err(SyncError::Config(
+            "remote URL must not be empty".to_string(),
+        ));
     }
     if trimmed.chars().any(|c| c.is_whitespace()) {
         return Err(SyncError::Config(format!(
@@ -51,10 +51,7 @@ pub fn validate_remote_url(raw: &str, allow_insecure_http: bool) -> Result<Url, 
         .map(|rest| ("https", rest))
         .or_else(|| lower.strip_prefix("http://").map(|rest| ("http", rest)));
     let Some((scheme_lit, rest)) = after_scheme else {
-        let scheme = trimmed
-            .split_once(':')
-            .map(|(s, _)| s)
-            .unwrap_or("unknown");
+        let scheme = trimmed.split_once(':').map(|(s, _)| s).unwrap_or("unknown");
         return Err(SyncError::Config(format!(
             "unsupported remote URL scheme '{scheme}': {safe_display}"
         )));
@@ -64,9 +61,8 @@ pub fn validate_remote_url(raw: &str, allow_insecure_http: bool) -> Result<Url, 
             "remote URL missing host: {safe_display}"
         )));
     }
-    let parsed = Url::parse(trimmed).map_err(|err| {
-        SyncError::Config(format!("invalid remote URL '{safe_display}': {err}"))
-    })?;
+    let parsed = Url::parse(trimmed)
+        .map_err(|err| SyncError::Config(format!("invalid remote URL '{safe_display}': {err}")))?;
 
     let host = parsed
         .host_str()

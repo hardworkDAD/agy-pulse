@@ -353,7 +353,10 @@ fn t05_dual_source_cli_ide_auto_scan_incremental_skip_and_0600_permissions() {
         )],
     );
 
-    let cli_child = env.cli_data_dir.join("conversations").join("cli-child-2.db");
+    let cli_child = env
+        .cli_data_dir
+        .join("conversations")
+        .join("cli-child-2.db");
     write_conv_db(
         &cli_child,
         None,
@@ -445,8 +448,16 @@ fn t05_dual_source_cli_ide_auto_scan_incremental_skip_and_0600_permissions() {
     }
 
     // No sidecars left on source DBs
-    assert!(!env.cli_data_dir.join("conversations/cli-root-1.db-wal").exists());
-    assert!(!env.ide_data_dir.join("conversations/ide-conv-1.db-wal").exists());
+    assert!(
+        !env.cli_data_dir
+            .join("conversations/cli-root-1.db-wal")
+            .exists()
+    );
+    assert!(
+        !env.ide_data_dir
+            .join("conversations/ide-conv-1.db-wal")
+            .exists()
+    );
 
     // Overview verifies merged CLI + IDE and Cascade tree folding
     let overview = store
@@ -610,7 +621,10 @@ fn t05_rolling_daily_weekly_cost_and_compaction_rollback_protection() {
 
     // Pre-existing DB step for today so Turn 1 has immediate DB cost AND zero double-counting
     let now_ts = Local::now().timestamp_millis();
-    let pre_db = env_e2e.cli_data_dir.join("conversations").join("conv-live-1.db");
+    let pre_db = env_e2e
+        .cli_data_dir
+        .join("conversations")
+        .join("conv-live-1.db");
     let expected_step_cost = calculate_token_cost(
         "Gemini 4 Carbon (High)",
         &TokenUsage {
@@ -772,7 +786,11 @@ fn t05_concurrent_statusline_and_stats_processes_have_no_sqlite_busy_failures() 
         let ws = env.workspace_dir.clone();
         handles.push(thread::spawn(move || {
             let is_stats = i % 3 == 0;
-            let bin = if is_stats { agypl_bin() } else { agy_pulse_bin() };
+            let bin = if is_stats {
+                agypl_bin()
+            } else {
+                agy_pulse_bin()
+            };
             let mut cmd = Command::new(bin);
             cmd.current_dir(&ws)
                 .env("HOME", &home)
@@ -850,7 +868,9 @@ fn t05_stats_subcommand_cli_ide_json_bilingual_and_exact_metrics() {
     // Pricing for Carbon: input $2.00/M, output $10.00/M, cache_read $0.10/M
     // Cost = 0.1 * 2.00 + 0.4 * 0.10 + 0.01 * 10.00 = 0.20 + 0.04 + 0.10 = $0.34
     write_conv_db(
-        &env.cli_data_dir.join("conversations").join("cli-stats-1.db"),
+        &env.cli_data_dir
+            .join("conversations")
+            .join("cli-stats-1.db"),
         Some(&build_trajectory_blob(
             "file:///repos/cli-app",
             "main",
@@ -880,7 +900,9 @@ fn t05_stats_subcommand_cli_ide_json_bilingual_and_exact_metrics() {
     // Pricing for Hydrogen: input $1.50/M, output $7.50/M, cache_read $0.075/M
     // Cost = 0.2 * 1.50 + 0.8 * 0.075 + 0.02 * 7.50 = 0.30 + 0.06 + 0.15 = $0.51
     write_conv_db(
-        &env.ide_data_dir.join("conversations").join("ide-stats-1.db"),
+        &env.ide_data_dir
+            .join("conversations")
+            .join("ide-stats-1.db"),
         Some(&build_trajectory_blob(
             "file:///repos/ide-app",
             "feat/ide",
@@ -907,23 +929,43 @@ fn t05_stats_subcommand_cli_ide_json_bilingual_and_exact_metrics() {
     );
 
     // 1. `agypl stats 7d --en`
-    let (c_en, out_en, err_en) =
-        env.run_args(&agypl_bin(), &["stats", "7d", "--en"], true, &[("NO_COLOR", "1")]);
+    let (c_en, out_en, err_en) = env.run_args(
+        &agypl_bin(),
+        &["stats", "7d", "--en"],
+        true,
+        &[("NO_COLOR", "1")],
+    );
     assert_eq!(c_en, 0, "{err_en}");
     let plain_en = strip_ansi(&out_en);
     assert!(plain_en.contains("agy-pulse Telemetry Stats"), "{plain_en}");
-    assert!(plain_en.contains("$0.850"), "expected $0.850 total cost:\n{plain_en}");
-    assert!(plain_en.contains("1.5M"), "expected 1.5M tokens:\n{plain_en}");
-    assert!(plain_en.contains("New 300k | Read 1.2M | Out 30k"), "{plain_en}");
-    assert!(plain_en.contains("200.0 tok/s"), "expected 200.0 tok/s:\n{plain_en}");
+    assert!(
+        plain_en.contains("$0.850"),
+        "expected $0.850 total cost:\n{plain_en}"
+    );
+    assert!(
+        plain_en.contains("1.5M"),
+        "expected 1.5M tokens:\n{plain_en}"
+    );
+    assert!(
+        plain_en.contains("New 300k | Read 1.2M | Out 30k"),
+        "{plain_en}"
+    );
+    assert!(
+        plain_en.contains("200.0 tok/s"),
+        "expected 200.0 tok/s:\n{plain_en}"
+    );
     assert!(plain_en.contains("Carbon"), "{plain_en}");
     assert!(plain_en.contains("Hydro"), "{plain_en}");
     assert!(plain_en.contains("[CLI] cli-app"), "{plain_en}");
     assert!(plain_en.contains("[IDE] ide-app"), "{plain_en}");
 
     // 2. `agypl stats 7d --zh`
-    let (c_zh, out_zh, err_zh) =
-        env.run_args(&agypl_bin(), &["stats", "7d", "--zh"], true, &[("NO_COLOR", "1")]);
+    let (c_zh, out_zh, err_zh) = env.run_args(
+        &agypl_bin(),
+        &["stats", "7d", "--zh"],
+        true,
+        &[("NO_COLOR", "1")],
+    );
     assert_eq!(c_zh, 0, "{err_zh}");
     let plain_zh = strip_ansi(&out_zh);
     assert!(plain_zh.contains("agy-pulse 遥测统计报表"), "{plain_zh}");
@@ -941,15 +983,24 @@ fn t05_stats_subcommand_cli_ide_json_bilingual_and_exact_metrics() {
     assert_eq!(c_json, 0, "{err_json}");
     let parsed: Value = serde_json::from_str(&out_json).expect("valid stats JSON");
     assert_eq!(parsed["meta"]["source"], "ide");
-    assert_eq!(parsed["meta"]["availableSources"], serde_json::json!(["cli", "ide"]));
+    assert_eq!(
+        parsed["meta"]["availableSources"],
+        serde_json::json!(["cli", "ide"])
+    );
     assert_eq!(parsed["summary"]["totalSteps"], 1);
     let ide_cost = parsed["summary"]["totalCostUsd"].as_f64().unwrap();
-    assert!((ide_cost - 0.51).abs() < 1e-9, "expected 0.51, got {ide_cost}");
+    assert!(
+        (ide_cost - 0.51).abs() < 1e-9,
+        "expected 0.51, got {ide_cost}"
+    );
     assert_eq!(parsed["summary"]["inputTokens"], 200_000);
     assert_eq!(parsed["summary"]["cacheReadTokens"], 800_000);
     assert_eq!(parsed["summary"]["outputTokens"], 20_000);
     let ide_speed = parsed["summary"]["avgSpeed"].as_f64().unwrap();
-    assert!((ide_speed - 200.0).abs() < 1e-9, "expected 200.0, got {ide_speed}");
+    assert!(
+        (ide_speed - 200.0).abs() < 1e-9,
+        "expected 200.0, got {ide_speed}"
+    );
     assert_eq!(parsed["byModel"][0]["model"], "Hydro");
     assert_eq!(parsed["sessions"][0]["rootConversationId"], "ide-stats-1");
     assert_eq!(parsed["sessions"][0]["source"], "ide");
@@ -958,8 +1009,12 @@ fn t05_stats_subcommand_cli_ide_json_bilingual_and_exact_metrics() {
     let (c_help, out_help, _) = env.run_args(&agypl_bin(), &["stats", "--help"], false, &[]);
     assert_eq!(c_help, 0);
     assert!(out_help.contains("--source"));
-    let (c_csv, out_csv, _) =
-        env.run_args(&agypl_bin(), &["stats", "--csv=models", "--no-sync"], true, &[]);
+    let (c_csv, out_csv, _) = env.run_args(
+        &agypl_bin(),
+        &["stats", "--csv=models", "--no-sync"],
+        true,
+        &[],
+    );
     assert_eq!(c_csv, 0);
     assert!(out_csv.starts_with("model,costUsd,costSharePct,"));
     assert!(out_csv.contains("Hydro,0.51,60,"));
@@ -1041,7 +1096,10 @@ fn t05_statusline_exits_promptly_under_ledger_write_lock_contention() {
     );
     let elapsed_1 = start_1.elapsed();
 
-    assert_eq!(code_1, 0, "statusline must still exit 0 under ledger lock contention");
+    assert_eq!(
+        code_1, 0,
+        "statusline must still exit 0 under ledger lock contention"
+    );
     let plain_1 = strip_ansi(&out_1);
     assert!(
         plain_1.contains("Carbon") && !plain_1.trim().is_empty(),
@@ -1112,7 +1170,10 @@ fn t05_statusline_exits_promptly_under_ledger_write_lock_contention() {
     let elapsed_2 = start_2.elapsed();
     drop(tx);
 
-    assert_eq!(code_2, 0, "multi-write statusline must still exit 0 under ledger lock contention");
+    assert_eq!(
+        code_2, 0,
+        "multi-write statusline must still exit 0 under ledger lock contention"
+    );
     let plain_2 = strip_ansi(&out_2);
     assert!(
         plain_2.contains("Carbon") && !plain_2.trim().is_empty(),
@@ -1151,7 +1212,10 @@ fn t05_sync_conversation_respects_throttle_ms_and_allows_force_or_zero_bypass() 
     let mut store = LedgerStore::open_at(&ledger_path).expect("open ledger");
 
     let t0 = local_ms(2026, 11, 20, 15, 0, 0);
-    let conv_db = env.cli_data_dir.join("conversations").join("conv-throttle-1.db");
+    let conv_db = env
+        .cli_data_dir
+        .join("conversations")
+        .join("conv-throttle-1.db");
     write_conv_db(
         &conv_db,
         Some(&build_trajectory_blob(
@@ -1254,7 +1318,10 @@ fn t05_sync_conversation_respects_throttle_ms_and_allows_force_or_zero_bypass() 
             },
         )
         .expect("throttled sync");
-    assert!(r2.skipped, "sync within default 15s throttle must be skipped");
+    assert!(
+        r2.skipped,
+        "sync within default 15s throttle must be skipped"
+    );
     assert_eq!(r2.synced_dbs, 0);
     assert_eq!(r2.steps_upserted, 0);
 

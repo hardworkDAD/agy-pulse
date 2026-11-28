@@ -43,12 +43,7 @@ pub(super) fn resolve_git_branch(cwd: &Path, deadline: Option<Instant>) -> Optio
     }
 
     let timeout = remaining_git_timeout(deadline)?;
-    platform::run_command_with_timeout(
-        "git",
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        cwd,
-        timeout,
-    )
+    platform::run_command_with_timeout("git", &["rev-parse", "--abbrev-ref", "HEAD"], cwd, timeout)
 }
 
 fn locate_git_dir(start: &Path) -> Option<PathBuf> {
@@ -97,12 +92,7 @@ fn read_head_branch(git_dir: &Path) -> Option<String> {
         };
     }
     if let Some(other_ref) = trimmed.strip_prefix("ref: ") {
-        let short = other_ref
-            .trim()
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .trim();
+        let short = other_ref.trim().rsplit('/').next().unwrap_or("").trim();
         return if short.is_empty() {
             None
         } else {

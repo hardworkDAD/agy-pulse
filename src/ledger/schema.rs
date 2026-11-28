@@ -205,7 +205,11 @@ where
     run_with_busy_retry_policy(BusyRetryPolicy::standard(), op)
 }
 
-fn has_table_column(conn: &Connection, table_name: &str, col_name: &str) -> Result<bool, rusqlite::Error> {
+fn has_table_column(
+    conn: &Connection,
+    table_name: &str,
+    col_name: &str,
+) -> Result<bool, rusqlite::Error> {
     let sql = format!("PRAGMA table_info({table_name})");
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([])?;
@@ -334,14 +338,13 @@ fn ensure_schema(
         let device_name = platform::current_hostname().unwrap_or_else(|| "local".to_string());
         let mut account_ids: Vec<String> = Vec::new();
         {
-            let mut stmt = tx.prepare(
-                "SELECT DISTINCT account_id FROM ingested_dbs WHERE device_id = ?1",
-            )?;
+            let mut stmt =
+                tx.prepare("SELECT DISTINCT account_id FROM ingested_dbs WHERE device_id = ?1")?;
             let mut rows = stmt.query(params![&local_device_id])?;
             while let Some(row) = rows.next()? {
                 let raw: String = row.get(0)?;
-                let normalized = normalize_account_id(&raw)
-                    .unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
+                let normalized =
+                    normalize_account_id(&raw).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string());
                 if !account_ids.contains(&normalized) {
                     account_ids.push(normalized);
                 }

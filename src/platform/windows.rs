@@ -11,20 +11,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE, LocalFree, STILL_ACTIVE,
 };
+use windows_sys::Win32::Security::Authorization::{
+    EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW,
+    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+};
 use windows_sys::Win32::Security::{
     ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, GetTokenInformation, NO_INHERITANCE,
     OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER,
     TokenUser,
 };
-use windows_sys::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW,
-    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
-};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ALL_ACCESS, MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW,
 };
 use windows_sys::Win32::System::Console::{
-    CONSOLE_SCREEN_BUFFER_INFO, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
+    CONSOLE_SCREEN_BUFFER_INFO, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT,
     CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
     ENABLE_PROCESSED_INPUT, GetConsoleMode, GetConsoleOutputCP, GetConsoleScreenBufferInfo,
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCtrlHandler,
@@ -196,7 +196,9 @@ fn restrict_path_to_current_user(path: &Path, is_dir: bool) -> std::io::Result<(
         return Err(io::Error::last_os_error());
     }
 
-    let words = (needed as usize).div_ceil(std::mem::size_of::<u64>()).max(1);
+    let words = (needed as usize)
+        .div_ceil(std::mem::size_of::<u64>())
+        .max(1);
     let mut buf = vec![0u64; words];
     let buf_len = u32::try_from(buf.len().saturating_mul(std::mem::size_of::<u64>()))
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "token buffer size overflow"))?;
@@ -299,11 +301,7 @@ pub(super) fn append_file_0600_no_symlink(path: &Path, message: &str) {
     {
         return;
     }
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(message.as_bytes());
         let _ = set_file_0600(path);
     }
@@ -328,11 +326,7 @@ pub(super) fn create_exclusive_file_0600(path: &Path, bytes: &[u8]) -> std::io::
     {
         ensure_dir_0700(parent)?;
     }
-    match OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-    {
+    match OpenOptions::new().create_new(true).write(true).open(path) {
         Ok(mut file) => {
             file.write_all(bytes)?;
             set_file_0600(path)?;
@@ -361,10 +355,7 @@ fn write_atomic_0600_inner(path: &Path, bytes: &[u8], sync_disk: bool) -> std::i
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("cache");
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("cache");
     let tmp_name = format!(".{file_name}.{}.{nanos}.tmp", std::process::id());
     let tmp_path = path.with_file_name(tmp_name);
 
@@ -482,7 +473,10 @@ pub(super) fn set_executable_0755(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn replace_executable_atomically(source_file: &Path, target_path: &Path) -> io::Result<()> {
+pub(super) fn replace_executable_atomically(
+    source_file: &Path,
+    target_path: &Path,
+) -> io::Result<()> {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)?;
     }

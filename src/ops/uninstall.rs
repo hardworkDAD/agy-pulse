@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::dashboard::{
-    DASHBOARD_SPAWN_LOCK_FILENAME, DASHBOARD_STATE_FILENAME, DEFAULT_DASHBOARD_PORT,
-    LOOPBACK_HOST, stop_background_dashboard, uninstall_desktop_shortcuts,
+    DASHBOARD_SPAWN_LOCK_FILENAME, DASHBOARD_STATE_FILENAME, DEFAULT_DASHBOARD_PORT, LOOPBACK_HOST,
+    stop_background_dashboard, uninstall_desktop_shortcuts,
 };
 use crate::platform;
 
@@ -130,10 +130,7 @@ fn clear_statusline_in_settings(settings_path: &Path) -> &'static str {
     "write_error"
 }
 
-fn collect_secondary_settings_paths(
-    primary_settings: &Path,
-    roots: &[PathBuf],
-) -> Vec<PathBuf> {
+fn collect_secondary_settings_paths(primary_settings: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for root in roots {
         candidates.push(root.join("settings.json"));
@@ -221,9 +218,7 @@ fn is_known_runtime_artifact_name(name: &str) -> bool {
         || name.starts_with("agy-pulse-bootstrap-")
         || name.starts_with("agy-pulse-update-")
         || (name.starts_with("agy-pulse-")
-            && (name.ends_with(".sock")
-                || name.ends_with(".lock")
-                || name.ends_with(".pid")))
+            && (name.ends_with(".sock") || name.ends_with(".lock") || name.ends_with(".pid")))
 }
 
 fn clean_dedicated_runtime_dir(
@@ -260,11 +255,7 @@ fn clean_dedicated_runtime_dir(
     }
 }
 
-fn clean_shared_temp_dir(
-    dir: &Path,
-    seen_dirs: &mut HashSet<PathBuf>,
-    removed: &mut Vec<PathBuf>,
-) {
+fn clean_shared_temp_dir(dir: &Path, seen_dirs: &mut HashSet<PathBuf>, removed: &mut Vec<PathBuf>) {
     let Ok(meta) = fs::symlink_metadata(dir) else {
         return;
     };

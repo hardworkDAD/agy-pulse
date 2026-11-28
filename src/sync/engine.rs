@@ -260,7 +260,10 @@ fn validate_remote_manifest(
 }
 
 enum ChunkFetchOutcome {
-    Matched { gz_bytes: Vec<u8>, actual_sha: String },
+    Matched {
+        gz_bytes: Vec<u8>,
+        actual_sha: String,
+    },
     Failed(String),
 }
 

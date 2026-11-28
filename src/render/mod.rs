@@ -6,14 +6,17 @@ mod width;
 
 pub use layout::render_statusline;
 pub use width::{
-    ansi_display_width, display_width, format_tokens, strip_ansi,
-    truncate_ansi_to_display_width, truncate_plain_to_display_width,
+    ansi_display_width, display_width, format_tokens, strip_ansi, truncate_ansi_to_display_width,
+    truncate_plain_to_display_width,
 };
 
 use crate::domain::LanguageSetting;
 
 /// Resolve `LanguageSetting::Auto` using an explicit locale string (pure, no env access).
-pub fn resolve_language_from_locale(setting: LanguageSetting, locale: Option<&str>) -> LanguageSetting {
+pub fn resolve_language_from_locale(
+    setting: LanguageSetting,
+    locale: Option<&str>,
+) -> LanguageSetting {
     match setting {
         LanguageSetting::En => LanguageSetting::En,
         LanguageSetting::Zh => LanguageSetting::Zh,

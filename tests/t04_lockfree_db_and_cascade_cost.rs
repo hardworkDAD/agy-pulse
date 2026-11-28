@@ -253,8 +253,11 @@ fn t04_lockfree_db_zero_side_effects_with_active_wal_and_immutable() {
     let static_db_path = conv_dir.join(format!("{static_id}.db"));
     {
         let conn = Connection::open(&static_db_path).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
             params![1i64, build_compaction_gen_metadata_blob(400_000)],
@@ -304,12 +307,15 @@ fn t04_lockfree_db_zero_side_effects_with_active_wal_and_immutable() {
             params![1i64, build_compaction_executor_metadata_blob(800_000)],
         )
         .unwrap();
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
     }
 
     // Hold a live WAL writer transaction/uncheckpointed frame so -wal is non-empty!
     let writer_conn = Connection::open(&wal_db_path).unwrap();
-    writer_conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer_conn
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
     writer_conn
         .execute(
             "INSERT INTO executor_metadata (idx, data) VALUES (?1, ?2)",
@@ -396,8 +402,11 @@ fn t04_server_compaction_limit_calibrates_context_bar_and_monitor() {
     let db_path = conv_dir.join(format!("{conv_id}.db"));
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
             params![1i64, build_compaction_gen_metadata_blob(500_000)],
@@ -427,7 +436,10 @@ fn t04_server_compaction_limit_calibrates_context_bar_and_monitor() {
     );
 
     let cache_path = env.data_dir.join("agy-pulse-compaction-cache.json");
-    assert!(cache_path.is_file(), "compaction cache file must be persisted");
+    assert!(
+        cache_path.is_file(),
+        "compaction cache file must be persisted"
+    );
     let cache_json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
     assert_eq!(
@@ -471,16 +483,22 @@ fn t04_recent_dbs_weighted_streaming_speed_and_ttft_and_cache() {
     // Empty DB (must be skipped so it doesn't crowd out the 30 non-empty DB budget)
     {
         let conn = Connection::open(conv_dir.join("empty-00.db")).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
     }
 
     // DB 1: Carbon step1 (out=200, stream=2s, ttft=1.0s) + noisy invalid step (out=500, stream=0.01s < 0.05s)
     //       + Hydro step (out=400, stream=2s, ttft=0.5s)
     {
         let conn = Connection::open(conv_dir.join("perf-db-1.db")).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[
             GenEntrySpec {
                 raw_input_tokens: 1000,
@@ -506,8 +524,11 @@ fn t04_recent_dbs_weighted_streaming_speed_and_ttft_and_cache() {
                 ..Default::default()
             },
         ]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
 
     // DB 2: Carbon step2 (out=600, stream=2s, ttft=3.0s)
@@ -516,8 +537,11 @@ fn t04_recent_dbs_weighted_streaming_speed_and_ttft_and_cache() {
     // Hydro speed = 400 / 2 = 200.0 tok/s, TTFT = 500ms
     {
         let conn = Connection::open(conv_dir.join("perf-db-2.db")).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             raw_input_tokens: 1000,
             output_tokens: 600,
@@ -526,8 +550,11 @@ fn t04_recent_dbs_weighted_streaming_speed_and_ttft_and_cache() {
             display_name: Some("Gemini 4 Carbon (High)"),
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
 
     let payload = serde_json::json!({
@@ -553,7 +580,9 @@ fn t04_recent_dbs_weighted_streaming_speed_and_ttft_and_cache() {
     let cache_json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
     assert!(
-        cache_json["_db_perf"].as_object().is_some_and(|m| m.len() >= 2),
+        cache_json["_db_perf"]
+            .as_object()
+            .is_some_and(|m| m.len() >= 2),
         "_db_perf cache must record scanned DBs: {cache_json}"
     );
 
@@ -596,8 +625,11 @@ fn t04_unified_pricing_cascade_cost_tree_and_trailing_transcript_backfill() {
     // Cost = 190k * 4/1M (0.7600) + 1k * 18/1M (0.0180) + 20k * 0.4/1M (0.0080) = $0.7860
     {
         let conn = Connection::open(conv_dir.join(format!("{main_id}.db"))).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             system_prompt_tokens: 150_000,
             raw_input_tokens: 40_000,
@@ -608,8 +640,11 @@ fn t04_unified_pricing_cascade_cost_tree_and_trailing_transcript_backfill() {
             kvs: &[("last_step_index", "1")],
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
 
     // Child 1 DB (parent_cascade_id = main_id, root_cascade_id = main_id):
@@ -620,22 +655,25 @@ fn t04_unified_pricing_cascade_cost_tree_and_trailing_transcript_backfill() {
     // Total Child 1 = $0.1725
     {
         let conn = Connection::open(conv_dir.join(format!("{child1_id}.db"))).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             system_prompt_tokens: 50_000,
             raw_input_tokens: 50_000,
             output_tokens: 2_000,
             cache_read_tokens: 100_000,
             display_name: Some("Gemini 4 Hydrogen (High)"),
-            kvs: &[
-                ("parent_cascade_id", main_id),
-                ("root_cascade_id", main_id),
-            ],
+            kvs: &[("parent_cascade_id", main_id), ("root_cascade_id", main_id)],
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
 
     // Child 2 / Grandchild DB (parent_cascade_id = child1_id, NO root_cascade_id -> tests transitive lineage!):
@@ -645,8 +683,11 @@ fn t04_unified_pricing_cascade_cost_tree_and_trailing_transcript_backfill() {
     // Total Child 2 = $0.0900
     {
         let conn = Connection::open(conv_dir.join(format!("{child2_id}.db"))).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             system_prompt_tokens: 20_000,
             raw_input_tokens: 80_000,
@@ -656,15 +697,21 @@ fn t04_unified_pricing_cascade_cost_tree_and_trailing_transcript_backfill() {
             kvs: &[("parent_cascade_id", child1_id)],
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
 
     // Unrelated DB (must NOT be aggregated!)
     {
         let conn = Connection::open(conv_dir.join(format!("{unrelated_id}.db"))).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             raw_input_tokens: 5_000_000,
             output_tokens: 500_000,
@@ -672,8 +719,11 @@ fn t04_unified_pricing_cascade_cost_tree_and_trailing_transcript_backfill() {
             kvs: &[("root_cascade_id", "someone-else")],
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
 
     // Main transcript.jsonl with step 1 (persisted, lacks system prompt tokens) + trailing unpersisted step 2
@@ -745,7 +795,10 @@ fn t04_domain_routed_native_plus_children_cost_and_pure_db_record_export() {
         ..Default::default()
     };
     let resolved = resolve_cascade_cost_usd(&snap_native_plus_children, false).unwrap();
-    assert!((resolved - 0.65).abs() < 1e-9, "expected max(0.55, 0.40+0.25)=0.65, got {resolved}");
+    assert!(
+        (resolved - 0.65).abs() < 1e-9,
+        "expected max(0.55, 0.40+0.25)=0.65, got {resolved}"
+    );
 
     let snap_breakdown_higher = PulseSnapshot {
         cost: CostSnapshot {
@@ -757,7 +810,10 @@ fn t04_domain_routed_native_plus_children_cost_and_pure_db_record_export() {
         ..snap_native_plus_children.clone()
     };
     let resolved2 = resolve_cascade_cost_usd(&snap_breakdown_higher, false).unwrap();
-    assert!((resolved2 - 0.80).abs() < 1e-9, "expected max(0.80, 0.65)=0.80, got {resolved2}");
+    assert!(
+        (resolved2 - 0.80).abs() < 1e-9,
+        "expected max(0.80, 0.65)=0.80, got {resolved2}"
+    );
 
     // 2) Routed Bedrock/Vertex model ignores native_total_usd when allow_routed_cost=false
     let snap_routed = PulseSnapshot {
@@ -795,8 +851,11 @@ fn t04_domain_routed_native_plus_children_cost_and_pure_db_record_export() {
     let db_path = tmp.path().join("pure-export.db");
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             system_prompt_tokens: 15_000,
             raw_input_tokens: 5_000,
@@ -813,8 +872,11 @@ fn t04_domain_routed_native_plus_children_cost_and_pure_db_record_export() {
             ],
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
     let rec = HostReader::read_conversation_db(&db_path).expect("must decode DB record");
     assert_eq!(rec.conversation_id, "pure-export");
@@ -857,8 +919,11 @@ fn t04_lineage_child_db_perf_survives_top30_eviction_and_stale_turn_lockin() {
     // Main DB with Carbon streaming stats
     {
         let conn = Connection::open(conv_dir.join(format!("{main_id}.db"))).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             raw_input_tokens: 5_000,
             output_tokens: 300,
@@ -868,8 +933,11 @@ fn t04_lineage_child_db_perf_survives_top30_eviction_and_stale_turn_lockin() {
             display_name: Some("Gemini 4 Carbon (High)"),
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
 
     // Active lineage child DB with Hydro streaming stats (200.0 tok/s, TTFT 500ms),
@@ -877,8 +945,11 @@ fn t04_lineage_child_db_perf_survives_top30_eviction_and_stale_turn_lockin() {
     let fresh_child_db = conv_dir.join(format!("{fresh_child_id}.db"));
     {
         let conn = Connection::open(&fresh_child_db).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             raw_input_tokens: 10_000,
             output_tokens: 400,
@@ -886,18 +957,21 @@ fn t04_lineage_child_db_perf_survives_top30_eviction_and_stale_turn_lockin() {
             ttft_sec: Some((0, 500_000_000)),
             stream_sec: Some((2, 0)),
             display_name: Some("Gemini 4 Hydrogen (High)"),
-            kvs: &[
-                ("parent_cascade_id", main_id),
-                ("root_cascade_id", main_id),
-            ],
+            kvs: &[("parent_cascade_id", main_id), ("root_cascade_id", main_id)],
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
     let child_mtime = SystemTime::now() - Duration::from_secs(10);
     {
-        let f = fs::OpenOptions::new().write(true).open(&fresh_child_db).unwrap();
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&fresh_child_db)
+            .unwrap();
         f.set_modified(child_mtime).unwrap();
     }
 
@@ -905,8 +979,11 @@ fn t04_lineage_child_db_perf_survives_top30_eviction_and_stale_turn_lockin() {
     for i in 0..35 {
         let p = conv_dir.join(format!("unrelated-newer-{i:02}.db"));
         let conn = Connection::open(&p).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             raw_input_tokens: 1_000,
             output_tokens: 100,
@@ -914,8 +991,11 @@ fn t04_lineage_child_db_perf_survives_top30_eviction_and_stale_turn_lockin() {
             display_name: Some("Gemini 4 Neon (High)"),
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
     }
 
     // Build a main transcript with 35 USER_INPUT turns where an OLD Hydro subagent ran at turn 1
@@ -1033,8 +1113,11 @@ fn t04_many_uncached_wal_dbs_are_bounded_per_statusline_call() {
         let conn = Connection::open(&db_path).unwrap();
         conn.pragma_update(None, "journal_mode", "WAL").unwrap();
         conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
-        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
         let blob = build_gen_metadata_blob(&[GenEntrySpec {
             raw_input_tokens: 1_000,
             output_tokens: 100,
@@ -1042,8 +1125,11 @@ fn t04_many_uncached_wal_dbs_are_bounded_per_statusline_call() {
             display_name: Some("Gemini 4 Neon (High)"),
             ..Default::default()
         }]);
-        conn.execute("INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)", params![1i64, blob])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, blob],
+        )
+        .unwrap();
         // Keep connections open so SQLite preserves non-empty -wal files during statusline run.
         assert!(conv_dir.join(format!("wal-heavy-{i:02}.db-wal")).exists());
         open_conns.push(conn);
@@ -1070,7 +1156,10 @@ fn t04_many_uncached_wal_dbs_are_bounded_per_statusline_call() {
     let cache_path = env.data_dir.join("agy-pulse-compaction-cache.json");
     let cache_json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
-    let perf_count = cache_json["_db_perf"].as_object().map(|m| m.len()).unwrap_or(0);
+    let perf_count = cache_json["_db_perf"]
+        .as_object()
+        .map(|m| m.len())
+        .unwrap_or(0);
     assert!(
         perf_count <= 10,
         "expected WAL-copy DB scan per statusline call to be bounded (<= 10), got {perf_count}"
@@ -1138,7 +1227,10 @@ fn t04_same_session_model_switch_expires_old_model_even_when_db_mtime_refreshes(
 
         conn.execute(
             "INSERT INTO steps (idx, metadata) VALUES (?1, ?2)",
-            params![1i64, build_step_metadata_blob(now_secs - 600, Some("bot-hydro"))],
+            params![
+                1i64,
+                build_step_metadata_blob(now_secs - 600, Some("bot-hydro"))
+            ],
         )
         .unwrap();
         let hydro_blob = build_gen_metadata_blob(&[GenEntrySpec {
@@ -1159,7 +1251,10 @@ fn t04_same_session_model_switch_expires_old_model_even_when_db_mtime_refreshes(
         for step in 2..=34i64 {
             conn.execute(
                 "INSERT INTO steps (idx, metadata) VALUES (?1, ?2)",
-                params![step, build_step_metadata_blob(now_secs - 10, Some("bot-carbon"))],
+                params![
+                    step,
+                    build_step_metadata_blob(now_secs - 10, Some("bot-carbon"))
+                ],
             )
             .unwrap();
             let carbon_blob = build_gen_metadata_blob(&[GenEntrySpec {
@@ -1511,4 +1606,3 @@ fn t04_malformed_percent_workspace_uri_in_db_does_not_panic() {
         "CLI output must still read compaction limit from DB:\n{plain}"
     );
 }
-

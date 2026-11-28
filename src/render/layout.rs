@@ -1,16 +1,12 @@
 use crate::domain::{
-    ChildModelSpeed, LanguageSetting, PulseConfig, PulseSnapshot, TerminalCaps,
-    compact_model_name, format_usd,
+    ChildModelSpeed, LanguageSetting, PulseConfig, PulseSnapshot, TerminalCaps, compact_model_name,
+    format_usd,
 };
 
-use super::context_bar::{
-    Glyphs, render_context_monitor_line, render_model_cache_line,
-};
+use super::context_bar::{Glyphs, render_context_monitor_line, render_model_cache_line};
 use super::i18n::{BOLD, LanguageText, RESET, ThemePalette, get_language_text, resolve_palette};
 use super::quota_table::render_quota_section;
-use super::width::{
-    ansi_display_width, sanitize_terminal_text, truncate_ansi_to_display_width,
-};
+use super::width::{ansi_display_width, sanitize_terminal_text, truncate_ansi_to_display_width};
 
 fn format_cycle_mode_segment(cycle_mode: Option<&str>) -> String {
     let Some(raw) = cycle_mode else {
@@ -203,10 +199,8 @@ pub fn render_statusline(
         .or(snapshot.host.username.as_deref())
         .unwrap_or("");
     let username = sanitize_terminal_text(raw_username, 80);
-    let raw_branch = sanitize_terminal_text(
-        snapshot.workspace.git_branch.as_deref().unwrap_or(""),
-        80,
-    );
+    let raw_branch =
+        sanitize_terminal_text(snapshot.workspace.git_branch.as_deref().unwrap_or(""), 80);
 
     let username_seg = if show_username && !username.is_empty() {
         format!("{}{username}{RESET}", palette.cyan)
@@ -223,10 +217,7 @@ pub fn render_statusline(
     } else {
         String::new()
     };
-    let plan = sanitize_terminal_text(
-        snapshot.host.plan_tier.as_deref().unwrap_or("Free"),
-        80,
-    );
+    let plan = sanitize_terminal_text(snapshot.host.plan_tier.as_deref().unwrap_or("Free"), 80);
     let plan_seg = format!("{}{plan}{RESET}", palette.magenta);
     let mode_seg = if show_cycle_mode {
         format_cycle_mode_segment(snapshot.host.cycle_mode.as_deref())
@@ -279,7 +270,9 @@ pub fn render_statusline(
             .is_some_and(|ts| ts > 0 && (snapshot.observed_at_ms - ts) > max_idle_ms);
 
     let active_output_speed = if show_speed && !main_speed_expired {
-        snapshot.output_speed_tok_s.filter(|s| s.is_finite() && *s > 0.0 && *s <= 5000.0)
+        snapshot
+            .output_speed_tok_s
+            .filter(|s| s.is_finite() && *s > 0.0 && *s <= 5000.0)
     } else {
         None
     };
@@ -306,7 +299,9 @@ pub fn render_statusline(
                 if c.turns_ago > max_idle_turns {
                     return false;
                 }
-                if c.last_active_ms > 0 && (snapshot.observed_at_ms - c.last_active_ms) > max_idle_ms {
+                if c.last_active_ms > 0
+                    && (snapshot.observed_at_ms - c.last_active_ms) > max_idle_ms
+                {
                     return false;
                 }
                 true
@@ -471,7 +466,8 @@ pub fn render_statusline(
     // Line 2 (Image quota exhaustion alert, if active)
     let mut line2 = String::new();
     if let Some(ex) = &snapshot.image_exhausted {
-        let secs_left = ((ex.reset_time_ms - snapshot.observed_at_ms) as f64 / 1000.0).round() as i64;
+        let secs_left =
+            ((ex.reset_time_ms - snapshot.observed_at_ms) as f64 / 1000.0).round() as i64;
         if secs_left > 0 {
             let h = secs_left / 3600;
             let m = (secs_left % 3600) / 60;
@@ -566,8 +562,7 @@ pub fn render_statusline(
     }
 
     if show_context_monitor {
-        let monitor_line =
-            render_context_monitor_line(snapshot, config, term, text, &palette);
+        let monitor_line = render_context_monitor_line(snapshot, config, term, text, &palette);
         if !monitor_line.is_empty() {
             lines.push(monitor_line);
         }

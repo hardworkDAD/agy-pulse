@@ -187,12 +187,19 @@ fn t03_incremental_transcript_offset_cache_invalidation_and_pruning() {
     })
     .to_string();
 
-    let (code1, out1, err1) = env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
+    let (code1, out1, err1) =
+        env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
     assert_eq!(code1, 0);
     assert_eq!(err1, "");
     let plain1 = strip_ansi(&out1);
-    assert!(plain1.contains("Out 100"), "turn 1 output missing:\n{plain1}");
-    assert!(plain1.contains("Carbon 40%"), "turn 1 cache pct missing:\n{plain1}");
+    assert!(
+        plain1.contains("Out 100"),
+        "turn 1 output missing:\n{plain1}"
+    );
+    assert!(
+        plain1.contains("Carbon 40%"),
+        "turn 1 cache pct missing:\n{plain1}"
+    );
 
     let cache_dir = env.data_dir.join("transcript-cache");
     let cache_files: Vec<_> = fs::read_dir(&cache_dir)
@@ -224,10 +231,14 @@ fn t03_incremental_transcript_offset_cache_invalidation_and_pruning() {
     .to_string();
     let half = turn2.len() / 2;
     {
-        let mut f = OpenOptions::new().append(true).open(&transcript_path).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&transcript_path)
+            .unwrap();
         f.write_all(&turn2.as_bytes()[..half]).unwrap();
     }
-    let (_, out_partial, _) = env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
+    let (_, out_partial, _) =
+        env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
     assert!(
         strip_ansi(&out_partial).contains("Out 100"),
         "partial line must not be parsed prematurely"
@@ -235,14 +246,24 @@ fn t03_incremental_transcript_offset_cache_invalidation_and_pruning() {
 
     // Finish line 2 with trailing newline -> incremental scan updates totals and offset
     {
-        let mut f = OpenOptions::new().append(true).open(&transcript_path).unwrap();
-        f.write_all(format!("{}\n", &turn2[half..]).as_bytes()).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&transcript_path)
+            .unwrap();
+        f.write_all(format!("{}\n", &turn2[half..]).as_bytes())
+            .unwrap();
     }
     let (_, out2, _) = env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
     let plain2 = strip_ansi(&out2);
-    assert!(plain2.contains("Out 350"), "turn 2 output must accumulate to 350:\n{plain2}");
+    assert!(
+        plain2.contains("Out 350"),
+        "turn 2 output must accumulate to 350:\n{plain2}"
+    );
     // (4000 + 15000) / (10000 + 20000) = 19000 / 30000 = 63.3% -> 63%
-    assert!(plain2.contains("Carbon 63%"), "turn 2 cumulative cache must be 63%:\n{plain2}");
+    assert!(
+        plain2.contains("Carbon 63%"),
+        "turn 2 cumulative cache must be 63%:\n{plain2}"
+    );
 
     // Same-inode in-place overwrite with larger content -> headHash mismatch invalidates cache and rescans from 0
     let overwritten = serde_json::json!({
@@ -263,12 +284,16 @@ fn t03_incremental_transcript_offset_cache_invalidation_and_pruning() {
     });
     let overwritten_line = format!("{overwritten}\n");
     {
-        let mut f = OpenOptions::new().write(true).open(&transcript_path).unwrap();
+        let mut f = OpenOptions::new()
+            .write(true)
+            .open(&transcript_path)
+            .unwrap();
         f.seek(SeekFrom::Start(0)).unwrap();
         f.write_all(overwritten_line.as_bytes()).unwrap();
         f.set_len(overwritten_line.len() as u64).unwrap();
     }
-    let (_, out_overwrite, _) = env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
+    let (_, out_overwrite, _) =
+        env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "120")]);
     let plain_overwrite = strip_ansi(&out_overwrite);
     assert!(
         plain_overwrite.contains("Out 999"),
@@ -345,8 +370,14 @@ fn t03_truncated_fields_backfills_from_transcript_full_jsonl() {
     let brain_dir = env.data_dir.join("brain");
     let main_id = "11111111-1111-1111-1111-111111111111";
     let child_id = "22222222-2222-2222-2222-222222222222";
-    let main_logs = brain_dir.join(main_id).join(".system_generated").join("logs");
-    let child_logs = brain_dir.join(child_id).join(".system_generated").join("logs");
+    let main_logs = brain_dir
+        .join(main_id)
+        .join(".system_generated")
+        .join("logs");
+    let child_logs = brain_dir
+        .join(child_id)
+        .join(".system_generated")
+        .join("logs");
     fs::create_dir_all(&main_logs).unwrap();
     fs::create_dir_all(&child_logs).unwrap();
 
@@ -502,7 +533,10 @@ fn t03_turn_cache_hit_rate_and_output_speed_noise_and_spike_filtering() {
         plain1.contains("Cache 60% (3K)"),
         "frame 1 missing turn cache hit rate:\n{plain1}"
     );
-    assert!(!plain1.contains("tok/s"), "baseline frame must not render speed:\n{plain1}");
+    assert!(
+        !plain1.contains("tok/s"),
+        "baseline frame must not render speed:\n{plain1}"
+    );
 
     // Frame 2: valid 3000ms delta, +300 tokens -> 100.0 tok/s
     let (_, out2, _) = env.run_stdin(
@@ -657,7 +691,10 @@ fn t03_compaction_checkpoint_resets_active_context_and_preserves_peak_and_count(
         "created_at": "2026-11-20T10:02:00Z"
     });
     {
-        let mut f = OpenOptions::new().append(true).open(&transcript_path).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&transcript_path)
+            .unwrap();
         writeln!(f, "{ckpt}").unwrap();
     }
 
@@ -697,7 +734,10 @@ fn t03_compaction_checkpoint_resets_active_context_and_preserves_peak_and_count(
         }
     });
     {
-        let mut f = OpenOptions::new().append(true).open(&transcript_path).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&transcript_path)
+            .unwrap();
         writeln!(f, "{turn2}").unwrap();
     }
 
@@ -748,7 +788,13 @@ fn t03_child_and_swarm_active_model_speeds_capped_at_three_and_expire_on_idle() 
     let w_argon = "dddd0000-0000-0000-0000-000000000001";
     let w_neon = "eeee0000-0000-0000-0000-000000000001";
 
-    let log_path = |id: &str| brain_dir.join(id).join(".system_generated").join("logs").join("transcript.jsonl");
+    let log_path = |id: &str| {
+        brain_dir
+            .join(id)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl")
+    };
     for id in [main_id, w_hydro_1, w_hydro_2, sub_flash, w_argon, w_neon] {
         fs::create_dir_all(log_path(id).parent().unwrap()).unwrap();
     }
@@ -850,15 +896,33 @@ fn t03_child_and_swarm_active_model_speeds_capped_at_three_and_expire_on_idle() 
     );
     let line1 = strip_ansi(&out1).lines().next().unwrap_or("").to_string();
     // Top 3 most recent distinct models: Flash (300.0), Argon (220.0), Neon (250.0); oldest Hydro is capped out!
-    assert!(line1.contains("⚡ "), "missing ⚡ child speed prefix:\n{line1}");
-    assert!(line1.contains("Flash: 300.0 tok/s"), "missing Flash speed:\n{line1}");
-    assert!(line1.contains("Argon: 220.0 tok/s"), "missing Argon speed:\n{line1}");
-    assert!(line1.contains("Neon: 250.0 tok/s"), "missing Neon speed:\n{line1}");
-    assert!(!line1.contains("Hydro:"), "oldest 4th model Hydro must be capped out:\n{line1}");
+    assert!(
+        line1.contains("⚡ "),
+        "missing ⚡ child speed prefix:\n{line1}"
+    );
+    assert!(
+        line1.contains("Flash: 300.0 tok/s"),
+        "missing Flash speed:\n{line1}"
+    );
+    assert!(
+        line1.contains("Argon: 220.0 tok/s"),
+        "missing Argon speed:\n{line1}"
+    );
+    assert!(
+        line1.contains("Neon: 250.0 tok/s"),
+        "missing Neon speed:\n{line1}"
+    );
+    assert!(
+        !line1.contains("Hydro:"),
+        "oldest 4th model Hydro must be capped out:\n{line1}"
+    );
 
     // Advance 31 USER_INPUT turns, refreshing only Argon via SYSTEM_MESSAGE sender -> Flash & Neon expire (>30 turns), Argon stays, Hydro also >30 turns
     {
-        let mut f = OpenOptions::new().append(true).open(&main_transcript).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&main_transcript)
+            .unwrap();
         let mut step = 5;
         for t in 2..=32 {
             writeln!(
@@ -891,9 +955,18 @@ fn t03_child_and_swarm_active_model_speeds_capped_at_three_and_expire_on_idle() 
 
     let (_, out2, _) = env.run_stdin(&agy_pulse_bin(), &stdin_payload, &[("COLUMNS", "200")]);
     let line2 = strip_ansi(&out2).lines().next().unwrap_or("").to_string();
-    assert!(line2.contains("Argon: 220.0 tok/s"), "refreshed Argon must stay visible:\n{line2}");
-    assert!(!line2.contains("Flash:"), "stale Flash (>30 turns) must expire:\n{line2}");
-    assert!(!line2.contains("Neon:"), "stale Neon (>30 turns) must expire:\n{line2}");
+    assert!(
+        line2.contains("Argon: 220.0 tok/s"),
+        "refreshed Argon must stay visible:\n{line2}"
+    );
+    assert!(
+        !line2.contains("Flash:"),
+        "stale Flash (>30 turns) must expire:\n{line2}"
+    );
+    assert!(
+        !line2.contains("Neon:"),
+        "stale Neon (>30 turns) must expire:\n{line2}"
+    );
 
     // Time-based expiry (> 5 minutes): use a separate stale transcript with timestamps > 6 minutes ago
     let stale_main_id = "ffff0000-0000-0000-0000-000000000001";
@@ -936,7 +1009,11 @@ fn t03_child_and_swarm_active_model_speeds_capped_at_three_and_expire_on_idle() 
     })
     .to_string();
     let (_, out_stale, _) = env.run_stdin(&agy_pulse_bin(), &stale_payload, &[("COLUMNS", "200")]);
-    let line_stale = strip_ansi(&out_stale).lines().next().unwrap_or("").to_string();
+    let line_stale = strip_ansi(&out_stale)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
     assert!(
         !line_stale.contains("Argon:"),
         "child idle >5 minutes must be hidden:\n{line_stale}"
@@ -1043,7 +1120,10 @@ fn t03_workspace_rules_memory_hooks_and_mcp_offline_scan_and_render() {
     assert_eq!(code, 0);
     assert_eq!(stderr, "");
     let plain = strip_ansi(&stdout);
-    assert!(plain.contains("1 AGENTS.md"), "missing AGENTS.md breadcrumb:\n{plain}");
+    assert!(
+        plain.contains("1 AGENTS.md"),
+        "missing AGENTS.md breadcrumb:\n{plain}"
+    );
     assert!(plain.contains("5 rules"), "expected 5 rules:\n{plain}");
     assert!(plain.contains("4 MCPs"), "expected 4 MCPs:\n{plain}");
     assert!(plain.contains("1 hooks"), "expected 1 hooks:\n{plain}");
@@ -1059,10 +1139,19 @@ fn t03_workspace_rules_memory_hooks_and_mcp_offline_scan_and_render() {
     .unwrap();
     let (_, stdout2, _) = env.run_stdin(&agy_pulse_bin(), &payload, &[("COLUMNS", "120")]);
     let plain2 = strip_ansi(&stdout2);
-    assert!(!plain2.contains("AGENTS.md"), "breadcrumbs disabled must hide AGENTS.md:\n{plain2}");
-    assert!(plain2.contains("5 rules"), "rules must still show:\n{plain2}");
+    assert!(
+        !plain2.contains("AGENTS.md"),
+        "breadcrumbs disabled must hide AGENTS.md:\n{plain2}"
+    );
+    assert!(
+        plain2.contains("5 rules"),
+        "rules must still show:\n{plain2}"
+    );
     assert!(plain2.contains("4 MCPs"), "MCPs must still show:\n{plain2}");
-    assert!(plain2.contains("1 hooks"), "hooks must still show:\n{plain2}");
+    assert!(
+        plain2.contains("1 hooks"),
+        "hooks must still show:\n{plain2}"
+    );
 }
 
 #[test]
@@ -1173,15 +1262,32 @@ fn t03_pure_domain_and_render_turn_cache_child_speeds_compaction_and_metadata() 
         LanguageSetting::Zh,
     );
     let plain = strip_ansi(&rendered);
-    assert!(plain.contains("输出: 112.5 tok/s"), "missing main speed:\n{plain}");
-    assert!(plain.contains("⚡ Hydro: 240.0 tok/s"), "missing active child speed:\n{plain}");
-    assert!(!plain.contains("Flash:"), "expired child (>30 turns) must be filtered:\n{plain}");
-    assert!(plain.contains("1 AGENTS.md │ 3 rules │ 2 MCPs │ 1 hooks"), "missing metadata line:\n{plain}");
     assert!(
-        plain.contains("⟳ 累计缓存 · Carbon 80% (命中 400K / 总入 500K) · Hydro 90% (命中 450K / 总入 500K)"),
+        plain.contains("输出: 112.5 tok/s"),
+        "missing main speed:\n{plain}"
+    );
+    assert!(
+        plain.contains("⚡ Hydro: 240.0 tok/s"),
+        "missing active child speed:\n{plain}"
+    );
+    assert!(
+        !plain.contains("Flash:"),
+        "expired child (>30 turns) must be filtered:\n{plain}"
+    );
+    assert!(
+        plain.contains("1 AGENTS.md │ 3 rules │ 2 MCPs │ 1 hooks"),
+        "missing metadata line:\n{plain}"
+    );
+    assert!(
+        plain.contains(
+            "⟳ 累计缓存 · Carbon 80% (命中 400K / 总入 500K) · Hydro 90% (命中 450K / 总入 500K)"
+        ),
         "missing multi-model cache line:\n{plain}"
     );
-    assert!(plain.contains("压缩×1(峰420K)"), "missing zh compaction peak:\n{plain}");
+    assert!(
+        plain.contains("压缩×1(峰420K)"),
+        "missing zh compaction peak:\n{plain}"
+    );
 }
 
 #[test]
@@ -1665,7 +1771,10 @@ fn t03_streaming_delta_over_8mb_two_pass_and_backfills_truncated_fields() {
     let (code1, out1, err1) = env.run_stdin(&agypl_bin(), &stdin_payload, &[("COLUMNS", "140")]);
     assert_eq!(code1, 0, "stderr: {err1}");
     let plain1 = strip_ansi(&out1);
-    assert!(plain1.contains("Out 200"), "streaming two-pass must sum Out 200:\n{plain1}");
+    assert!(
+        plain1.contains("Out 200"),
+        "streaming two-pass must sum Out 200:\n{plain1}"
+    );
     assert!(
         plain1.contains("Carbon 50%"),
         "streaming two-pass must calculate Carbon 50%:\n{plain1}"
@@ -1688,7 +1797,10 @@ fn t03_streaming_delta_over_8mb_two_pass_and_backfills_truncated_fields() {
 
     // Append another line -> incremental continuation advances from file_size_1
     {
-        let mut f = OpenOptions::new().append(true).open(&transcript_path).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&transcript_path)
+            .unwrap();
         writeln!(
             f,
             "{}",

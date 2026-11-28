@@ -18,11 +18,11 @@ use agy_pulse::config::wizard::{WizardRunOptions, WizardRunOutcome, run_wizard_l
 use agy_pulse::config::{DisplayConfig, LanguageSetting, PulseConfig, load_config};
 use agy_pulse::dashboard::{
     DASHBOARD_APP_ID, DASHBOARD_PING_THROTTLE_MS, DASHBOARD_SPAWN_LOCK_FILENAME,
-    DASHBOARD_STATE_FILENAME, DashboardServer, DashboardServerConfig, DashboardStateFile,
-    DEFAULT_DASHBOARD_PORT, STATUSLINE_IDLE_TIMEOUT_SEC, StatusLineDashboardInfo,
-    TouchDashboardResult, acquire_dashboard_spawn_lock, dashboard_spawn_lock_path,
-    dashboard_state_path, get_running_dashboard_info, is_valid_loopback_dashboard_url,
-    release_dashboard_spawn_lock, resolve_dashboard_port, resolve_dashboard_url_for_statusline,
+    DASHBOARD_STATE_FILENAME, DEFAULT_DASHBOARD_PORT, DashboardServer, DashboardServerConfig,
+    DashboardStateFile, STATUSLINE_IDLE_TIMEOUT_SEC, StatusLineDashboardInfo, TouchDashboardResult,
+    acquire_dashboard_spawn_lock, dashboard_spawn_lock_path, dashboard_state_path,
+    get_running_dashboard_info, is_valid_loopback_dashboard_url, release_dashboard_spawn_lock,
+    resolve_dashboard_port, resolve_dashboard_url_for_statusline,
     resolve_statusline_idle_timeout_sec, touch_running_dashboard, write_dashboard_state,
 };
 use agy_pulse::domain::{
@@ -178,7 +178,11 @@ impl IsolatedEnv {
         cmd
     }
 
-    fn run_statusline(&self, stdin_text: &str, extra_env: &[(&str, &str)]) -> (i32, String, String) {
+    fn run_statusline(
+        &self,
+        stdin_text: &str,
+        extra_env: &[(&str, &str)],
+    ) -> (i32, String, String) {
         let mut cmd = self.base_cmd(&agy_pulse_bin());
         for (k, v) in extra_env {
             cmd.env(k, v);
@@ -260,7 +264,8 @@ fn http_get_status_and_body(port: u16, target: &str) -> Option<(u16, String)> {
     .ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    let req = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let req =
+        format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
     stream.flush().ok()?;
     let mut raw = Vec::new();
@@ -288,13 +293,23 @@ fn t11_loopback_url_validation_and_line1_rendering() {
     assert!(!is_valid_loopback_dashboard_url("https://127.0.0.1:3789"));
     assert!(!is_valid_loopback_dashboard_url("http://192.168.1.5:3789"));
     assert!(!is_valid_loopback_dashboard_url("http://evil.example:3789"));
-    assert!(!is_valid_loopback_dashboard_url("http://user:pass@127.0.0.1:3789"));
+    assert!(!is_valid_loopback_dashboard_url(
+        "http://user:pass@127.0.0.1:3789"
+    ));
     assert!(!is_valid_loopback_dashboard_url("http://127.0.0.1:0"));
     assert!(!is_valid_loopback_dashboard_url("http://127.0.0.1:70000"));
-    assert!(!is_valid_loopback_dashboard_url("http://127.0.0.1:3789\nfoo"));
-    assert!(!is_valid_loopback_dashboard_url("http://127.0.0.1:3789\x07"));
-    assert!(!is_valid_loopback_dashboard_url("http://127.0.0.1:3789\x1b[31m"));
-    assert!(!is_valid_loopback_dashboard_url("http://127.0.0.1:3789 foo"));
+    assert!(!is_valid_loopback_dashboard_url(
+        "http://127.0.0.1:3789\nfoo"
+    ));
+    assert!(!is_valid_loopback_dashboard_url(
+        "http://127.0.0.1:3789\x07"
+    ));
+    assert!(!is_valid_loopback_dashboard_url(
+        "http://127.0.0.1:3789\x1b[31m"
+    ));
+    assert!(!is_valid_loopback_dashboard_url(
+        "http://127.0.0.1:3789 foo"
+    ));
 
     let base_snapshot = PulseSnapshot {
         has_conversation_identity: true,
@@ -645,7 +660,13 @@ fn t11_spawn_lock_dead_pid_cleanup_and_touch_keepalive() {
         ..discovered.clone()
     };
     assert_eq!(
-        touch_running_dashboard(&not_running, &cfg, LanguageSetting::En, false, old_mtime_ms + 50_000),
+        touch_running_dashboard(
+            &not_running,
+            &cfg,
+            LanguageSetting::En,
+            false,
+            old_mtime_ms + 50_000
+        ),
         TouchDashboardResult::Skipped("not_running")
     );
 
@@ -654,13 +675,25 @@ fn t11_spawn_lock_dead_pid_cleanup_and_touch_keepalive() {
         ..discovered.clone()
     };
     assert_eq!(
-        touch_running_dashboard(&no_idle, &cfg, LanguageSetting::En, false, old_mtime_ms + 50_000),
+        touch_running_dashboard(
+            &no_idle,
+            &cfg,
+            LanguageSetting::En,
+            false,
+            old_mtime_ms + 50_000
+        ),
         TouchDashboardResult::Skipped("no_idle_timeout")
     );
 
     // Within throttle_ms = (30_000 / 3).clamp(1_000, 300_000) = 10_000ms
     assert_eq!(
-        touch_running_dashboard(&discovered, &cfg, LanguageSetting::En, false, discovered.state_mtime_ms + 5_000),
+        touch_running_dashboard(
+            &discovered,
+            &cfg,
+            LanguageSetting::En,
+            false,
+            discovered.state_mtime_ms + 5_000
+        ),
         TouchDashboardResult::Skipped("throttled")
     );
 
@@ -741,8 +774,7 @@ fn t11_foreground_state_file_and_background_dedupe() {
     assert!(
         wait_until(Duration::from_secs(4), || {
             env_fg.state_file_path().exists()
-                && http_get_status_and_body(fg_port, "/api/health")
-                    .is_some_and(|(s, _)| s == 200)
+                && http_get_status_and_body(fg_port, "/api/health").is_some_and(|(s, _)| s == 200)
         }),
         "foreground dashboard did not start and write state file"
     );
@@ -852,8 +884,7 @@ fn t11_cli_statusline_autostart_reuse_and_opt_out() {
     assert!(
         wait_until(Duration::from_secs(5), || {
             env.state_file_path().exists()
-                && http_get_status_and_body(port, "/api/health")
-                    .is_some_and(|(s, _)| s == 200)
+                && http_get_status_and_body(port, "/api/health").is_some_and(|(s, _)| s == 200)
         }),
         "statusline auto-started dashboard did not become healthy"
     );
@@ -1013,6 +1044,12 @@ fn t11_wizard_preview_toggle_save_and_uninstall_cleans_lock() {
         "uninstall failed: {}",
         String::from_utf8_lossy(&uninst.stderr)
     );
-    assert!(!env.state_file_path().exists(), "dashboard state file must be removed by uninstall");
-    assert!(!env.lock_file_path().exists(), "dashboard spawn lock must be removed by uninstall");
+    assert!(
+        !env.state_file_path().exists(),
+        "dashboard state file must be removed by uninstall"
+    );
+    assert!(
+        !env.lock_file_path().exists(),
+        "dashboard spawn lock must be removed by uninstall"
+    );
 }

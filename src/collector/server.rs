@@ -124,12 +124,7 @@ impl AtomicSlotGuard {
             if cur >= limit {
                 return None;
             }
-            match counter.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match counter.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return Some(Self(Arc::clone(counter))),
                 Err(actual) => cur = actual,
             }
@@ -433,11 +428,7 @@ fn handle_ipc_connection(
 
     match req {
         CollectorWireRequest::Ping { .. } => {
-            let busy = queue
-                .0
-                .lock()
-                .map(|g| g.worker_busy)
-                .unwrap_or(false);
+            let busy = queue.0.lock().map(|g| g.worker_busy).unwrap_or(false);
             let _ = write_frame(
                 &mut stream,
                 &CollectorWireResponse::Pong {
@@ -510,10 +501,8 @@ fn handle_ipc_connection(
 
             match outcome {
                 EnqueueOutcome::ReplyError(msg) => {
-                    let _ = write_frame(
-                        &mut stream,
-                        &CollectorWireResponse::Error(msg.to_string()),
-                    );
+                    let _ =
+                        write_frame(&mut stream, &CollectorWireResponse::Error(msg.to_string()));
                 }
                 EnqueueOutcome::ReplyBusy => {
                     let _ = write_frame(&mut stream, &CollectorWireResponse::Busy);
@@ -864,9 +853,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{
-        CollectorQueueState, CollectorServerHandle, is_same_collector_binary,
-    };
+    use super::{CollectorQueueState, CollectorServerHandle, is_same_collector_binary};
     use crate::collector::protocol::{
         COLLECTOR_APP_ID, CollectorRequest, CollectorStateFile, CollectorWireResponse,
     };
@@ -901,8 +888,14 @@ mod tests {
 
     #[test]
     fn server_and_client_agree_on_exe_mtime_zero_fallback() {
-        assert!(is_same_collector_binary(&sample_state(0), 1_700_000_000_000));
-        assert!(is_same_collector_binary(&sample_state(1_700_000_000_000), 0));
+        assert!(is_same_collector_binary(
+            &sample_state(0),
+            1_700_000_000_000
+        ));
+        assert!(is_same_collector_binary(
+            &sample_state(1_700_000_000_000),
+            0
+        ));
         assert!(is_same_collector_binary(
             &sample_state(1_700_000_000_123),
             1_700_000_000_123

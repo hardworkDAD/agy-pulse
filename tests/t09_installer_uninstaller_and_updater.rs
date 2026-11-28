@@ -378,8 +378,14 @@ fn install_registers_statusline_repairs_corrupt_settings_and_never_touches_offic
     let deployed_alias = env
         .bin_dir
         .join(format!("agypl{}", std::env::consts::EXE_SUFFIX));
-    assert!(deployed_primary.is_file(), "agy-pulse must be deployed to bin_dir");
-    assert!(deployed_alias.is_file(), "agypl must be deployed to bin_dir");
+    assert!(
+        deployed_primary.is_file(),
+        "agy-pulse must be deployed to bin_dir"
+    );
+    assert!(
+        deployed_alias.is_file(),
+        "agypl must be deployed to bin_dir"
+    );
 
     let ver_out = env.cmd(&deployed_alias).arg("--version").output().unwrap();
     assert_eq!(ver_out.status.code(), Some(0));
@@ -424,16 +430,21 @@ fn install_registers_statusline_repairs_corrupt_settings_and_never_touches_offic
     assert_eq!(out2.status.code(), Some(0));
 
     let bak_path = env.cli_data_dir.join("settings.json.bak");
-    assert!(bak_path.is_file(), "corrupt settings must be backed up to .bak");
+    assert!(
+        bak_path.is_file(),
+        "corrupt settings must be backed up to .bak"
+    );
     assert_eq!(fs::read_to_string(&bak_path).unwrap(), corrupt_payload);
 
     let repaired: Value =
         serde_json::from_str(&fs::read_to_string(env.settings_path()).unwrap()).unwrap();
     assert_eq!(repaired["statusLine"]["type"], "command");
-    assert!(repaired["statusLine"]["command"]
-        .as_str()
-        .unwrap()
-        .contains("agy-pulse"));
+    assert!(
+        repaired["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("agy-pulse")
+    );
 }
 
 #[test]
@@ -451,19 +462,28 @@ fn install_preserves_existing_keys_in_jsonc_settings_with_comments_and_trailing_
     );
 
     let bak_path = env.cli_data_dir.join("settings.json.bak");
-    assert!(bak_path.is_file(), "JSONC settings must be backed up to .bak before rewriting");
+    assert!(
+        bak_path.is_file(),
+        "JSONC settings must be backed up to .bak before rewriting"
+    );
     assert_eq!(fs::read_to_string(&bak_path).unwrap(), jsonc_payload);
 
     let parsed: Value =
         serde_json::from_str(&fs::read_to_string(env.settings_path()).unwrap()).unwrap();
     assert_eq!(parsed["theme"], "tokyo-night");
     assert_eq!(parsed["editor.fontSize"], 14);
-    assert_eq!(parsed["customUrls"][0], "https://example.com//not-a-comment");
+    assert_eq!(
+        parsed["customUrls"][0],
+        "https://example.com//not-a-comment"
+    );
     assert_eq!(
         parsed["customUrls"][1],
         "value /* keep */ with \"escaped // quote\", trailing"
     );
-    assert_eq!(parsed["mcpServers"]["alpha"]["url"], "http://localhost:8080/a/*b*/");
+    assert_eq!(
+        parsed["mcpServers"]["alpha"]["url"],
+        "http://localhost:8080/a/*b*/"
+    );
     assert_eq!(parsed["statusLine"]["stack_with_default"], true);
     assert_eq!(parsed["statusLine"]["type"], "command");
     let deployed_primary = env
@@ -492,7 +512,10 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
     let out = env
         .cmd(&agypl_bin())
         .arg("--check-update-bg")
-        .env("AGY_PULSE_UPDATE_URL", format!("{}/latest.json", server.base_url))
+        .env(
+            "AGY_PULSE_UPDATE_URL",
+            format!("{}/latest.json", server.base_url),
+        )
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -561,7 +584,10 @@ fn background_update_check_writes_status_and_statusline_renders_prompt() {
     let started = Instant::now();
     let mut child2 = env
         .cmd(&agy_pulse_bin())
-        .env("AGY_PULSE_UPDATE_URL", format!("{}/latest.json", server2.base_url))
+        .env(
+            "AGY_PULSE_UPDATE_URL",
+            format!("{}/latest.json", server2.base_url),
+        )
         .env_remove("AGY_PULSE_DISABLE_UPDATE_CHECK")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -927,18 +953,14 @@ fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_b
     };
     #[cfg(windows)]
     let (installed_shortcuts, foreign_shortcut) = {
-        let start_dir = env
-            .app_data
-            .join("Microsoft/Windows/Start Menu/Programs");
+        let start_dir = env.app_data.join("Microsoft/Windows/Start Menu/Programs");
         fs::create_dir_all(&start_dir).unwrap();
         let foreign = start_dir.join("other-unrelated-app.lnk");
         fs::write(&foreign, b"foreign-lnk").unwrap();
         (
             vec![
-                env.local_app_data
-                    .join("agy-pulse/agy-pulse-dashboard.vbs"),
-                env.local_app_data
-                    .join("agy-pulse/agy-pulse-dashboard.svg"),
+                env.local_app_data.join("agy-pulse/agy-pulse-dashboard.vbs"),
+                env.local_app_data.join("agy-pulse/agy-pulse-dashboard.svg"),
                 start_dir.join("agy-pulse Dashboard.lnk"),
             ],
             foreign,
@@ -1025,9 +1047,18 @@ fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_b
     assert!(!transcript_cache_dir.exists());
 
     // CRITICAL: ledger & global config MUST be preserved by default
-    assert!(ledger_db.is_file(), "ledger db must be preserved by default");
-    assert!(ledger_wal.is_file(), "ledger wal must be preserved by default");
-    assert!(ledger_shm.is_file(), "ledger shm must be preserved by default");
+    assert!(
+        ledger_db.is_file(),
+        "ledger db must be preserved by default"
+    );
+    assert!(
+        ledger_wal.is_file(),
+        "ledger wal must be preserved by default"
+    );
+    assert!(
+        ledger_shm.is_file(),
+        "ledger shm must be preserved by default"
+    );
     assert!(global_cfg.is_file(), "global config must be preserved");
 
     // 3. Explicit --purge-ledger deletes ledger files while preserving global config
@@ -1038,8 +1069,14 @@ fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_b
         .unwrap();
     assert_eq!(purge_out.status.code(), Some(0));
     assert!(!ledger_db.exists(), "--purge-ledger must delete ledger db");
-    assert!(!ledger_wal.exists(), "--purge-ledger must delete ledger wal");
-    assert!(!ledger_shm.exists(), "--purge-ledger must delete ledger shm");
+    assert!(
+        !ledger_wal.exists(),
+        "--purge-ledger must delete ledger wal"
+    );
+    assert!(
+        !ledger_shm.exists(),
+        "--purge-ledger must delete ledger shm"
+    );
     assert!(global_cfg.is_file(), "global config still preserved");
 
     // 4. Platform uninstall script forwards --purge-ledger to the native binary in AGY_PULSE_BIN_DIR
@@ -1061,7 +1098,10 @@ fn uninstall_protects_foreign_statusline_cleans_artifacts_and_preserves_ledger_b
             String::from_utf8_lossy(&sh_out.stderr)
         );
         assert!(!deployed_primary.exists());
-        assert!(ledger_db.is_file(), "uninstall.sh without --purge-ledger preserves ledger");
+        assert!(
+            ledger_db.is_file(),
+            "uninstall.sh without --purge-ledger preserves ledger"
+        );
     }
 }
 
@@ -1137,15 +1177,36 @@ fn uninstall_cleans_runtime_dir_artifacts_without_following_symlinks_and_preserv
         String::from_utf8_lossy(&out.stderr)
     );
 
-    assert!(!xdg_collector_json.exists(), "XDG collector.json must be removed");
-    assert!(!xdg_collector_lock.exists(), "XDG collector.lock must be removed");
-    assert!(!xdg_collector_sock.exists(), "XDG collector.sock must be removed");
-    assert!(!xdg_snap_global.exists(), "XDG snap-global.json must be removed");
+    assert!(
+        !xdg_collector_json.exists(),
+        "XDG collector.json must be removed"
+    );
+    assert!(
+        !xdg_collector_lock.exists(),
+        "XDG collector.lock must be removed"
+    );
+    assert!(
+        !xdg_collector_sock.exists(),
+        "XDG collector.sock must be removed"
+    );
+    assert!(
+        !xdg_snap_global.exists(),
+        "XDG snap-global.json must be removed"
+    );
     assert!(!xdg_snap_conv.exists(), "XDG snap-*.json must be removed");
     assert!(!xdg_short_sock.exists(), "XDG agyp-*.sock must be removed");
-    assert!(!xdg_fast_db.exists(), "XDG agy-pulse-tmp db dir must be removed");
-    assert!(!data_collector_json.exists(), "data runtime collector.json must be removed");
-    assert!(!data_snap_global.exists(), "data runtime snap-global.json must be removed");
+    assert!(
+        !xdg_fast_db.exists(),
+        "XDG agy-pulse-tmp db dir must be removed"
+    );
+    assert!(
+        !data_collector_json.exists(),
+        "data runtime collector.json must be removed"
+    );
+    assert!(
+        !data_snap_global.exists(),
+        "data runtime snap-global.json must be removed"
+    );
     assert_eq!(
         fs::read_to_string(&victim_file).unwrap(),
         "do-not-delete",

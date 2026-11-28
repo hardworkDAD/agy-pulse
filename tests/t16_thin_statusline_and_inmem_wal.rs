@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
 #[cfg(unix)]
 use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, SystemTime};
 
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -110,7 +110,12 @@ impl IsolatedEnv {
         );
         map.insert(
             "XDG_DATA_HOME".to_string(),
-            Some(self.home_dir.join(".local/share").to_string_lossy().into_owned()),
+            Some(
+                self.home_dir
+                    .join(".local/share")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         );
         map.insert(
             "XDG_CONFIG_HOME".to_string(),
@@ -369,7 +374,10 @@ fn t16_active_wal_statusline_creates_zero_temp_db_dirs() {
     writer.pragma_update(None, "journal_mode", "WAL").unwrap();
     writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     writer
-        .execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)", [])
+        .execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
         .unwrap();
     writer
         .execute(
@@ -573,8 +581,14 @@ fn t16_thin_statusline_exits_promptly_when_collector_stalls() {
         plain.contains("120K/180K"),
         "expected live 120K tokens + cached 180K compaction limit: {plain}"
     );
-    assert!(plain.contains("$3.45"), "expected Today cost from warm snapshot: {plain}");
-    assert!(plain.contains("180K"), "expected compaction limit from warm snapshot: {plain}");
+    assert!(
+        plain.contains("$3.45"),
+        "expected Today cost from warm snapshot: {plain}"
+    );
+    assert!(
+        plain.contains("180K"),
+        "expected compaction limit from warm snapshot: {plain}"
+    );
 }
 
 #[cfg(unix)]
@@ -694,8 +708,14 @@ fn t16_thin_statusline_returns_immediately_on_busy_collector() {
         plain.contains("70K/160K"),
         "expected live 70K tokens + cached 160K compaction limit: {plain}"
     );
-    assert!(plain.contains("$7.89"), "expected Today cost from warm snapshot: {plain}");
-    assert!(plain.contains("160K"), "expected compaction limit from warm snapshot: {plain}");
+    assert!(
+        plain.contains("$7.89"),
+        "expected Today cost from warm snapshot: {plain}"
+    );
+    assert!(
+        plain.contains("160K"),
+        "expected compaction limit from warm snapshot: {plain}"
+    );
 }
 
 #[test]
@@ -772,7 +792,11 @@ fn t16_collector_cleans_stale_temp_db_dirs_and_exits_when_data_dir_removed() {
         .write_all(br#"{"plan_tier":"Pro"}"#)
         .unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let mut ov = HashMap::new();
     ov.insert(
@@ -790,7 +814,10 @@ fn t16_collector_cleans_stale_temp_db_dirs_and_exits_when_data_dir_removed() {
             "collector must clean stale agy-pulse-db-* directory"
         );
     }
-    assert!(fresh.exists(), "fresh agy-pulse-db-* directory must be preserved");
+    assert!(
+        fresh.exists(),
+        "fresh agy-pulse-db-* directory must be preserved"
+    );
 
     // Deleting AGY_PULSE_DATA_DIR must cause collector to exit promptly (<3s) instead of idling 10s.
     fs::remove_dir_all(&data_dir).unwrap();

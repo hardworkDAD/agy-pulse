@@ -29,8 +29,8 @@ pub use stats_report::{
     StatsCliArgs, StatsOutputFormat, build_stats_help_text, parse_stats_args, render_stats_text,
 };
 pub use sync::{
-    AccountAssignReport, LedgerSyncOptions, LedgerSyncReport, RollingCostInput,
-    RollingCostTotals, SingleSyncReport, SourceRoot, validate_and_normalize_account_email,
+    AccountAssignReport, LedgerSyncOptions, LedgerSyncReport, RollingCostInput, RollingCostTotals,
+    SingleSyncReport, SourceRoot, validate_and_normalize_account_email,
 };
 
 /// Errors returned by `LedgerStore` operations.
@@ -290,11 +290,7 @@ impl LedgerStore {
     }
 
     /// Update or clear a supported multi-device sync metadata key in `ledger_meta`.
-    pub fn set_sync_meta_field(
-        &self,
-        key: &str,
-        value: Option<&str>,
-    ) -> Result<(), LedgerError> {
+    pub fn set_sync_meta_field(&self, key: &str, value: Option<&str>) -> Result<(), LedgerError> {
         sync::set_sync_meta_field(&self.conn, key, value, self.retry_policy)
     }
 
@@ -319,7 +315,10 @@ impl LedgerStore {
     }
 
     /// Incrementally scan all CLI and IDE `conversations/*.db` roots and archive new/changed rows.
-    pub fn sync_all(&mut self, options: &LedgerSyncOptions) -> Result<LedgerSyncReport, LedgerError> {
+    pub fn sync_all(
+        &mut self,
+        options: &LedgerSyncOptions,
+    ) -> Result<LedgerSyncReport, LedgerError> {
         sync::sync_all(&mut self.conn, &self.ledger_path, options)
     }
 
@@ -377,8 +376,16 @@ impl LedgerStore {
     }
 
     /// Query multi-dimensional overview (summary KPIs, timeseries, models, sources, cascade trees).
-    pub fn query_overview(&self, filter: &LedgerQueryFilter) -> Result<LedgerOverview, LedgerError> {
-        query::query_overview(&self.conn, &self.ledger_path, filter, sync::current_epoch_ms())
+    pub fn query_overview(
+        &self,
+        filter: &LedgerQueryFilter,
+    ) -> Result<LedgerOverview, LedgerError> {
+        query::query_overview(
+            &self.conn,
+            &self.ledger_path,
+            filter,
+            sync::current_epoch_ms(),
+        )
     }
 
     /// Build current `SyncStatusOverview` from `ledger_meta` and active `SyncConfigSummary`.

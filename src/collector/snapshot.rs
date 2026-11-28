@@ -195,7 +195,10 @@ pub(crate) fn write_snapshots_and_prune(
         config: config.clone(),
     };
     if let Ok(bytes) = serde_json::to_vec(&conv_snap) {
-        let _ = platform::write_cache_atomic_0600(&conversation_snapshot_path(conversation_key), &bytes);
+        let _ = platform::write_cache_atomic_0600(
+            &conversation_snapshot_path(conversation_key),
+            &bytes,
+        );
     }
 
     let global_snap = GlobalStatuslineSnapshot {
@@ -342,7 +345,9 @@ pub fn merge_live_stdin_into_global(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::domain::{ContextWindowSnapshot, ModelIdentity, TokenUsage, WorkspaceInfo, WorkspaceMetadata};
+    use crate::domain::{
+        ContextWindowSnapshot, ModelIdentity, TokenUsage, WorkspaceInfo, WorkspaceMetadata,
+    };
 
     #[test]
     fn merge_live_stdin_preserves_cached_enrichment_and_clears_cross_project_meta() {
@@ -399,10 +404,24 @@ mod tests {
         })
         .to_string();
 
-        let merged_same = merge_live_stdin_into_snapshot(&cached, &same_ws_stdin, Path::new("/tmp"));
-        assert_eq!(merged_same.model.as_ref().unwrap().display_name, "Claude Opus 4.6 (Thinking)");
-        assert_eq!(merged_same.context.as_ref().unwrap().context_window_size, 200_000);
-        assert!(merged_same.context.as_ref().unwrap().current_usage.is_some());
+        let merged_same =
+            merge_live_stdin_into_snapshot(&cached, &same_ws_stdin, Path::new("/tmp"));
+        assert_eq!(
+            merged_same.model.as_ref().unwrap().display_name,
+            "Claude Opus 4.6 (Thinking)"
+        );
+        assert_eq!(
+            merged_same.context.as_ref().unwrap().context_window_size,
+            200_000
+        );
+        assert!(
+            merged_same
+                .context
+                .as_ref()
+                .unwrap()
+                .current_usage
+                .is_some()
+        );
         assert_eq!(merged_same.server_compaction_limit, Some(160_000));
         assert_eq!(merged_same.cost.today_usd, Some(4.25));
         assert_eq!(merged_same.workspace.git_branch.as_deref(), Some("feat/a"));
@@ -413,7 +432,8 @@ mod tests {
             "workspace": { "current_dir": "/tmp/proj-b" }
         })
         .to_string();
-        let merged_other = merge_live_stdin_into_snapshot(&cached, &other_ws_stdin, Path::new("/tmp"));
+        let merged_other =
+            merge_live_stdin_into_snapshot(&cached, &other_ws_stdin, Path::new("/tmp"));
         assert_eq!(merged_other.workspace.current_dir, "proj-b");
         assert_eq!(merged_other.workspace.git_branch, None);
         assert_eq!(merged_other.workspace_meta.rules_count, 0);

@@ -156,21 +156,33 @@ fn t06_non_tty_config_cli_exits_safely_without_mutating_config() {
 
     // Case 1: no config file exists yet -> piped `agypl config` and `agy-pulse --config` must not create one.
     let (code1, stdout1, stderr1) = env.run_args(&agypl_bin(), &["config"]);
-    assert_eq!(code1, 0, "non-TTY config should exit cleanly: stderr={stderr1}");
+    assert_eq!(
+        code1, 0,
+        "non-TTY config should exit cleanly: stderr={stderr1}"
+    );
     let combined1 = format!("{stdout1}{stderr1}").to_ascii_lowercase();
     assert!(
         combined1.contains("tty") || combined1.contains("interactive"),
         "expected friendly non-TTY prompt, got: {combined1:?}"
     );
-    assert!(!global_cfg.exists(), "must not create global config on non-TTY exit");
-    assert!(!local_cfg.exists(), "must not create local config on non-TTY exit");
+    assert!(
+        !global_cfg.exists(),
+        "must not create global config on non-TTY exit"
+    );
+    assert!(
+        !local_cfg.exists(),
+        "must not create local config on non-TTY exit"
+    );
 
     // Case 2: existing config file -> piped `agy-pulse --config` must preserve exact bytes.
     let sentinel = "{\n  \"language\": \"zh\",\n  \"customKeep\": 123\n}\n";
     fs::write(&global_cfg, sentinel).unwrap();
 
     let (code2, stdout2, stderr2) = env.run_args(&agy_pulse_bin(), &["--config"]);
-    assert_eq!(code2, 0, "non-TTY --config should exit cleanly: stderr={stderr2}");
+    assert_eq!(
+        code2, 0,
+        "non-TTY --config should exit cleanly: stderr={stderr2}"
+    );
     let combined2 = format!("{stdout2}{stderr2}").to_ascii_lowercase();
     assert!(
         combined2.contains("tty") || combined2.contains("interactive"),
@@ -368,7 +380,10 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
         .filter_map(Result::ok)
         .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
         .collect();
-    assert!(tmp_entries.is_empty(), "stray temp files found: {tmp_entries:?}");
+    assert!(
+        tmp_entries.is_empty(),
+        "stray temp files found: {tmp_entries:?}"
+    );
 
     #[cfg(unix)]
     {
@@ -390,7 +405,10 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
     assert_eq!(saved["display"]["quotaStyle"], "compact");
     assert_eq!(saved["display"]["showGitBranch"], true);
     let warn_val = saved["thresholds"]["warning"].as_f64().unwrap();
-    assert!((warn_val - 0.7).abs() > 1e-6, "warning threshold should have updated: {warn_val}");
+    assert!(
+        (warn_val - 0.7).abs() > 1e-6,
+        "warning threshold should have updated: {warn_val}"
+    );
 
     // Now execute the real `agy-pulse` binary and confirm statusline reflects the saved config!
     let stdin_payload = serde_json::json!({
@@ -412,10 +430,22 @@ fn t06_wizard_atomic_save_preserves_custom_keys_and_updates_statusline() {
     let (code, stdout, stderr) = env.run_stdin(&agy_pulse_bin(), &stdin_payload);
     assert_eq!(code, 0, "stderr: {stderr}");
     let plain = strip_ansi(&stdout);
-    assert!(stdout.contains("\x1b[34m"), "expected Ocean Blue ANSI primary color in statusline: {stdout:?}");
-    assert!(plain.contains("上下文"), "expected Chinese statusline label after saving language=zh: {plain}");
-    assert!(plain.contains("Google:"), "expected compact quota line after saving quotaStyle=compact: {plain}");
-    assert!(plain.contains("feat/wizard-branch"), "expected git branch on Line 1 after showGitBranch=true: {plain}");
+    assert!(
+        stdout.contains("\x1b[34m"),
+        "expected Ocean Blue ANSI primary color in statusline: {stdout:?}"
+    );
+    assert!(
+        plain.contains("上下文"),
+        "expected Chinese statusline label after saving language=zh: {plain}"
+    );
+    assert!(
+        plain.contains("Google:"),
+        "expected compact quota line after saving quotaStyle=compact: {plain}"
+    );
+    assert!(
+        plain.contains("feat/wizard-branch"),
+        "expected git branch on Line 1 after showGitBranch=true: {plain}"
+    );
 }
 
 #[test]
@@ -446,11 +476,15 @@ fn t06_wizard_scope_toggle_saves_local_when_selected() {
     let outcome = run_wizard_loop(&mut input, &mut output, &opts).unwrap();
     assert_eq!(outcome, WizardRunOutcome::Saved);
 
-    assert!(local_cfg.exists(), "local config should be created when Scope toggled to Local");
+    assert!(
+        local_cfg.exists(),
+        "local config should be created when Scope toggled to Local"
+    );
     let local_val: Value = serde_json::from_str(&fs::read_to_string(&local_cfg).unwrap()).unwrap();
     assert_eq!(local_val["language"], "zh");
     // Global config remained untouched
-    let global_val: Value = serde_json::from_str(&fs::read_to_string(&global_cfg).unwrap()).unwrap();
+    let global_val: Value =
+        serde_json::from_str(&fs::read_to_string(&global_cfg).unwrap()).unwrap();
     assert_eq!(global_val["language"], "en");
 }
 
@@ -526,7 +560,10 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
     // 2. Env overrides metadata (FORCE_ASCII wins over FORCE_UNICODE)
     let overrides = read_pulse_env_overrides();
     assert_eq!(
-        overrides.language.as_ref().map(|o| (o.env_var, o.value.as_str())),
+        overrides
+            .language
+            .as_ref()
+            .map(|o| (o.env_var, o.value.as_str())),
         Some(("AGY_PULSE_LANGUAGE", "zh"))
     );
     assert_eq!(
@@ -544,7 +581,10 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
         Some(("AGY_PULSE_DASHBOARD_IDLE_SEC", "900"))
     );
     assert_eq!(
-        overrides.unicode.as_ref().map(|o| (o.env_var, o.value.as_str())),
+        overrides
+            .unicode
+            .as_ref()
+            .map(|o| (o.env_var, o.value.as_str())),
         Some(("AGY_PULSE_FORCE_ASCII", "false"))
     );
     env_guard.remove("AGY_PULSE_FORCE_ASCII");
@@ -657,7 +697,10 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
     let mut bad = PulseConfig::default();
     bad.thresholds.warning = 0.95;
     bad.thresholds.critical = 0.8;
-    assert_eq!(validate_pulse_config(&bad).unwrap_err().0, "thresholds.warning");
+    assert_eq!(
+        validate_pulse_config(&bad).unwrap_err().0,
+        "thresholds.warning"
+    );
 
     let bad_theme = PulseConfig {
         theme: ThemeConfig::Colors(ThemeColors {
@@ -666,7 +709,10 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
         }),
         ..Default::default()
     };
-    assert_eq!(validate_pulse_config(&bad_theme).unwrap_err().0, "theme.primary");
+    assert_eq!(
+        validate_pulse_config(&bad_theme).unwrap_err().0,
+        "theme.primary"
+    );
 
     let ok_preset = PulseConfig {
         theme: ThemeConfig::Preset(THEME_PRESETS[1].name.to_string()),
@@ -705,15 +751,20 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
         }),
         ..Default::default()
     };
-    assert_eq!(validate_pulse_config(&bad_icon).unwrap_err().0, "icons.branch");
+    assert_eq!(
+        validate_pulse_config(&bad_icon).unwrap_err().0,
+        "icons.branch"
+    );
 
     // 6. Preview helper consistency (disabled, empty, active)
     let disabled_cfg = PulseConfig {
         enabled: false,
         ..Default::default()
     };
-    assert!(render_statusline_preview(&disabled_cfg, true, Some(100), Some("en_US.UTF-8"))
-        .contains("disabled"));
+    assert!(
+        render_statusline_preview(&disabled_cfg, true, Some(100), Some("en_US.UTF-8"))
+            .contains("disabled")
+    );
 
     let mut empty_cfg = PulseConfig::default();
     empty_cfg.display.show_context_monitor = Some(false);
@@ -989,8 +1040,14 @@ fn t06_partial_type_error_preserves_valid_fields_and_reports_field_warnings() {
     let group_snap = read_global_config_snapshot_at(&global_cfg).unwrap();
     assert_eq!(group_snap.config.language, LanguageSetting::Zh);
     assert!(
-        group_snap.field_warnings.iter().any(|w| w.contains("thresholds"))
-            && group_snap.field_warnings.iter().any(|w| w.contains("display")),
+        group_snap
+            .field_warnings
+            .iter()
+            .any(|w| w.contains("thresholds"))
+            && group_snap
+                .field_warnings
+                .iter()
+                .any(|w| w.contains("display")),
         "expected group warnings: {:?}",
         group_snap.field_warnings
     );
@@ -1180,8 +1237,15 @@ fn t06_wizard_scope_when_cwd_is_global_dir_and_scope_toggle_preview() {
     assert_eq!(outcome_toggle, WizardRunOutcome::Cancelled);
 
     let raw = String::from_utf8_lossy(&out_toggle).into_owned();
-    let frames: Vec<&str> = raw.split("\x1b[H\x1b[J").filter(|s| !s.is_empty()).collect();
-    assert!(frames.len() >= 2, "expected initial frame and toggled frame, got {}", frames.len());
+    let frames: Vec<&str> = raw
+        .split("\x1b[H\x1b[J")
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        frames.len() >= 2,
+        "expected initial frame and toggled frame, got {}",
+        frames.len()
+    );
 
     let frame0_plain = strip_ansi(frames[0]);
     assert!(frame0_plain.contains("Configuration Scope: Local (Current Project Workspace)"));

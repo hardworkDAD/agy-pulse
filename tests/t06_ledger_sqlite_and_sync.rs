@@ -170,7 +170,10 @@ fn is_valid_device_id(id: &str) -> bool {
     let Some(hex_part) = id.strip_prefix("dev_") else {
         return false;
     };
-    hex_part.len() == 16 && hex_part.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    hex_part.len() == 16
+        && hex_part
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[test]
@@ -355,7 +358,10 @@ fn t06_schema_v3_to_v4_migration_backfills_and_is_idempotent() {
     // Open through LedgerStore -> upgrades v3 to v4.
     let store = LedgerStore::open_at(&ledger_path).expect("upgrade v3 -> v4");
     let local_id = store.local_device_id().expect("local_device_id");
-    assert!(is_valid_device_id(&local_id), "unexpected local_device_id: {local_id}");
+    assert!(
+        is_valid_device_id(&local_id),
+        "unexpected local_device_id: {local_id}"
+    );
     drop(store);
 
     // Re-open to verify full idempotency and hot-path check stability.
@@ -675,7 +681,12 @@ fn agy_pulse_bin() -> PathBuf {
 fn seed_conv(dir: &Path, cid: &str, ws: &str, ts_ms: i64) {
     write_conv_db(
         &dir.join("conversations").join(format!("{cid}.db")),
-        Some(&build_trajectory_blob(ws, "main", ts_ms - 10_000, Some(cid))),
+        Some(&build_trajectory_blob(
+            ws,
+            "main",
+            ts_ms - 10_000,
+            Some(cid),
+        )),
         &[(1, build_step_metadata_blob(ts_ms))],
         &[(
             1,
@@ -716,7 +727,9 @@ fn t06_sync_identity_hints_and_last_observed_email() {
     let ledger_path = temp.path().join("agy-pulse-ledger.sqlite");
     let store = LedgerStore::open_at(&ledger_path).unwrap();
     assert_eq!(store.last_observed_email().unwrap(), None);
-    store.set_last_observed_email("  Work@Company.COM ").unwrap();
+    store
+        .set_last_observed_email("  Work@Company.COM ")
+        .unwrap();
     assert_eq!(
         store.last_observed_email().unwrap(),
         Some("work@company.com".to_string())
@@ -748,7 +761,12 @@ fn t06_dual_account_locking_and_sync_devices_multi_account() {
         "file:///home/personal",
         now_ms - 3_000,
     );
-    seed_conv(&cli_dir, "conv-upgrade", "file:///work/repo-b", now_ms - 2_000);
+    seed_conv(
+        &cli_dir,
+        "conv-upgrade",
+        "file:///work/repo-b",
+        now_ms - 2_000,
+    );
 
     let mut store = LedgerStore::open_at(&ledger_path).unwrap();
     let local_id = store.local_device_id().unwrap();
@@ -893,7 +911,11 @@ fn t06_dual_account_locking_and_sync_devices_multi_account() {
                 1,
                 Some("Google AI Ultra".to_string())
             ),
-            ("work@company.com".to_string(), 1, Some("Enterprise".to_string())),
+            (
+                "work@company.com".to_string(),
+                1,
+                Some("Enterprise".to_string())
+            ),
         ]
     );
 
@@ -925,7 +947,12 @@ fn t06_ide_and_sync_all_account_fallback_chain() {
     let now_ms = local_ms(2026, 11, 26, 15, 30, 0);
 
     seed_conv(&ide_dir, "ide-unassigned", "file:///work/ide1", now_ms);
-    seed_conv(&ide_dir, "ide-last-obs", "file:///work/ide2", now_ms + 1_000);
+    seed_conv(
+        &ide_dir,
+        "ide-last-obs",
+        "file:///work/ide2",
+        now_ms + 1_000,
+    );
     seed_conv(&ide_dir, "ide-default", "file:///work/ide3", now_ms + 2_000);
     seed_conv(&cli_dir, "cli-bg", "file:///work/cli1", now_ms + 3_000);
 
@@ -1242,7 +1269,12 @@ fn t06_cli_account_assign_dry_run_workspace_filter_and_validation() {
     let now_ms = local_ms(2026, 11, 26, 17, 0, 0);
     // Use literal '%' in workspace path to ensure Rust substring match does not behave like SQL LIKE wildcard.
     seed_conv(&data_dir, "unassigned-ws-a", "/work/100%_alpha", now_ms);
-    seed_conv(&data_dir, "unassigned-ws-b", "/work/1000_beta", now_ms + 1_000);
+    seed_conv(
+        &data_dir,
+        "unassigned-ws-b",
+        "/work/1000_beta",
+        now_ms + 1_000,
+    );
     seed_conv(&data_dir, "locked-existing", "/work/locked", now_ms + 2_000);
 
     let ledger_path = data_dir.join("agy-pulse-ledger.sqlite");
@@ -1342,7 +1374,11 @@ fn t06_cli_account_assign_dry_run_workspace_filter_and_validation() {
         &["account", "assign"][..],
     ] {
         let bad = run_cli(bad_args);
-        assert_eq!(bad.status.code(), Some(2), "expected exit 2 for {bad_args:?}");
+        assert_eq!(
+            bad.status.code(),
+            Some(2),
+            "expected exit 2 for {bad_args:?}"
+        );
         assert!(!bad.stderr.is_empty());
     }
 

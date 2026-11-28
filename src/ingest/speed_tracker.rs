@@ -256,7 +256,13 @@ pub(super) fn compute_output_speed(
     let norm_model_key = model_key.trim().to_ascii_lowercase();
 
     if let (Some(api_ms), Some(total_out)) = (api_duration_ms, stdin_total_output) {
-        return sample_api_speed(&cache_path, previous.as_ref(), &norm_model_key, api_ms, total_out);
+        return sample_api_speed(
+            &cache_path,
+            previous.as_ref(),
+            &norm_model_key,
+            api_ms,
+            total_out,
+        );
     }
 
     if let Some(planner) = last_planner_response {

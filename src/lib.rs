@@ -101,8 +101,10 @@ mod topology_tests {
         while let Some(pos) = code[i..].find("unsafe") {
             let start = i + pos;
             let end = start + needle.len();
-            let left_ok = start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
-            let right_ok = end == bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+            let left_ok = start == 0
+                || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+            let right_ok =
+                end == bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
             if left_ok && right_ok {
                 return true;
             }
@@ -141,11 +143,8 @@ mod topology_tests {
         collect_rs_files(&src_root, &mut files);
         files.sort();
 
-        let known_mods: BTreeSet<&str> = DAG_MODULES
-            .iter()
-            .copied()
-            .chain(["app", "lib"])
-            .collect();
+        let known_mods: BTreeSet<&str> =
+            DAG_MODULES.iter().copied().chain(["app", "lib"]).collect();
         let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
         for file in &files {
@@ -189,11 +188,15 @@ mod topology_tests {
                 if !known_mods.contains(ident.as_str()) {
                     // Bare root `crate::<symbol>` reference (e.g., `crate::VERSION`).
                     assert_ne!(
-                        src_mod, "collector",
+                        src_mod,
+                        "collector",
                         "collector has forbidden root `crate::{ident}` reference in {}",
                         file.display()
                     );
-                    edges.entry(src_mod.clone()).or_default().insert("lib".to_string());
+                    edges
+                        .entry(src_mod.clone())
+                        .or_default()
+                        .insert("lib".to_string());
                     continue;
                 }
                 if ident == src_mod {

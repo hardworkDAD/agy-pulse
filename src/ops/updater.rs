@@ -80,15 +80,13 @@ fn is_loopback_host(host: &str) -> bool {
     if trimmed.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    trimmed
-        .parse::<IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback())
+    trimmed.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Validate that a release or metadata URL uses `https://` (or `http://` on loopback only).
 pub fn validate_release_url(raw: &str) -> Result<Url, OpsError> {
-    let parsed = Url::parse(raw.trim())
-        .map_err(|err| OpsError::InvalidUrl(format!("{raw}: {err}")))?;
+    let parsed =
+        Url::parse(raw.trim()).map_err(|err| OpsError::InvalidUrl(format!("{raw}: {err}")))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| OpsError::InvalidUrl(format!("URL missing host: {raw}")))?;
@@ -124,7 +122,10 @@ pub fn validate_redirect_url(from: &Url, location: &str) -> Result<Url, OpsError
 
 fn resolve_repo_slug() -> String {
     if let Some(raw) = platform::env_var("AGY_PULSE_REPO") {
-        let trimmed = raw.trim().trim_start_matches("git+").trim_end_matches(".git");
+        let trimmed = raw
+            .trim()
+            .trim_start_matches("git+")
+            .trim_end_matches(".git");
         if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
             let slug = rest.trim_matches('/');
             if !slug.is_empty() {
@@ -187,7 +188,9 @@ fn fetch_bytes_with_redirect_guard(raw_url: &str) -> Result<Vec<u8>, OpsError> {
                 .get("location")
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| {
-                    OpsError::Http(format!("Redirect {status} missing Location header at {current}"))
+                    OpsError::Http(format!(
+                        "Redirect {status} missing Location header at {current}"
+                    ))
                 })?;
             current = validate_redirect_url(&current, location)?;
             continue;
@@ -303,7 +306,8 @@ pub(super) fn check_for_updates_and_persist() -> Result<UpdateStatusRecord, OpsE
             rec.last_check = now;
             rec.local_version = VERSION.to_string();
             if rec.update_available
-                && (rec.latest_version.is_empty() || !is_newer_version(&rec.latest_version, VERSION))
+                && (rec.latest_version.is_empty()
+                    || !is_newer_version(&rec.latest_version, VERSION))
             {
                 rec.update_available = false;
             }
@@ -329,9 +333,7 @@ fn parse_sha256sums(manifest: &str, asset_name: &str) -> Option<String> {
         if hash_part.len() != 64 || !hash_part.chars().all(|c| c.is_ascii_hexdigit()) {
             continue;
         }
-        let clean_name = file_part
-            .trim_start_matches('*')
-            .trim_start_matches("./");
+        let clean_name = file_part.trim_start_matches('*').trim_start_matches("./");
         let basename = clean_name.rsplit(['/', '\\']).next().unwrap_or(clean_name);
         if clean_name == asset_name || basename == asset_name {
             return Some(hash_part.to_ascii_lowercase());
@@ -418,7 +420,9 @@ fn extract_binary_from_tar_gz(
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(err) => {
-                return Err(OpsError::Archive(format!("Failed reading tar header: {err}")));
+                return Err(OpsError::Archive(format!(
+                    "Failed reading tar header: {err}"
+                )));
             }
         }
         if header.iter().all(|&b| b == 0) {
@@ -512,14 +516,18 @@ fn extract_binary_from_zip(
             let mut buf = Vec::new();
             file.take(MAX_EXTRACTED_BINARY_BYTES + 1)
                 .read_to_end(&mut buf)
-                .map_err(|err| OpsError::Archive(format!("Failed reading {name} from zip: {err}")))?;
+                .map_err(|err| {
+                    OpsError::Archive(format!("Failed reading {name} from zip: {err}"))
+                })?;
             if (buf.len() as u64) > MAX_EXTRACTED_BINARY_BYTES {
                 return Err(OpsError::Archive(format!(
                     "Zip entry {name} uncompressed size exceeds maximum limit ({MAX_EXTRACTED_BINARY_BYTES} bytes)"
                 )));
             }
             if buf.is_empty() {
-                return Err(OpsError::Archive(format!("Extracted binary {name} is empty")));
+                return Err(OpsError::Archive(format!(
+                    "Extracted binary {name} is empty"
+                )));
             }
             return Ok(buf);
         }
@@ -601,7 +609,8 @@ pub(super) fn perform_self_update(force: bool) -> Result<SelfUpdateReport, OpsEr
 
     let primary_name = platform::primary_binary_name();
     let alias_name = platform::alias_binary_name();
-    let primary_bytes = extract_release_binary(asset_name, &archive_bytes, &[primary_name, alias_name])?;
+    let primary_bytes =
+        extract_release_binary(asset_name, &archive_bytes, &[primary_name, alias_name])?;
 
     let current_exe = env::current_exe()?;
     write_temp_and_replace(&primary_bytes, &current_exe)?;
@@ -675,7 +684,10 @@ mod tests {
         tar.resize(tar.len() + 1024, 0);
         let err = extract_binary_from_tar_gz(&gzip_bytes(&tar), &["agy-pulse"])
             .expect_err("oversized GNU longname must fail");
-        assert!(matches!(err, OpsError::Archive(_)), "unexpected error: {err}");
+        assert!(
+            matches!(err, OpsError::Archive(_)),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -685,7 +697,10 @@ mod tests {
         tar.resize(tar.len() + 1024, 0);
         let err = extract_binary_from_tar_gz(&gzip_bytes(&tar), &["agy-pulse"])
             .expect_err("oversized target binary must fail");
-        assert!(matches!(err, OpsError::Archive(_)), "unexpected error: {err}");
+        assert!(
+            matches!(err, OpsError::Archive(_)),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -699,7 +714,10 @@ mod tests {
         tar.resize(tar.len() + 1024, 0);
         let err = extract_binary_from_tar_gz(&gzip_bytes(&tar), &["agy-pulse"])
             .expect_err("cumulative tar size exceeding limit must fail");
-        assert!(matches!(err, OpsError::Archive(_)), "unexpected error: {err}");
+        assert!(
+            matches!(err, OpsError::Archive(_)),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -713,21 +731,33 @@ mod tests {
 
         let mut tar = Vec::new();
         // 1. Large non-target file
-        tar.extend_from_slice(&make_tar_header("share/big-readme.txt", b'0', non_target_payload.len() as u64));
+        tar.extend_from_slice(&make_tar_header(
+            "share/big-readme.txt",
+            b'0',
+            non_target_payload.len() as u64,
+        ));
         tar.extend_from_slice(&non_target_payload);
         let rem1 = non_target_payload.len() % 512;
         if rem1 != 0 {
             tar.resize(tar.len() + (512 - rem1), 0);
         }
         // 2. GNU longname for target
-        tar.extend_from_slice(&make_tar_header("././@LongLink", b'L', long_payload.len() as u64));
+        tar.extend_from_slice(&make_tar_header(
+            "././@LongLink",
+            b'L',
+            long_payload.len() as u64,
+        ));
         tar.extend_from_slice(&long_payload);
         let rem2 = long_payload.len() % 512;
         if rem2 != 0 {
             tar.resize(tar.len() + (512 - rem2), 0);
         }
         // 3. Target binary
-        tar.extend_from_slice(&make_tar_header("truncated-name", b'0', target_payload.len() as u64));
+        tar.extend_from_slice(&make_tar_header(
+            "truncated-name",
+            b'0',
+            target_payload.len() as u64,
+        ));
         tar.extend_from_slice(&target_payload);
         let rem3 = target_payload.len() % 512;
         if rem3 != 0 {
@@ -749,7 +779,8 @@ mod tests {
         let mut cursor = Cursor::new(Vec::new());
         {
             let mut zip = zip::ZipWriter::new(&mut cursor);
-            let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
             zip.start_file("agy-pulse", opts).expect("start_file");
             zip.write_all(&payload).expect("write zip bomb payload");
             zip.finish().expect("finish zip");
@@ -767,6 +798,9 @@ mod tests {
 
         let err = extract_binary_from_zip(&zip_bytes, &["agy-pulse"])
             .expect_err("zip bomb with spoofed uncompressed size must be rejected");
-        assert!(matches!(err, OpsError::Archive(_)), "unexpected error: {err}");
+        assert!(
+            matches!(err, OpsError::Archive(_)),
+            "unexpected error: {err}"
+        );
     }
 }

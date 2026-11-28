@@ -321,7 +321,11 @@ pub(super) fn is_strict_same_origin_with_required_origin(
     req: &HttpRequest,
     actual_port: u16,
 ) -> bool {
-    let Some(origin) = req.header("origin").map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(origin) = req
+        .header("origin")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return false;
     };
     is_allowed_origin(Some(origin), actual_port) && is_strict_same_origin(req, actual_port)
@@ -329,9 +333,8 @@ pub(super) fn is_strict_same_origin_with_required_origin(
 
 /// Constant-time check for the `X-Agy-Pulse-Token` CSRF request header.
 pub(super) fn has_valid_csrf_token(req: &HttpRequest, expected_token: &str) -> bool {
-    req.header("x-agy-pulse-token").is_some_and(|token| {
-        constant_time_eq(token.as_bytes(), expected_token.as_bytes())
-    })
+    req.header("x-agy-pulse-token")
+        .is_some_and(|token| constant_time_eq(token.as_bytes(), expected_token.as_bytes()))
 }
 
 /// Constant-time byte slice comparison (returns `false` immediately on length mismatch).
@@ -501,7 +504,10 @@ mod tests {
             headers: vec![
                 ("sec-fetch-site".to_string(), "Same-Origin".to_string()),
                 ("origin".to_string(), "http://127.0.0.1:3789".to_string()),
-                ("content-type".to_string(), "Application/JSON ; charset=utf-8".to_string()),
+                (
+                    "content-type".to_string(),
+                    "Application/JSON ; charset=utf-8".to_string(),
+                ),
             ],
             body: Vec::new(),
         };
@@ -532,7 +538,10 @@ mod tests {
             ..req_ok.clone()
         };
         assert!(is_strict_same_origin(&req_missing_origin, 3789));
-        assert!(!is_strict_same_origin_with_required_origin(&req_missing_origin, 3789));
+        assert!(!is_strict_same_origin_with_required_origin(
+            &req_missing_origin,
+            3789
+        ));
 
         let req_csrf = HttpRequest {
             headers: vec![("x-agy-pulse-token".to_string(), "secret-token".to_string())],
@@ -643,23 +652,28 @@ mod tests {
             "Content-Length: 2\r\nContent-Length: 2",
             "Content-Length: 2\r\nContent-Length: 5",
         ] {
-            let raw = format!(
-                "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:3789\r\n{dup}\r\n\r\nhi"
-            );
+            let raw = format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:3789\r\n{dup}\r\n\r\nhi");
             let err = send_on_loopback(raw.into_bytes());
             assert!(
-                matches!(err, Err(HttpParseError::InvalidRequest("duplicate Content-Length"))),
+                matches!(
+                    err,
+                    Err(HttpParseError::InvalidRequest("duplicate Content-Length"))
+                ),
                 "expected duplicate Content-Length error for {dup:?}, got {err:?}"
             );
         }
 
         for te in ["Transfer-Encoding: chunked", "transfer-encoding: gzip"] {
-            let raw = format!(
-                "POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:3789\r\n{te}\r\n\r\n0\r\n\r\n"
-            );
+            let raw =
+                format!("POST /api/sync HTTP/1.1\r\nHost: 127.0.0.1:3789\r\n{te}\r\n\r\n0\r\n\r\n");
             let err = send_on_loopback(raw.into_bytes());
             assert!(
-                matches!(err, Err(HttpParseError::InvalidRequest("unsupported Transfer-Encoding"))),
+                matches!(
+                    err,
+                    Err(HttpParseError::InvalidRequest(
+                        "unsupported Transfer-Encoding"
+                    ))
+                ),
                 "expected Transfer-Encoding rejection for {te:?}, got {err:?}"
             );
         }
@@ -695,7 +709,8 @@ mod tests {
                 panic!("accept failed");
             };
             let started = Instant::now();
-            let res = read_http_request_with_deadline(&mut server_stream, Duration::from_millis(120));
+            let res =
+                read_http_request_with_deadline(&mut server_stream, Duration::from_millis(120));
             let elapsed = started.elapsed();
             assert!(
                 matches!(res, Err(HttpParseError::TimedOut)),

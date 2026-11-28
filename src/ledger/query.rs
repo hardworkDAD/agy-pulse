@@ -971,9 +971,7 @@ fn load_conv_metadata_from_ingested_dbs(
             ConvLineageMeta {
                 workspace: row.get::<_, Option<String>>(1)?.filter(|s| !s.is_empty()),
                 branch: row.get::<_, Option<String>>(2)?.filter(|s| !s.is_empty()),
-                parent_conversation_id: row
-                    .get::<_, Option<String>>(3)?
-                    .filter(|s| !s.is_empty()),
+                parent_conversation_id: row.get::<_, Option<String>>(3)?.filter(|s| !s.is_empty()),
                 root_conversation_id: row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty()),
                 source: LedgerSource::from_raw(&src_raw),
             },
@@ -1437,8 +1435,12 @@ impl PerfAcc {
         }
         self.steps += 1;
         self.input_tokens = self.input_tokens.saturating_add(step.input_tokens);
-        self.cache_read_tokens = self.cache_read_tokens.saturating_add(step.cache_read_tokens);
-        self.cache_write_tokens = self.cache_write_tokens.saturating_add(step.cache_write_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(step.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(step.cache_write_tokens);
         self.output_tokens = self.output_tokens.saturating_add(step.output_tokens);
 
         if step.valid_stream
@@ -1701,9 +1703,8 @@ pub(super) fn query_overview(
         &mut root_cache,
     )?;
 
-    let is_unbounded_all = time_range.range == LedgerTimeRange::All
-        && filter.from.is_none()
-        && filter.to.is_none();
+    let is_unbounded_all =
+        time_range.range == LedgerTimeRange::All && filter.from.is_none() && filter.to.is_none();
     let (account_filter, meta_account) = normalize_account_filter(filter.account.as_deref());
     let (device_filter, meta_device) =
         normalize_device_filter(filter.device.as_deref(), &local_device_id);
@@ -1819,9 +1820,7 @@ fn normalize_account_filter(raw: Option<&str>) -> (Option<String>, String) {
                 normalize_account_id(s).unwrap_or_else(|| UNASSIGNED_ACCOUNT_ID.to_string())
             }
         });
-    let meta_account = account_filter
-        .clone()
-        .unwrap_or_else(|| "all".to_string());
+    let meta_account = account_filter.clone().unwrap_or_else(|| "all".to_string());
     (account_filter, meta_account)
 }
 
@@ -1836,9 +1835,7 @@ fn normalize_device_filter(raw: Option<&str>, local_device_id: &str) -> (Option<
                 s.to_string()
             }
         });
-    let meta_device = device_filter
-        .clone()
-        .unwrap_or_else(|| "all".to_string());
+    let meta_device = device_filter.clone().unwrap_or_else(|| "all".to_string());
     (device_filter, meta_device)
 }
 
@@ -1990,7 +1987,8 @@ fn aggregate_overview(input: OverviewBuildInput<'_>) -> Result<LedgerOverview, L
             continue;
         }
 
-        let root_id = resolve_root_conversation_id(&step.conversation_id, &conv_meta, &mut root_cache);
+        let root_id =
+            resolve_root_conversation_id(&step.conversation_id, &conv_meta, &mut root_cache);
         let is_subagent = root_id != step.conversation_id;
         if !filter.include_subagents && is_subagent {
             continue;
@@ -2045,7 +2043,10 @@ fn aggregate_overview(input: OverviewBuildInput<'_>) -> Result<LedgerOverview, L
                 by_model_cost: BTreeMap::new(),
             });
         bucket.acc.accumulate(step, is_subagent);
-        *bucket.by_model_cost.entry(step.model.clone()).or_insert(0.0) += step.cost_usd;
+        *bucket
+            .by_model_cost
+            .entry(step.model.clone())
+            .or_insert(0.0) += step.cost_usd;
 
         let model_entry = model_map
             .entry(step.model.clone())
@@ -2059,13 +2060,11 @@ fn aggregate_overview(input: OverviewBuildInput<'_>) -> Result<LedgerOverview, L
             model_entry.last_used_ms = step.ts_ms;
         }
 
-        let source_entry = source_map
-            .entry(step.source)
-            .or_insert_with(|| SourceAcc {
-                source: step.source,
-                acc: PerfAcc::default(),
-                root_ids: HashSet::new(),
-            });
+        let source_entry = source_map.entry(step.source).or_insert_with(|| SourceAcc {
+            source: step.source,
+            acc: PerfAcc::default(),
+            root_ids: HashSet::new(),
+        });
         source_entry.acc.accumulate(step, is_subagent);
         source_entry.root_ids.insert(root_id.clone());
 
@@ -2107,7 +2106,9 @@ fn aggregate_overview(input: OverviewBuildInput<'_>) -> Result<LedgerOverview, L
 
         let root_cascade = cascade_map.entry(root_id.clone()).or_insert_with(|| {
             let root_ws = root_m.and_then(|m| m.workspace.as_deref()).or(effective_ws);
-            let root_br = root_m.and_then(|m| m.branch.as_deref()).or(effective_branch);
+            let root_br = root_m
+                .and_then(|m| m.branch.as_deref())
+                .or(effective_branch);
             let root_src = root_m.map(|m| m.source).unwrap_or(step.source);
             let root_acct = root_id_meta
                 .map(|m| m.account_id.as_str())
@@ -2371,14 +2372,12 @@ fn aggregate_overview(input: OverviewBuildInput<'_>) -> Result<LedgerOverview, L
 
     let mut cascades_vec: Vec<CascadeAcc> = cascade_map.into_values().collect();
     cascades_vec.sort_by(|a, b| {
-        b.last_activity_ms
-            .cmp(&a.last_activity_ms)
-            .then_with(|| {
-                b.acc
-                    .cost_usd
-                    .partial_cmp(&a.acc.cost_usd)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        b.last_activity_ms.cmp(&a.last_activity_ms).then_with(|| {
+            b.acc
+                .cost_usd
+                .partial_cmp(&a.acc.cost_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
     let cascades: Vec<CascadeOverview> = cascades_vec
         .into_iter()
@@ -2476,9 +2475,10 @@ fn aggregate_overview(input: OverviewBuildInput<'_>) -> Result<LedgerOverview, L
                 })
                 .unwrap_or(&q.device_id)
                 .to_string();
-            let plan_tier = q.plan_tier.clone().or_else(|| {
-                info.and_then(|i| i.plan_tiers.get(&q.account_id).cloned())
-            });
+            let plan_tier = q
+                .plan_tier
+                .clone()
+                .or_else(|| info.and_then(|i| i.plan_tiers.get(&q.account_id).cloned()));
             AccountQuotaOverview {
                 account_id: q.account_id,
                 plan_tier,
@@ -2806,7 +2806,10 @@ mod tests {
             }
         }
 
-        fn offset_from_local_date(&self, _local: &NaiveDate) -> chrono::MappedLocalTime<Self::Offset> {
+        fn offset_from_local_date(
+            &self,
+            _local: &NaiveDate,
+        ) -> chrono::MappedLocalTime<Self::Offset> {
             let Some(off) = chrono::FixedOffset::east_opt(0) else {
                 return chrono::MappedLocalTime::None;
             };
@@ -2877,7 +2880,10 @@ mod tests {
         };
         let now_eod = noon.and_utc().timestamp_millis();
         let (start2, end2) = local_today_bounds_in_tz(&tz_eod_gap, now_eod);
-        assert!(start2 < end2, "expected non-empty eod gap window: {start2}..{end2}");
+        assert!(
+            start2 < end2,
+            "expected non-empty eod gap window: {start2}..{end2}"
+        );
         assert!(start2 <= now_eod && now_eod <= end2);
         // Nearest valid local end when 23:00..24:00 is skipped is 22:59:59.999Z
         let expected_end = date
@@ -2948,7 +2954,11 @@ mod tests {
             let ws = step
                 .workspace
                 .as_deref()
-                .or_else(|| conv_meta.get(&step.conversation_id).and_then(|m| m.workspace.as_deref()))
+                .or_else(|| {
+                    conv_meta
+                        .get(&step.conversation_id)
+                        .and_then(|m| m.workspace.as_deref())
+                })
                 .or_else(|| conv_meta.get(&root_id).and_then(|m| m.workspace.as_deref()));
             if let Some(w) = ws {
                 available_workspaces_set.insert(w.to_string());
@@ -3400,8 +3410,18 @@ mod tests {
             LedgerSourceFilter::Cli,
             LedgerSourceFilter::Ide,
         ];
-        let accounts = [None, Some("unassigned"), Some("alice@example.com"), Some("bob@example.com")];
-        let devices = [None, Some("local"), Some(local_id.as_str()), Some("dev-remote-1")];
+        let accounts = [
+            None,
+            Some("unassigned"),
+            Some("alice@example.com"),
+            Some("bob@example.com"),
+        ];
+        let devices = [
+            None,
+            Some("local"),
+            Some(local_id.as_str()),
+            Some("dev-remote-1"),
+        ];
         let models = [None, Some("Haiku 4.5")];
         let workspaces = [None, Some("alpha")];
 

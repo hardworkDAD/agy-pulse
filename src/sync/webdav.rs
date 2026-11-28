@@ -5,9 +5,9 @@ use url::Url;
 
 use super::config::sanitize_url_for_display;
 use super::http_util::{
-    MAX_REMOTE_OBJECT_BYTES, base64_encode, build_http_agent, percent_decode_str,
-    read_body_capped, redact_error_message, strip_url_credentials, uri_encode_path,
-    validate_remote_url, xml_unescape,
+    MAX_REMOTE_OBJECT_BYTES, base64_encode, build_http_agent, percent_decode_str, read_body_capped,
+    redact_error_message, strip_url_credentials, uri_encode_path, validate_remote_url,
+    xml_unescape,
 };
 use super::protocol::{validate_relative_key, validate_relative_prefix};
 use super::{RemoteProbeInfo, SyncError, SyncRemote};
@@ -61,11 +61,7 @@ impl WebDavRemote {
             secrets.push(header.clone());
             Some(header)
         } else if clean_user.is_some() || clean_pass.is_some() {
-            let raw_creds = format!(
-                "{}:{}",
-                clean_user.unwrap_or(""),
-                clean_pass.unwrap_or("")
-            );
+            let raw_creds = format!("{}:{}", clean_user.unwrap_or(""), clean_pass.unwrap_or(""));
             let encoded = base64_encode(raw_creds.as_bytes());
             let header = format!("Basic {encoded}");
             if let Some(p) = clean_pass {
@@ -134,7 +130,10 @@ impl WebDavRemote {
         }
         let req = builder.body(body).map_err(|err| {
             SyncError::Remote(redact_error_message(
-                &format!("failed to construct WebDAV {method} request for {}: {err}", self.display_url),
+                &format!(
+                    "failed to construct WebDAV {method} request for {}: {err}",
+                    self.display_url
+                ),
                 &self.secrets,
             ))
         })?;
@@ -193,10 +192,7 @@ impl WebDavRemote {
         Ok(())
     }
 
-    fn propfind_depth_1(
-        &self,
-        dir_rel: &str,
-    ) -> Result<Option<Vec<DavEntry>>, SyncError> {
+    fn propfind_depth_1(&self, dir_rel: &str) -> Result<Option<Vec<DavEntry>>, SyncError> {
         let target_url = self.build_target_url(dir_rel, true)?;
         let resp = self.send_custom(
             "PROPFIND",
@@ -234,11 +230,7 @@ impl WebDavRemote {
             };
             parsed.path().to_string()
         } else {
-            trimmed
-                .split(['?', '#'])
-                .next()
-                .unwrap_or("")
-                .to_string()
+            trimmed.split(['?', '#']).next().unwrap_or("").to_string()
         };
 
         let decoded = percent_decode_str(&raw_path)?;
@@ -346,7 +338,11 @@ fn find_matching_tag_range(
     None
 }
 
-fn extract_next_tag_inner(xml: &str, start_from: usize, target_local: &str) -> Option<(String, usize)> {
+fn extract_next_tag_inner(
+    xml: &str,
+    start_from: usize,
+    target_local: &str,
+) -> Option<(String, usize)> {
     let mut cursor = start_from;
     while let Some(rel_lt) = xml[cursor..].find('<') {
         let lt = cursor + rel_lt;

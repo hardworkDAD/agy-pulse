@@ -10,7 +10,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use crate::domain::SyncDeviceRecord;
-use crate::ledger::{LedgerSyncOptions, LedgerStore, validate_and_normalize_account_email};
+use crate::ledger::{LedgerStore, LedgerSyncOptions, validate_and_normalize_account_email};
 use crate::platform;
 
 use super::config::{
@@ -153,10 +153,18 @@ fn collect_secrets(cfg: Option<&SyncConfig>) -> Vec<String> {
                 secret_key,
                 ..
             } => {
-                if let Some(ak) = access_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(ak) = access_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     secrets.push(ak.to_string());
                 }
-                if let Some(sk) = secret_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(sk) = secret_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     secrets.push(sk.to_string());
                 }
             }
@@ -507,9 +515,8 @@ fn build_sync_config_from_flags(
             }
         }
         "s3" => {
-            let endpoint = non_empty_clean(args.endpoint.as_deref()).ok_or_else(|| {
-                "--endpoint is required when --type s3 is selected".to_string()
-            })?;
+            let endpoint = non_empty_clean(args.endpoint.as_deref())
+                .ok_or_else(|| "--endpoint is required when --type s3 is selected".to_string())?;
             let bucket = non_empty_clean(args.bucket.as_deref())
                 .ok_or_else(|| "--bucket is required when --type s3 is selected".to_string())?;
             let region = non_empty_clean(args.region.as_deref()).unwrap_or_else(|| "auto".into());
@@ -524,9 +531,8 @@ fn build_sync_config_from_flags(
             }
         }
         "cf-worker" => {
-            let url = non_empty_clean(args.url.as_deref()).ok_or_else(|| {
-                "--url is required when --type cf-worker is selected".to_string()
-            })?;
+            let url = non_empty_clean(args.url.as_deref())
+                .ok_or_else(|| "--url is required when --type cf-worker is selected".to_string())?;
             RemoteConfig::CfWorker {
                 url,
                 token: non_empty_clean(args.token.as_deref()),
@@ -665,7 +671,9 @@ pub fn build_sync_config_interactive<R: BufRead, W: Write>(
     existing: Option<&SyncConfig>,
     overrides: &InitCliArgs,
 ) -> Result<SyncConfig, String> {
-    let default_type = existing.map(SyncConfig::remote_type_str).unwrap_or("local-dir");
+    let default_type = existing
+        .map(SyncConfig::remote_type_str)
+        .unwrap_or("local-dir");
     writeln!(writer, "Multi-Device Sync Setup").map_err(|e| e.to_string())?;
     writeln!(
         writer,
@@ -703,7 +711,9 @@ pub fn build_sync_config_interactive<R: BufRead, W: Write>(
             });
             let path = match overrides.path.as_deref().filter(|s| !s.is_empty()) {
                 Some(p) => p.to_string(),
-                None => prompt_required(reader, writer, "Local sync directory path", existing_path)?,
+                None => {
+                    prompt_required(reader, writer, "Local sync directory path", existing_path)?
+                }
             };
             RemoteConfig::LocalDir { path }
         }
@@ -812,12 +822,7 @@ pub fn build_sync_config_interactive<R: BufRead, W: Write>(
             };
             let region = match overrides.region.as_deref().filter(|s| !s.is_empty()) {
                 Some(r) => r.to_string(),
-                None => prompt_required(
-                    reader,
-                    writer,
-                    "S3 region",
-                    ex_reg.or(Some("auto")),
-                )?,
+                None => prompt_required(reader, writer, "S3 region", ex_reg.or(Some("auto")))?,
             };
             let bucket = match overrides.bucket.as_deref().filter(|s| !s.is_empty()) {
                 Some(b) => b.to_string(),
@@ -930,12 +935,8 @@ pub fn build_sync_config_interactive<R: BufRead, W: Write>(
     let device_name = match overrides.device_name.as_deref() {
         Some(raw) => platform::sanitize_device_name(raw),
         None => {
-            let chosen = prompt_optional(
-                reader,
-                writer,
-                "Device name",
-                default_dev_name.as_deref(),
-            )?;
+            let chosen =
+                prompt_optional(reader, writer, "Device name", default_dev_name.as_deref())?;
             chosen.and_then(|s| platform::sanitize_device_name(&s))
         }
     };
@@ -1632,13 +1633,9 @@ mod tests {
         let input = "local-dir\n/tmp/my-sync\nworkstation-01\nalice@example.com\ncustom-pfx\n60\n";
         let mut reader = Cursor::new(input.as_bytes());
         let mut out = Vec::new();
-        let cfg = build_sync_config_interactive(
-            &mut reader,
-            &mut out,
-            None,
-            &InitCliArgs::default(),
-        )
-        .unwrap();
+        let cfg =
+            build_sync_config_interactive(&mut reader, &mut out, None, &InitCliArgs::default())
+                .unwrap();
         assert_eq!(cfg.device_name.as_deref(), Some("workstation-01"));
         assert_eq!(cfg.default_account.as_deref(), Some("alice@example.com"));
         assert_eq!(cfg.prefix, "custom-pfx");

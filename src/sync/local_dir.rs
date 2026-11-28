@@ -45,11 +45,7 @@ impl LocalDirRemote {
     }
 }
 
-fn collect_relative_files(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<String>,
-) -> Result<(), SyncError> {
+fn collect_relative_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), SyncError> {
     let entries = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -142,9 +138,9 @@ impl SyncRemote for LocalDirRemote {
 
     fn put(&self, key: &str, bytes: &[u8], _content_type: &str) -> Result<(), SyncError> {
         let dest = self.resolve_key_path(key)?;
-        let parent = dest.parent().ok_or_else(|| {
-            SyncError::InvalidKey(format!("key has no parent directory: {key}"))
-        })?;
+        let parent = dest
+            .parent()
+            .ok_or_else(|| SyncError::InvalidKey(format!("key has no parent directory: {key}")))?;
         fs::create_dir_all(parent)?;
 
         let mut tmp = NamedTempFile::new_in(parent)?;

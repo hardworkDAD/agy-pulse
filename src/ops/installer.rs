@@ -10,7 +10,13 @@ use crate::platform;
 use super::{OpsError, VERSION, updater};
 
 const STALE_PLUGIN_FILES: &[&str] = &["hooks.json", "mcp_config.json"];
-const STALE_PLUGIN_DIRS: &[&str] = &["agents", "commands", "rules", "extensions", "skills/hud-config"];
+const STALE_PLUGIN_DIRS: &[&str] = &[
+    "agents",
+    "commands",
+    "rules",
+    "extensions",
+    "skills/hud-config",
+];
 
 /// Summary of actions completed by `install`.
 #[derive(Debug, Clone)]
@@ -34,7 +40,12 @@ fn format_statusline_command(binary_path: &Path) -> String {
 fn collect_stale_plugin_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = platform::home_dir() {
-        dirs.push(home.join(".gemini").join("config").join("plugins").join("agy-pulse"));
+        dirs.push(
+            home.join(".gemini")
+                .join("config")
+                .join("plugins")
+                .join("agy-pulse"),
+        );
     }
     for root in platform::get_antigravity_roots() {
         dirs.push(root.join("plugins").join("agy-pulse"));
@@ -42,13 +53,23 @@ fn collect_stale_plugin_dirs() -> Vec<PathBuf> {
     if let Ok(xdg_cfg) = env::var("XDG_CONFIG_HOME") {
         let trimmed = xdg_cfg.trim();
         if !trimmed.is_empty() {
-            dirs.push(PathBuf::from(trimmed).join("gemini").join("plugins").join("agy-pulse"));
+            dirs.push(
+                PathBuf::from(trimmed)
+                    .join("gemini")
+                    .join("plugins")
+                    .join("agy-pulse"),
+            );
         }
     }
     if let Ok(appdata) = env::var("APPDATA") {
         let trimmed = appdata.trim();
         if !trimmed.is_empty() {
-            dirs.push(PathBuf::from(trimmed).join("gemini").join("plugins").join("agy-pulse"));
+            dirs.push(
+                PathBuf::from(trimmed)
+                    .join("gemini")
+                    .join("plugins")
+                    .join("agy-pulse"),
+            );
         }
     }
 
@@ -267,10 +288,7 @@ fn configure_host_settings(settings_path: &Path, target_command: &str) -> Result
         _ => Map::new(),
     };
 
-    let already_matches = status_line_map
-        .get("type")
-        .and_then(Value::as_str)
-        == Some("command")
+    let already_matches = status_line_map.get("type").and_then(Value::as_str) == Some("command")
         && status_line_map.get("command").and_then(Value::as_str) == Some(target_command);
 
     if !already_matches {
@@ -336,7 +354,10 @@ mod tests {
         fs::write(&settings_path, raw_matching).expect("write");
 
         configure_host_settings(&settings_path, "/usr/local/bin/agy-pulse").expect("matching");
-        assert_eq!(fs::read_to_string(&settings_path).expect("read"), raw_matching);
+        assert_eq!(
+            fs::read_to_string(&settings_path).expect("read"),
+            raw_matching
+        );
         assert!(!dir.path().join("settings.json.bak").exists());
     }
 }
