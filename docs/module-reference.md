@@ -4,20 +4,23 @@
 
 ---
 
-## `src/lib.rs`, `src/main.rs` & `src/bin/agypl.rs` — CLI Dispatch & Statusline Guard
+## `src/lib.rs`, `src/app.rs`, `src/main.rs` & `src/bin/agypl.rs` — Thin Crate Root, App Orchestration & CLI Guard
 
-- `run_cli() -> i32`:
-  - Dispatches `--version`/`-V`/`-v`/`version`, `dashboard`/`dash`/`ui`/`--dashboard`, `stats`/`report`/`--stats`, `config`/`--config`, `install`/`--install`, `uninstall`/`--uninstall`, `update`/`--update`, `--check-update-bg`, and `help`/`--help`/`-h`.
-  - Default stdin mode executes inside `std::panic::catch_unwind` with a **1500 ms** hard `read_stdin_with_timeout`, logs diagnostics safely to `agy-pulse-error.log` (symlink-checked `0600`), and always exits `0`.
+- `src/lib.rs`: Thin crate root enforcing `#![deny(clippy::unwrap_used, clippy::expect_used)]`, declaring deep modules + `pub(crate) mod app`, and delegating `pub fn run_cli() -> i32 { app::run_cli() }`.
+- `src/app.rs`: Internal orchestration module hosting `CliRoute`/`run_cli()`, statusline enrichment & fallback helpers (`collect_statusline_enrichment`, `render_snapshot_for_terminal`, `render_hard_timeout_fallback`, `read_stdin_with_timeout`), background ledger sync lock state machine, and `--sync-bg` trigger:
+  - Dispatches `--version`/`-V`/`-v`/`version`, `dashboard`/`dash`/`ui`/`--dashboard`, `stats`/`report`/`--stats`, `config`/`--config`, `install`/`--install`, `uninstall`/`--uninstall`, `account`, `sync`, `update`/`--update`, `--check-update-bg`, `--sync-ledger-bg`, `--sync-bg`, `--collector-bg`, and `help`/`--help`/`-h`.
+  - Default stdin mode delegates to `collector::run_thin_statusline_pipeline` (unless `AGY_PULSE_SYNC_MODE=1`) inside `std::panic::catch_unwind` with a **1500 ms** hard `read_stdin_with_timeout` and **4 s** exit watchdog, logs diagnostics safely to `agy-pulse-error.log` (symlink-checked `0600`), and always exits `0`.
 
 ---
 
-## `src/domain/` — Pure In-Memory Domain Kernel (Zero I/O)
+## `src/domain/` — Pure In-Memory Domain Kernel (Zero I/O, Zero Cross-Module Deps)
 
+- **`config.rs`**: Pure in-memory config value types (`PulseConfig`, `DisplayConfig`, `ThemeConfig`, `ThemeColors`, `IconsConfig`, `ThresholdsConfig`, `CacheHitThresholdsConfig`, `QuotaStyle`, `LanguageSetting`) and `TerminalCaps` (re-exported by `config` and `platform`).
 - **`model.rs`**: Canonical domain structs aligned to `GLOSSARY.md` (`PulseSnapshot`, `HostIdentity`, `ModelIdentity`, `ContextWindowSnapshot`, `CostSnapshot`, `TokenUsage`, `ProviderQuotaSummary`, `ProviderQuota`, `QuotaWindow`, `ChildModelSpeed`, `TurnCacheMetrics`, `WorkspaceMetadata`).
 - **`pricing.rs`**: `lookup_pricing(model)` & `calculate_token_cost(model, tokens, cache_inclusive, is_cumulative)` supporting Claude 4.5/4.6/5.5, Gemini 3.x/4 Carbon/Hydrogen/Argon/Neon, Orchestrator, DeepSeek, OpenAI o-series/GPT, and `>200k` long-context pricing tiers.
 - **`accounting.rs`**: Single source of truth for `model_includes_cache_in_input`, `is_usage_cache_inclusive`, `calculate_turn_cache_metrics`, `resolve_cascade_cost_usd`, `compact_model_name`, `resolve_model_display_name`, and `format_usd`.
 - **`quota.rs`**: Pure functions `parse_iso8601_to_epoch_ms`, `is_quota_window_expired`, `prune_expired_provider_quota`, `pick_critical_window`, `has_valid_provider_quota`, `format_quota_percent`, `format_reset_duration`, `format_reset_countdown`, and `is_openai_provider_key`.
+- **`sync.rs`**: Pure multi-device sync domain records (`DeviceIdentity`, `SyncDeviceRecord`, `QuotaSnapshot`, `SyncConvRecord`, `SyncStepRecord`, `LedgerSyncMeta`) plus read-only `SyncConfigSummary`, `parse_sync_config_summary`, and `redact_sync_secrets` (zero I/O, keeping `ledger` free of `sync` dependencies).
 
 ---
 
@@ -27,7 +30,7 @@
 - **`stdin.rs`**: Parses heterogeneous host JSON (`model`, `workspace.current_dir`/`cwd`, `plan_tier`, `cycle_mode`, `context_window`, `cost`, `quota` keys `gemini-5h`/`gemini-weekly`/`anthropic-5h`/`claude-5h`/`3p-5h`/`argon*`).
 - **`transcript.rs`**: Byte-offset incremental scanning of `transcript.jsonl` (up to 64 MB, `TRANSCRIPT_CACHE_VERSION = 11`) with `transcript_full.jsonl` `truncated_fields` backfill, `CHECKPOINT` compaction detection & `inclusivePeak`/`exclusivePeak` tracking, child/swarm model speed tracking, and `429` image quota exhaustion detection.
 - **`sqlite_ro.rs` & `proto_wire.rs` & `db_telemetry.rs`**:
-  - Opens static host `.db` files via `?immutable=1` and active `-wal` databases by copying `.db` + `-wal` into an isolated `TempDir` (rebuilding transient WAL index in isolation without touching host files).
+  - Opens static host `.db` files via `?immutable=1` and active `-wal` databases by merging committed WAL frames purely in memory and mounting via `sqlite3_deserialize` (`memdb`) with zero temp-directory disk writes (falling back to an isolated `TempDir` copy with `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE` only for oversized/racy DBs).
   - Decodes `gen_metadata` (`f1.f9.f10.f4` compaction ceiling, `f4.f1` `systemPromptTokens`, `f4.f2` raw input, `f4.f3` output, `f4.f5` cache read, `f1.f11` TTFT, `f1.f12` stream duration, `f20` parent/root lineage) and `executor_metadata` (`f10.f2.f5`), aggregating recent 30-DB + active lineage weighted speeds and **Cascade** cost trees.
 - **`workspace.rs`**: Pure-file `.git/HEAD` & `.git` worktree pointer resolution (timeout-bounded `git` fallback only for reftable), plus offline counts of memory files, rule `.md` files, git hooks, and MCP server entries.
 
@@ -53,7 +56,7 @@
 ## `src/config/` — Configuration & Interactive Raw-TTY Wizard
 
 - **`mod.rs`**:
-  - Deep-merges `PulseConfig::default()` → global `agy-pulse.config.json` → workspace `./agy-pulse.config.json` → environment overrides (`AGY_PULSE_LANGUAGE`, `AGY_PULSE_DASHBOARD_PORT`, `AGY_PULSE_DASHBOARD_IDLE_SEC`, `AGY_PULSE_FORCE_ASCII`/`AGY_PULSE_FORCE_UNICODE`). Ignores retired `v1` keys and maps legacy `quotaStyle: "models"` to `Table`.
+  - Deep-merges `PulseConfig::default()` → global `agy-pulse.config.json` → workspace `./agy-pulse.config.json` → `AGY_PULSE_LANGUAGE` override (dashboard port/idle timeout overrides `AGY_PULSE_DASHBOARD_PORT`/`AGY_PULSE_DASHBOARD_IDLE_SEC` and terminal Unicode/width overrides `AGY_PULSE_FORCE_ASCII`/`AGY_PULSE_FORCE_UNICODE` are applied by `dashboard` and `platform`, while `read_pulse_env_overrides` reports metadata for all four). Ignores retired `v1` keys and maps legacy `quotaStyle: "models"` to `Table`.
   - Raw global snapshot & validation helpers (`read_global_config_snapshot`, `read_global_config_snapshot_at`, `read_pulse_env_overrides`, `validate_pulse_config`, `save_global_pulse_config_preserving_unknown`): return `GlobalPulseConfigSnapshot` (disk-only without env overlay, `version = sha256 | "absent"`), expose active `PulseEnvOverrides` metadata without mutating disk files, validate bounds/colors/widths, and atomically write `0600` JSON while preserving unknown keys (such as `columnWidth` or user custom keys) and removing cleared optional fields.
 - **`wizard.rs`**: Interactive terminal wizard (`agypl config`) with live `render_statusline` preview, scope-isolated atomic saving, safe non-TTY fallback, and shared `render_statusline_preview` helper reused by both the terminal wizard and the Dashboard preview API.
 
@@ -65,6 +68,14 @@
   - Manages global `0600` private `agy-pulse-sync.json` (`SyncConfig`, `RemoteConfig` variants `local-dir` / `webdav` / `s3` / `cf-worker`, `load_sync_config`, `save_sync_config` / `save_sync_config_to`). Never reads workspace directories.
   - Raw snapshot & metadata helpers (`read_raw_sync_config_snapshot`, `read_raw_sync_config_snapshot_at`, `load_sync_config_raw`, `load_sync_config_raw_from`, `delete_sync_config`, `delete_sync_config_at`, `active_sync_env_overrides`): read disk config **without** applying environment overrides (so env secrets are never persisted back to disk), report `SyncEnvOverrides` (variable names only, zero secret values), and delete only the sync config file without touching the SQLite **Ledger**.
 - **`mod.rs`, `protocol.rs`, `engine.rs`, `local_dir.rs`, `webdav.rs`, `s3.rs`, `cf_worker.rs`, `cli.rs`**: Unified `SyncRemote` trait (`probe`, `list`, `get`, `put`, `delete`), single-writer-per-device wire format v1, pure-Rust SigV4 S3 signing, `push`/`pull`/`sync_both`/`prune_device`, and `agypl sync` / `--sync-bg` execution.
+
+---
+
+## `src/collector/` — Thin Statusline Frontend & Single-Instance Background Collector (ADR-0006)
+
+- **`mod.rs`**: Private internal submodules (`client`, `protocol`, `server`, `snapshot`) exposed via a narrow facade (`CollectorServerHandle`, `is_embedded_collector_active_in_process`, `run_collector_bg_cli`, `run_thin_statusline_pipeline`, state/snapshot helpers).
+- **`client.rs` & `snapshot.rs`**: Thin statusline IPC client with zero in-process SQLite opens; reads `tmpfs` precomputed snapshots (`snap-<key>.json` / `snap-global.json`), merges live `stdin` fields in memory on busy/timeout fallback, and delegates enrichment to the daemon.
+- **`server.rs` & `protocol.rs`**: Dual-thread single-writer daemon (`--collector-bg` or embedded inside `dashboard --serve-background`), Unix domain socket (`0600`) / Windows `127.0.0.1` TCP + 128-bit token framing, and per-`conversation_key` debounced enrichment worker.
 
 ---
 

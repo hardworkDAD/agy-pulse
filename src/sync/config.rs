@@ -326,6 +326,44 @@ impl SyncConfig {
         }
     }
 
+    /// Project a read-only `SyncConfigSummary` for ledger status and error redaction.
+    pub fn to_summary(&self) -> crate::domain::SyncConfigSummary {
+        let mut secrets = Vec::new();
+        let push_secret = |buf: &mut Vec<String>, opt: &Option<String>, bearer: bool| {
+            if let Some(trimmed) = opt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                buf.push(trimmed.to_string());
+                if bearer {
+                    buf.push(format!("Bearer {trimmed}"));
+                }
+            }
+        };
+        match &self.remote {
+            RemoteConfig::LocalDir { .. } => {}
+            RemoteConfig::WebDav {
+                password, token, ..
+            } => {
+                push_secret(&mut secrets, password, false);
+                push_secret(&mut secrets, token, true);
+            }
+            RemoteConfig::S3 {
+                access_key,
+                secret_key,
+                ..
+            } => {
+                push_secret(&mut secrets, access_key, false);
+                push_secret(&mut secrets, secret_key, false);
+            }
+            RemoteConfig::CfWorker { token, .. } => {
+                push_secret(&mut secrets, token, true);
+            }
+        }
+        crate::domain::SyncConfigSummary {
+            enabled: self.enabled,
+            remote_type: Some(self.remote_type_str().to_string()),
+            secrets,
+        }
+    }
+
     /// Return a redacted human-readable target summary containing zero credentials.
     pub fn redacted_target(&self) -> String {
         let norm_prefix = normalize_prefix(&self.prefix);

@@ -7,8 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::config::PulseConfig;
-use crate::domain::PulseSnapshot;
+use crate::domain::{PulseConfig, PulseSnapshot};
 use crate::platform;
 
 pub const COLLECTOR_APP_ID: &str = "agy-pulse-collector";

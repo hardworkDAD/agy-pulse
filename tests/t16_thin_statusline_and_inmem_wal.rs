@@ -17,15 +17,12 @@ use std::time::UNIX_EPOCH;
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
-use agy_pulse::collector::protocol::read_collector_state;
+use agy_pulse::collector::read_collector_state;
 #[cfg(unix)]
-use agy_pulse::collector::protocol::{
-    COLLECTOR_APP_ID, CollectorStateFile, CollectorWireRequest, CollectorWireResponse,
-    collector_state_path, read_frame, write_frame,
-};
-#[cfg(unix)]
-use agy_pulse::collector::snapshot::{
-    COLLECTOR_SNAPSHOT_SCHEMA_VERSION, CollectedStatuslineSnapshot, conversation_snapshot_path,
+use agy_pulse::collector::{
+    COLLECTOR_APP_ID, COLLECTOR_SNAPSHOT_SCHEMA_VERSION, CollectedStatuslineSnapshot,
+    CollectorStateFile, CollectorWireRequest, CollectorWireResponse, collector_state_path,
+    conversation_snapshot_path, read_frame, write_frame,
 };
 #[cfg(unix)]
 use agy_pulse::config::{DisplayConfig, LanguageSetting, PulseConfig, QuotaStyle};

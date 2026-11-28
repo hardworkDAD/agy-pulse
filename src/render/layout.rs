@@ -1,6 +1,7 @@
-use crate::config::{LanguageSetting, PulseConfig};
-use crate::domain::{ChildModelSpeed, PulseSnapshot, compact_model_name, format_usd};
-use crate::platform::TerminalCaps;
+use crate::domain::{
+    ChildModelSpeed, LanguageSetting, PulseConfig, PulseSnapshot, TerminalCaps,
+    compact_model_name, format_usd,
+};
 
 use super::context_bar::{
     Glyphs, render_context_monitor_line, render_model_cache_line,

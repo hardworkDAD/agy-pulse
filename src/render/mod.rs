@@ -10,7 +10,7 @@ pub use width::{
     truncate_ansi_to_display_width, truncate_plain_to_display_width,
 };
 
-use crate::config::LanguageSetting;
+use crate::domain::LanguageSetting;
 
 /// Resolve `LanguageSetting::Auto` using an explicit locale string (pure, no env access).
 pub fn resolve_language_from_locale(setting: LanguageSetting, locale: Option<&str>) -> LanguageSetting {

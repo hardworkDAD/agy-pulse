@@ -1,4 +1,4 @@
-use crate::config::{LanguageSetting, ThemeConfig};
+use crate::domain::{LanguageSetting, ThemeConfig};
 
 pub(super) const RESET: &str = "\x1b[0m";
 pub(super) const BOLD: &str = "\x1b[1m";

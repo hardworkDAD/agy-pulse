@@ -1,4 +1,5 @@
 mod accounting;
+mod config;
 mod model;
 mod pricing;
 mod quota;
@@ -7,6 +8,10 @@ mod sync;
 pub use accounting::{
     format_usd, is_bedrock_model_id, is_vertex_model_id, resolve_cascade_cost_usd,
     resolve_native_cost_usd,
+};
+pub use config::{
+    CacheHitThresholdsConfig, DisplayConfig, IconsConfig, LanguageSetting, PulseConfig, QuotaStyle,
+    TerminalCaps, ThemeColors, ThemeConfig, ThresholdsConfig,
 };
 pub use model::{
     ChildModelSpeed, ContextWindowSnapshot, CostSnapshot, HostIdentity, ImageQuotaExhausted,
@@ -23,5 +28,7 @@ pub use quota::{
 };
 pub use sync::{
     DeviceIdentity, LedgerSyncMeta, LocalMonthlyExport, LocalMonthlyExportMap, QuotaSnapshot,
-    SyncConvRecord, SyncDeviceRecord, SyncStepRecord, UNASSIGNED_ACCOUNT_ID, normalize_account_id,
+    SyncConfigSummary, SyncConvRecord, SyncDeviceRecord, SyncStepRecord, UNASSIGNED_ACCOUNT_ID,
+    normalize_account_id, parse_sync_config_summary, redact_sync_secrets,
+    strip_url_userinfo_in_text,
 };

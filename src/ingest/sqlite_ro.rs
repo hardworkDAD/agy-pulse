@@ -351,7 +351,7 @@ where
 }
 
 /// Remove stale `agy-pulse-db-*` temporary directories left behind by crashed runs.
-pub fn cleanup_stale_temp_db_dirs(max_age: Duration) -> usize {
+pub(crate) fn cleanup_stale_temp_db_dirs(max_age: Duration) -> usize {
     let mut dirs_to_scan = vec![crate::platform::temp_dir()];
     let fast_temp = crate::platform::resolve_fast_temp_dir();
     if fast_temp != dirs_to_scan[0] {

@@ -5,9 +5,8 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::CollectedEnrichment;
-use crate::config::PulseConfig;
-use crate::domain::{CostSnapshot, PulseSnapshot};
+use crate::app::CollectedEnrichment;
+use crate::domain::{CostSnapshot, PulseConfig, PulseSnapshot};
 use crate::ingest::{HostReader, StdinLiveFields};
 use crate::platform;
 

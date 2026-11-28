@@ -23,7 +23,7 @@ use crate::profile::{IngestStageTimings, Stage, set_stage};
 
 pub use db_telemetry::ConversationDbRecord;
 pub use proto_wire::{GenerationMetadataRow, GenerationTelemetryStep, TrajectoryMetadata};
-pub use sqlite_ro::cleanup_stale_temp_db_dirs;
+pub(crate) use sqlite_ro::cleanup_stale_temp_db_dirs;
 
 /// Pure in-memory stdin extraction result for thin frontend snapshot merging.
 #[derive(Debug, Clone)]

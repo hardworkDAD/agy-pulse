@@ -5,6 +5,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::app;
 use crate::ingest::HostReader;
 use crate::platform;
 use crate::profile::{self, Profiler, Stage};
@@ -104,7 +105,7 @@ fn state_matches_current_binary(state: &CollectorStateFile, exe_mtime_ms: i64) -
     if state.app != COLLECTOR_APP_ID || !platform::is_process_alive(state.pid) {
         return false;
     }
-    if state.version != crate::VERSION {
+    if state.version != app::VERSION {
         return false;
     }
     exe_mtime_matches(state.exe_mtime_ms, exe_mtime_ms)
@@ -205,7 +206,7 @@ fn render_fallback(
             return format!("stdin={stdin_ms} collector_fallback=1 disabled=1");
         }
         let merged = merge_live_stdin_into_snapshot(cached, stdin_text, fallback_cwd);
-        let (output, render_ms) = crate::render_snapshot_for_terminal(&merged, &cached.config);
+        let (output, render_ms) = app::render_snapshot_for_terminal(&merged, &cached.config);
         write_stdout_safely(&output);
         return format!("stdin={stdin_ms} collector_fallback=1 render={render_ms}");
     }
@@ -215,12 +216,12 @@ fn render_fallback(
             return format!("stdin={stdin_ms} collector_fallback=1 disabled=1");
         }
         let merged = merge_live_stdin_into_global(glob, stdin_text, fallback_cwd);
-        let (output, render_ms) = crate::render_snapshot_for_terminal(&merged, &glob.config);
+        let (output, render_ms) = app::render_snapshot_for_terminal(&merged, &glob.config);
         write_stdout_safely(&output);
         return format!("stdin={stdin_ms} collector_fallback=1 global=1 render={render_ms}");
     }
 
-    let output = crate::render_hard_timeout_fallback(stdin_text, fallback_cwd);
+    let output = app::render_hard_timeout_fallback(stdin_text, fallback_cwd);
     write_stdout_safely(&output);
     format!("stdin={stdin_ms} hard_timeout_fallback=1")
 }
@@ -233,17 +234,17 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
 
     profile::set_stage(Stage::Stdin);
     let t_stdin = Instant::now();
-    let (stdin_text, timed_out) = crate::read_stdin_with_timeout(crate::STDIN_HARD_TIMEOUT);
+    let (stdin_text, timed_out) = app::read_stdin_with_timeout(app::STDIN_HARD_TIMEOUT);
     let stdin_ms = t_stdin.elapsed().as_millis() as u64;
     if timed_out && stdin_text.trim().is_empty() {
         platform::write_error_log_safely("Statusline stdin read timed out after 1500ms");
     }
 
-    let hard_cap = crate::resolve_post_stdin_hard_cap(process_start.elapsed());
+    let hard_cap = app::resolve_post_stdin_hard_cap(process_start.elapsed());
     let fallback_cwd = env::current_dir().unwrap_or_default();
 
     if hard_cap <= Duration::from_millis(5) {
-        let output = crate::render_hard_timeout_fallback(&stdin_text, &fallback_cwd);
+        let output = app::render_hard_timeout_fallback(&stdin_text, &fallback_cwd);
         write_stdout_safely(&output);
         profiler.finish(&format!("stdin={stdin_ms} hard_timeout_fallback=1"));
         return;
@@ -260,7 +261,7 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
     let has_warm_snapshot = warm_snap.is_some();
 
     let wait_budget = resolve_wait_budget(hard_cap, has_warm_snapshot);
-    let soft_budget_ms = (crate::STATUSLINE_POST_STDIN_BUDGET.min(hard_cap).as_millis() as u64).max(100);
+    let soft_budget_ms = (app::STATUSLINE_POST_STDIN_BUDGET.min(hard_cap).as_millis() as u64).max(100);
     let env_overrides = collect_forwarded_env_overrides();
 
     let rpc_deadline = Instant::now() + wait_budget;
@@ -303,7 +304,7 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
                     ready_summary = Some(if !payload.enabled {
                         payload.summary
                     } else {
-                        let (output, render_ms) = crate::render_snapshot_for_terminal(
+                        let (output, render_ms) = app::render_snapshot_for_terminal(
                             &payload.snapshot,
                             &payload.config,
                         );
@@ -347,13 +348,14 @@ pub(crate) fn run_thin_statusline_pipeline(process_start: Instant) {
 #[cfg(test)]
 mod tests {
     use super::state_matches_current_binary;
+    use crate::app;
     use crate::collector::protocol::{COLLECTOR_APP_ID, CollectorStateFile};
 
     fn sample_state(exe_mtime_ms: i64) -> CollectorStateFile {
         CollectorStateFile {
             app: COLLECTOR_APP_ID.to_string(),
             pid: std::process::id(),
-            version: crate::VERSION.to_string(),
+            version: app::VERSION.to_string(),
             exe_mtime_ms,
             mode: "collector".to_string(),
             socket_path: None,

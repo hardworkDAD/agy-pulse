@@ -333,7 +333,7 @@ fn takeover_existing_collector(existing: &CollectorStateFile) {
 
 fn is_same_collector_binary(existing: &CollectorStateFile, my_exe_mtime: i64) -> bool {
     existing.app == COLLECTOR_APP_ID
-        && existing.version == crate::VERSION
+        && existing.version == crate::app::VERSION
         && exe_mtime_matches(existing.exe_mtime_ms, my_exe_mtime)
 }
 
@@ -350,7 +350,7 @@ fn start_collector_internal(
     let state = CollectorStateFile {
         app: COLLECTOR_APP_ID.to_string(),
         pid: owner_pid,
-        version: crate::VERSION.to_string(),
+        version: crate::app::VERSION.to_string(),
         exe_mtime_ms: platform::current_exe_mtime_ms(),
         mode: mode.as_str().to_string(),
         socket_path: listener.socket_path_str(),
@@ -442,7 +442,7 @@ fn handle_ipc_connection(
                 &mut stream,
                 &CollectorWireResponse::Pong {
                     pid: owner_pid,
-                    version: crate::VERSION.to_string(),
+                    version: crate::app::VERSION.to_string(),
                     mode: mode.as_str().to_string(),
                     worker_busy: busy,
                 },
@@ -732,7 +732,7 @@ fn run_worker_loop(
         let deadline = Instant::now() + soft_budget;
 
         let enrichment = platform::with_env_overrides(&job.req.env_overrides, || {
-            let res = crate::collect_statusline_enrichment(
+            let res = crate::app::collect_statusline_enrichment(
                 &job.req.stdin_text,
                 &job.req.fallback_cwd,
                 job.req.stdin_ms,
@@ -875,7 +875,7 @@ mod tests {
         CollectorStateFile {
             app: COLLECTOR_APP_ID.to_string(),
             pid: std::process::id(),
-            version: crate::VERSION.to_string(),
+            version: crate::app::VERSION.to_string(),
             exe_mtime_ms,
             mode: "collector".to_string(),
             socket_path: None,

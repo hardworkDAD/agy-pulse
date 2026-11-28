@@ -760,8 +760,9 @@ fn read_sync_status_standalone(
     cfg: Option<&crate::sync::SyncConfig>,
     in_progress: bool,
 ) -> SyncStatusOverview {
+    let summary = cfg.map(crate::sync::SyncConfig::to_summary);
     match LedgerStore::open_readonly_at(&shared.ledger_path) {
-        Ok(store) => store.sync_status_overview(cfg, in_progress),
+        Ok(store) => store.sync_status_overview(summary.as_ref(), in_progress),
         Err(_) => SyncStatusOverview {
             enabled: cfg.is_some_and(|c| c.enabled),
             remote_type: cfg.map(|c| c.remote_type_str().to_string()),
@@ -899,7 +900,8 @@ fn handle_sync_remote(
     let store = match LedgerStore::open_at(&shared.ledger_path) {
         Ok(s) => s,
         Err(err) => {
-            let redacted = redact_sync_error_message(&err.to_string(), Some(&cfg));
+            let summary = cfg.to_summary();
+            let redacted = redact_sync_error_message(&err.to_string(), Some(&summary));
             drop(guard);
             let sync_status = SyncStatusOverview {
                 enabled: true,
@@ -931,11 +933,12 @@ fn handle_sync_remote(
 
     let before_quotas = store.query_latest_account_quotas().unwrap_or_default();
     let sync_result = build_remote(&cfg).and_then(|remote| sync_both(&store, remote.as_ref(), &cfg, false));
+    let cfg_summary = cfg.to_summary();
 
     match sync_result {
         Ok(outcome) if outcome.kind == SyncOutcomeKind::AlreadyRunning => {
             drop(guard);
-            let sync_status = store.sync_status_overview(Some(&cfg), true);
+            let sync_status = store.sync_status_overview(Some(&cfg_summary), true);
             send_json_value(
                 stream,
                 200,
@@ -965,7 +968,7 @@ fn handle_sync_remote(
                 || outcome.remote_cache_cleared
                 || quotas_changed;
             drop(guard);
-            let sync_status = store.sync_status_overview(Some(&cfg), false);
+            let sync_status = store.sync_status_overview(Some(&cfg_summary), false);
             send_json_value(
                 stream,
                 200,
@@ -985,10 +988,10 @@ fn handle_sync_remote(
             );
         }
         Err(err) => {
-            let redacted = redact_sync_error_message(&err.to_string(), Some(&cfg));
+            let redacted = redact_sync_error_message(&err.to_string(), Some(&cfg_summary));
             let _ = store.set_sync_meta_field("last_sync_error", Some(&redacted));
             drop(guard);
-            let mut sync_status = store.sync_status_overview(Some(&cfg), false);
+            let mut sync_status = store.sync_status_overview(Some(&cfg_summary), false);
             sync_status.last_error = Some(redacted.clone());
             send_json_value(
                 stream,

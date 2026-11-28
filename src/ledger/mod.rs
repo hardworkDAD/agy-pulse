@@ -381,13 +381,13 @@ impl LedgerStore {
         query::query_overview(&self.conn, &self.ledger_path, filter, sync::current_epoch_ms())
     }
 
-    /// Build current `SyncStatusOverview` from `ledger_meta` and active `SyncConfig`.
+    /// Build current `SyncStatusOverview` from `ledger_meta` and active `SyncConfigSummary`.
     pub fn sync_status_overview(
         &self,
-        cfg: Option<&crate::sync::SyncConfig>,
+        summary: Option<&crate::domain::SyncConfigSummary>,
         in_progress: bool,
     ) -> SyncStatusOverview {
-        query::build_sync_status_overview(&self.conn, cfg, in_progress)
+        query::build_sync_status_overview(&self.conn, summary, in_progress)
     }
 
     /// Export filtered overview as pretty-printed JSON.

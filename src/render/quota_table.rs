@@ -1,10 +1,8 @@
-use crate::config::{PulseConfig, QuotaStyle};
 use crate::domain::{
-    ProviderQuota, ProviderQuotaSummary, QuotaWindow, format_quota_percent, format_reset_countdown,
-    has_valid_provider_quota, is_openai_provider_key, pick_critical_window,
-    prune_expired_provider_quota,
+    ProviderQuota, ProviderQuotaSummary, PulseConfig, QuotaStyle, QuotaWindow, TerminalCaps,
+    format_quota_percent, format_reset_countdown, has_valid_provider_quota, is_openai_provider_key,
+    pick_critical_window, prune_expired_provider_quota,
 };
-use crate::platform::TerminalCaps;
 
 use super::context_bar::{Glyphs, ProgressBarStyle, create_progress_bar};
 use super::i18n::{RESET, ThemePalette};

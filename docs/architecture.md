@@ -22,9 +22,9 @@
 ┌────────────────────────────────────▼────────────────────────────────────┐
 │  NATIVE BINARIES (~/.local/bin/ or %LOCALAPPDATA%\agy-pulse\bin\)       │
 │   agy-pulse (statusLine.command & CLI) · agypl (CLI alias)              │
-│   Single Cargo crate (src/lib.rs) with 9 cohesive deep modules:          │
-│     domain · render · ingest · ledger · sync · config · dashboard · ops │
-│     + platform (OS isolation)                                           │
+│   Single Cargo crate (src/lib.rs + internal app.rs) with cohesive deep modules:
+│     domain · render · ingest · ledger · sync · config · collector · dashboard · ops
+│     + platform (OS isolation) + profile                                 │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -33,37 +33,47 @@
 ## Deep-Module Dependency Graph
 
 ```
-src/main.rs / src/bin/agypl.rs  ──> agy_pulse::run_cli()
+src/main.rs / src/bin/agypl.rs  ──> agy_pulse::run_cli() ──> app (internal orchestration)
   ├── ops        (installer, uninstall, `account assign`, GitHub updater)
   │     ├── ledger
   │     ├── dashboard (stop daemon / remove shortcuts on uninstall)
   │     └── platform
   ├── dashboard  (127.0.0.1 HTTP server, SSE keepalive, launcher, embedded SPA, config_api)
+  │     ├── collector (embedded CollectorServerHandle lifecycle & state cleanup)
   │     ├── sync   (non-blocking async pull/push, raw config snapshot & probe)
   │     ├── ledger
   │     ├── config (global config snapshot, unknown-key deep merge & live preview)
+  │     ├── render
+  │     └── platform
+  ├── collector  (thin statusline IPC client, single-writer daemon, tmpfs snapshots; ADR-0006)
+  │     ├── app    (statusline enrichment pipeline, terminal render helpers, VERSION)
+  │     ├── ingest
+  │     ├── domain
+  │     ├── profile
+  │     └── platform
+  ├── config     (deep-merged config, atomic 0600 save, interactive raw-TTY wizard)
+  │     ├── domain
   │     ├── render
   │     └── platform
   ├── sync       (SyncRemote trait, wire format v1, 4 backends, --sync-bg & CLI)
   │     ├── ledger
   │     ├── domain
   │     └── platform
-  ├── config     (deep-merged config, atomic 0600 save, interactive raw-TTY wizard)
-  │     ├── render
-  │     └── platform
   ├── ledger     (bundled SQLite WAL Schema v4, CLI/IDE backfill, stats CLI, CSV/JSON)
-  │     ├── sync   (read active SyncConfig for syncStatus overview)
   │     ├── ingest
-  │     ├── domain
+  │     ├── domain (pure SyncConfigSummary JSON parsing & secret redaction; zero sync dep)
   │     ├── config
   │     ├── render
   │     └── platform
   ├── ingest     (HostReader: stdin, incremental transcript, lock-free .db + Protobuf)
   │     ├── domain
+  │     ├── profile
   │     └── platform
   ├── render     (100% pure in-memory Statusline layout, quota table, width & i18n)
   │     └── domain
-  └── domain     (100% pure in-memory types, unified pricing/accounting, quota, sync types)
+  ├── platform   (OS isolation: Unix/Windows TTY, paths, atomic 0600/0700, process control)
+  │     └── domain (TerminalCaps re-export)
+  └── domain     (100% pure in-memory types, config values, pricing/accounting, quota, sync types)
 ```
 
 ---
@@ -76,7 +86,7 @@ src/main.rs / src/bin/agypl.rs  ──> agy_pulse::run_cli()
 2. **Pure In-Memory Kernel (`domain` & `render`)**:
    - `src/domain/` and `src/render/` perform zero filesystem I/O, zero network calls, zero subprocesses, and zero implicit clock reads; timestamps (`observed_at_ms`) and `TerminalCaps` are passed explicitly as values.
 3. **Lock-Free Read-Only Host DB Ingestion (`ingest`)**:
-   - Reads `<root>/conversations/*.db` without interfering with active `agy` writers: static databases open with `?immutable=1`; databases with a non-empty `-wal` or active write state copy `.db` + `-wal` + `-shm` into an isolated temp directory before opening read-only.
+   - Reads `<root>/conversations/*.db` without interfering with active `agy` writers: static databases without a `-wal` open with `?immutable=1`; databases with a non-empty `-wal` or active write state first merge committed WAL frames purely in memory and load via `sqlite3_deserialize` (`memdb`) — zero temp directory writes or host file locks (falling back to an isolated `TempDir` copy with `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE` only for oversized/racy DBs).
    - Zero-copy Protobuf wire decoding (`proto_wire.rs`) extracts `CheckpointConfig.max_context_tokens` (`gen_metadata` `f1.f9.f10.f4`, `executor_metadata` `f10.f2.f5`), `systemPromptTokens` (`f4.f1`), input/output/cache tokens, TTFT (`f1.f11`), streaming duration (`f1.f12`), and **Cascade** parent/root lineage (`parent_cascade_id`, `root_cascade_id`).
 4. **Unified Pricing & Single SQLite WAL Ledger (`domain::accounting` + `ledger`)**:
    - Eliminates v1's split cost formulas and `daily-cost.json` spin-lock file. Every **Statusline** and **Dashboard** figure uses the same `calculate_token_cost` + `f4.f1` system prompt accounting.
@@ -91,7 +101,7 @@ src/main.rs / src/bin/agypl.rs  ──> agy_pulse::run_cli()
    - **Hot-path isolation & `--sync-bg`**: **Statusline** queries strictly filter `device_id = local_device_id`, optionally spawning a detached `agy-pulse --sync-bg` push guarded by `agy-pulse-sync.lock`, 15 s HTTP timeouts, and a 45 s hard watchdog. Global sync config (`agy-pulse-sync.json`, `0600`) is strictly isolated from workspace `agy-pulse.config.json`.
 7. **Local Dashboard Config Management & Write-Only Credential Contract (`dashboard::config_api`, [ADR-0005](./adr/0005-dashboard-local-config-management.md))**:
    - **Zero-login loopback + CSRF & strict same-origin**: `DashboardServer::start` generates a 32-byte (64-hex) process-scoped CSRF token injected into `dashboard.html` on `GET /` and `GET /settings` (`/settings/pulse`, `/settings/sync`). Every `/api/config/*` endpoint validates `X-Agy-Pulse-Token` in constant time, enforces strict same-origin (`Sec-Fetch-Site: same-origin` / loopback `Origin`), and requires `application/json` on mutating requests.
-   - **Single source of truth & unknown-key preservation**: The standalone Settings page reads and writes only the global `agy-pulse.config.json` (never touching workspace directories) and global `0600` `agy-pulse-sync.json`, using raw disk snapshots without writing environment overrides to disk, preserving unknown fields (`columnWidth`, custom keys), and reusing Rust `render_statusline` (`config::render_statusline_preview`) for live **Statusline** previews.
+   - **Single source of truth & unknown-key preservation**: The standalone Settings page reads and writes only the global `agy-pulse.config.json` (never touching workspace directories) and global `0600` `agy-pulse-sync.json`, using raw disk snapshots without writing environment overrides to disk (`AGY_PULSE_LANGUAGE` is applied by `config`; `AGY_PULSE_DASHBOARD_*` and terminal capability overrides are read directly by `dashboard` and `platform`), preserving unknown fields (`columnWidth`, custom keys), and reusing Rust `render_statusline` (`config::render_statusline_preview`) for live **Statusline** previews.
    - **Write-only credentials & optimistic concurrency**: `GET`/`PUT /api/config/sync` never echo plaintext secrets (`password`, `token`, `accessKey`, `secretKey`); `PUT` uses `keep` / `set` / `clear` directives (inheriting `keep` only within the same remote type) and `POST /api/config/sync/test` sanitizes errors via `redact_sync_error_message`. Both config files use per-resource `Mutex` locks and SHA-256 `version` checks (`409 Conflict` on mismatch), and `PUT`/`DELETE` immediately refresh `LedgerRuntime.sync_options` identity hints.
-8. **Panic-Free Library Gate**:
-   - `src/lib.rs` enforces `#![deny(clippy::unwrap_used, clippy::expect_used)]`; `run_cli()` wraps the Statusline pipeline in `catch_unwind`, logs errors safely to `agy-pulse-error.log` (symlink-checked `0600`), and exits `0`.
+9. **Thin Statusline Frontend & Single-Instance Collector (`collector` + `app`, [ADR-0006](./adr/0006-thin-statusline-collector-and-inmem-wal.md))**:
+   - `src/lib.rs` stays a thin crate root delegating `run_cli()` to internal `src/app.rs` (`pub(crate) mod app`), while `collector` isolates the thin statusline IPC client, `tmpfs` snapshot cache (`snap-<key>.json` / `snap-global.json`), and single-writer background collector daemon (`--collector-bg`, or embedded inside `dashboard --serve-background`), keeping the statusline hot path free of in-process SQLite opens.

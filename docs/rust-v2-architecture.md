@@ -43,46 +43,65 @@
 
 ## 三、 Rust 代码库深模块架构（Deep-Module Architecture）
 
-采用 **单一 Cargo 包（`src/lib.rs` + 极薄 `src/main.rs`）+ 7 个职责正交的深模块**，避免十几个微型子 Crate 带来的胶水代码膨胀，同时在模块间执行**严格单向无环依赖（DAG）**。
+采用 **单一 Cargo 包（极薄 `src/lib.rs` + `src/main.rs` + 内部 `src/app.rs` 编排层）+ 正交深模块**，避免十几个微型子 Crate 带来的胶水代码膨胀，同时在所有业务模块间执行**严格单向无环依赖（DAG）**。
 
 ### 1. 模块依赖方向图
 
 ```mermaid
 flowchart TD
-    CLI["main.rs / cli<br/>参数解析与进程退出兜底"]
-    OPS["ops<br/>安装/卸载 · GitHub 检更与自替换"]
-    DASH["dashboard<br/>127.0.0.1 HTTP · 保活连接 · 启动器"]
+    CLI["main.rs / lib.rs -> app<br/>CLI 路由与状态栏富化编排"]
+    OPS["ops<br/>安装/卸载 · 账号归属 · GitHub 自更新"]
+    DASH["dashboard<br/>127.0.0.1 HTTP · 保活 · 配置 API"]
+    COLL["collector<br/>薄状态栏 IPC · tmpfs 快照 · 后台单写采集"]
+    SYNC["sync<br/>多机对象同步 (4 后端 · Wire v1)"]
     CFG["config<br/>强类型配置 · 原子写 · TUI 向导"]
     LEDGER["ledger<br/>统一 SQLite WAL 账本与日/周汇总"]
-    INGEST["ingest<br/>宿主 stdin / Transcript / .db 无锁摄取"]
+    INGEST["ingest<br/>宿主 stdin / Transcript / 内存 WAL .db 摄取"]
     RENDER["render<br/>纯函数状态栏排版 · 宽字符与主题"]
     PLATFORM["platform<br/>OS 差异隔离 (Unix / Windows / macOS)"]
-    DOMAIN["domain<br/>核心领域类型 · 唯一计费与配额纯逻辑"]
+    DOMAIN["domain<br/>核心领域类型 · 配置值类型 · 唯一计费/配额/摘要纯逻辑"]
 
     CLI --> OPS
     CLI --> DASH
+    CLI --> COLL
+    CLI --> SYNC
     CLI --> CFG
     CLI --> LEDGER
-    CLI --> INGEST
-    CLI --> RENDER
-    CLI --> PLATFORM
 
-    DASH --> LEDGER
-    DASH --> INGEST
-    DASH --> CFG
-    DASH --> PLATFORM
-
-    CFG --> RENDER
-    OPS --> CFG
+    OPS --> DASH
+    OPS --> LEDGER
     OPS --> PLATFORM
 
+    DASH --> COLL
+    DASH --> SYNC
+    DASH --> LEDGER
+    DASH --> CFG
+    DASH --> RENDER
+    DASH --> PLATFORM
+
+    COLL --> INGEST
+    COLL --> DOMAIN
+    COLL --> PLATFORM
+
+    SYNC --> LEDGER
+    SYNC --> DOMAIN
+    SYNC --> PLATFORM
+
+    CFG --> DOMAIN
+    CFG --> RENDER
+    CFG --> PLATFORM
+
     LEDGER --> INGEST
+    LEDGER --> CFG
+    LEDGER --> RENDER
     LEDGER --> DOMAIN
+    LEDGER --> PLATFORM
 
     INGEST --> DOMAIN
     INGEST --> PLATFORM
 
     RENDER --> DOMAIN
+    PLATFORM --> DOMAIN
 ```
 
 > [!IMPORTANT]
@@ -93,26 +112,35 @@ flowchart TD
 ```text
 Cargo.toml
 src/
-├── main.rs                  # 极薄入口：解析 CLI、设 1500ms 守护超时、统一捕获错误写日志并 exit(0)
-├── lib.rs                   # 模块装配（内部模块默认 pub(crate)，严控可见性）
-├── domain/                  # 【深模块 1：纯领域内核（零 I/O）】
+├── main.rs                  # 极薄入口：调用 agy_pulse::run_cli() 并退出
+├── lib.rs                   # 极薄库根：#![deny(clippy::unwrap_used, clippy::expect_used)] + 模块声明
+├── app.rs                   # 内部应用编排模块：CLI 路由、状态栏富化流水线与 1500ms/4s 守护兜底
+├── domain/                  # 【深模块 1：纯领域内核（零 I/O，零跨模块依赖）】
 │   ├── mod.rs               # 导出标准领域模型（严格对齐 GLOSSARY.md 命名）
+│   ├── config.rs            # PulseConfig, DisplayConfig, ThemeConfig, LanguageSetting, TerminalCaps 等纯值类型
 │   ├── model.rs             # ConversationId, Cascade, TokenUsage, PulseSnapshot 等值类型
 │   ├── pricing.rs           # 模型费率表与 >200k 阶梯定价数据
 │   ├── accounting.rs        # 唯一权威 Token 口径归一化与费用计算纯函数
-│   └── quota.rs             # 宿主配额窗口解析、5h/周临界窗口选取纯函数
+│   ├── quota.rs             # 宿主配额窗口解析、5h/周临界窗口选取纯函数
+│   └── sync.rs              # 跨机同步领域类型、只读 SyncConfigSummary 解析与凭据脱敏纯函数
 ├── ingest/                  # 【深模块 2：宿主只读摄取器（对外仅暴露 HostReader）】
-│   ├── mod.rs               # HostReader 窄接口：read_live_pulse() / scan_deltas()
+│   ├── mod.rs               # HostReader 窄接口：read_live_pulse() / read_conversation_db()
 │   ├── stdin.rs             # 宿主标准输入异构 JSON 反序列化与容错归一化
 │   ├── transcript.rs        # (私有) transcript.jsonl 字节偏移增量扫描与缓存校验
-│   ├── sqlite_ro.rs         # (私有) 唯一宿主 .db 安全打开器（immutable=1 / 活跃 WAL 临时快照）
-│   ├── proto_wire.rs        # (私有) ~150 行零拷贝 Protobuf wire 解码（对外部模块完全隐藏）
+│   ├── sqlite_ro.rs         # (私有) 唯一宿主 .db 安全打开器（immutable=1 / 纯内存 sqlite3_deserialize WAL 合并）
+│   ├── proto_wire.rs        # (私有) 手写零拷贝 Protobuf wire 解码（对外部模块完全隐藏）
 │   └── workspace.rs         # (私有) 纯文件直读 .git/HEAD（复杂 worktree 才降级 git 命令）与规则统计
 ├── ledger/                  # 【深模块 3：统一遥测账本（合并原 ledger + daily-cost）】
 │   ├── mod.rs               # LedgerStore 窄接口：sync() / rolling_costs() / query_overview() / export()
-│   ├── schema.rs            # (私有) rusqlite (bundled) WAL 建表与索引管理
-│   ├── sync.rs              # (私有) CLI + IDE 双源会话增量入库与 15s 节流
+│   ├── schema.rs            # (私有) rusqlite (bundled) WAL 建表与索引管理（Schema v4）
+│   ├── sync.rs              # (私有) CLI + IDE 双源会话增量入库与 60s 节流
 │   └── query.rs             # (私有) 今日/7日滚动费用、看板多维聚合与 CSV/JSON 导出
+├── sync/                    # 【深模块 4：多机对象同步引擎（ADR-0004）】
+│   ├── mod.rs               # SyncRemote 契约与门面导出
+│   └── ...                  # (内部) local_dir / webdav / s3 (SigV4) / cf_worker 与 Wire Format v1
+├── collector/               # 【深模块 5：薄状态栏前端与单实例采集守护进程（ADR-0006）】
+│   ├── mod.rs               # CollectorServerHandle 与状态栏门面导出
+│   └── ...                  # (私有) client / protocol / server / snapshot（tmpfs 快照与防抖队列）
 ├── render/                  # 【深模块 4：纯函数终端渲染引擎（零 I/O）】
 │   ├── mod.rs               # 唯一入口 render_statusline(&PulseSnapshot, &DisplayConfig, TerminalCaps) -> String
 │   ├── layout.rs            # (私有) 顶栏/次栏组装与窄终端多级优雅降级
@@ -144,11 +172,13 @@ src/
 
 | 模块 | 对外暴露的全部核心接口（Interface） | 隐藏在内部的复杂度（Deep Implementation） |
 |---|---|---|
-| `domain` | 值类型 + `calculate_cost(model, usage)` + `resolve_quota(raw)` | 数十款模型正则/前缀匹配、>200k 阶梯费率、系统提示词与缓存字数口径对齐、5h/周窗口临界计算 |
-| `ingest` | `HostReader::read_live_pulse(&stdin)`、`HostReader::scan_deltas(&cursors)` | 异构字段兼容、64MB 大日志流式尾读、SHA-256 头部偏移缓存、WAL 临时拷贝防锁冲突、手写 Protobuf 解码 |
+| `domain` | 值类型（含 `PulseConfig`/`TerminalCaps`）+ `calculate_cost(model, usage)` + `resolve_quota(raw)` + `parse_sync_config_summary` | 数十款模型正则/前缀匹配、>200k 阶梯费率、系统提示词与缓存字数口径对齐、5h/周窗口临界计算 |
+| `ingest` | `HostReader::read_live_pulse(&stdin)`、`HostReader::read_conversation_db(path)` | 异构字段兼容、64MB 大日志流式尾读、SHA-256 头部偏移缓存、纯内存 `sqlite3_deserialize` WAL 合并、手写 Protobuf 解码 |
 | `ledger` | `LedgerStore::{open, sync, rolling_costs, query_overview, export}` | SQLite WAL 并发控制、CLI/IDE 双源去重、压缩/重置时的增量游标防倒扣、时间桶/任务树子代理折叠聚合（彻底淘汰原 `daily-cost.json.lock` 自旋文件锁） |
-| `render` | `render_statusline(snapshot, config, term) -> String` | 终端宽度自适应截断、Unicode/ASCII 图标切换、ANSI 颜色嵌套安全截断、中英文双语格式化 |
-| `dashboard` | `run_command(DashboardCmd)` | 端口冲突回退、安全响应头、后台长连接保活与关闭回收、浏览器 App 模式探测、三端桌面快捷方式指纹管理 |
+| `sync` | `SyncRemote`、`build_remote`、`push`/`pull`/`sync_both`/`prune_device` | Wire Format v1 分月压缩分片、4 种远端适配（含纯 Rust SigV4）、并发锁与脱敏处理 |
+| `collector` | `CollectorServerHandle`、`run_collector_bg_cli`、`run_thin_statusline_pipeline` | 本地 UDS/TCP IPC、防抖单写入者后台采集、`tmpfs` 预计算快照合并 |
+| `render` | `render_statusline(snapshot, config, term, lang) -> String` | 终端宽度自适应截断、Unicode/ASCII 图标切换、ANSI 颜色嵌套安全截断、中英文双语格式化 |
+| `dashboard` | `run_dashboard_cli` / `DashboardServer` | 端口冲突回退、安全响应头、CSRF/同源校验、后台长连接保活与关闭回收、浏览器 App 模式探测、三端桌面快捷方式指纹管理 |
 | `ops` | `install()`, `uninstall(opts)`, `maybe_spawn_update_check()`, `self_update(source)` | `settings.json` 损坏备份恢复、GitHub Releases 包下载、SHA-256 校验、Windows 运行中 `.exe` 改名替换 |
 
 ---

@@ -16,6 +16,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+pub use crate::domain::TerminalCaps;
+
 thread_local! {
     static THREAD_ENV_OVERRIDES: RefCell<Option<HashMap<String, Option<String>>>> = const { RefCell::new(None) };
 }
@@ -161,13 +163,6 @@ pub fn current_desktop_os() -> DesktopOs {
     {
         DesktopOs::Linux
     }
-}
-
-/// Terminal rendering capabilities probed from OS environment and TTY state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalCaps {
-    pub unicode: bool,
-    pub columns: Option<u16>,
 }
 
 /// Adjust live TTY width by reserving 3 columns on wide terminals (>82 cols), matching v1.

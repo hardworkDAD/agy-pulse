@@ -6,9 +6,9 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::domain::{
-    ProviderQuotaSummary, UNASSIGNED_ACCOUNT_ID, compact_model_name, normalize_account_id,
+    ProviderQuotaSummary, SyncConfigSummary, UNASSIGNED_ACCOUNT_ID, compact_model_name,
+    normalize_account_id, parse_sync_config_summary, redact_sync_secrets,
 };
-use crate::sync::{RemoteConfig, SyncConfig, load_sync_config};
 
 use super::LedgerError;
 
@@ -1589,65 +1589,9 @@ fn sort_account_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
     list
 }
 
-fn strip_url_userinfo_in_text(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(idx) = rest.find("://") {
-        let after_scheme = &rest[idx + 3..];
-        let auth_end = after_scheme
-            .find(|c: char| c == '/' || c == '?' || c == '#' || c.is_whitespace())
-            .unwrap_or(after_scheme.len());
-        let authority = &after_scheme[..auth_end];
-        if let Some(at_idx) = authority.rfind('@') {
-            out.push_str(&rest[..idx + 3]);
-            out.push_str(&authority[at_idx + 1..]);
-            rest = &after_scheme[auth_end..];
-        } else {
-            out.push_str(&rest[..idx + 3]);
-            rest = after_scheme;
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Scrub credentials from `SyncConfig`, sync environment variables, and URL userinfo from error text.
-pub fn redact_sync_error_message(msg: &str, cfg: Option<&SyncConfig>) -> String {
-    let mut secrets: Vec<String> = Vec::new();
-    if let Some(c) = cfg {
-        match &c.remote {
-            RemoteConfig::LocalDir { .. } => {}
-            RemoteConfig::WebDav {
-                password, token, ..
-            } => {
-                if let Some(p) = password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                    secrets.push(p.to_string());
-                }
-                if let Some(t) = token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                    secrets.push(t.to_string());
-                    secrets.push(format!("Bearer {t}"));
-                }
-            }
-            RemoteConfig::S3 {
-                access_key,
-                secret_key,
-                ..
-            } => {
-                if let Some(ak) = access_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                    secrets.push(ak.to_string());
-                }
-                if let Some(sk) = secret_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                    secrets.push(sk.to_string());
-                }
-            }
-            RemoteConfig::CfWorker { token, .. } => {
-                if let Some(t) = token.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                    secrets.push(t.to_string());
-                    secrets.push(format!("Bearer {t}"));
-                }
-            }
-        }
-    }
+/// Scrub credentials from `SyncConfigSummary`, sync environment variables, and URL userinfo from error text.
+pub fn redact_sync_error_message(msg: &str, summary: Option<&SyncConfigSummary>) -> String {
+    let mut secrets: Vec<String> = summary.map(|s| s.secrets.clone()).unwrap_or_default();
 
     for env_name in [
         "AGY_PULSE_SYNC_TOKEN",
@@ -1666,22 +1610,25 @@ pub fn redact_sync_error_message(msg: &str, cfg: Option<&SyncConfig>) -> String 
         }
     }
 
-    let mut out = strip_url_userinfo_in_text(msg);
-    for secret in secrets {
-        if !secret.is_empty() {
-            out = out.replace(&secret, "[REDACTED]");
-        }
-    }
-    out.chars()
-        .filter(|c| !c.is_control())
-        .take(512)
-        .collect()
+    redact_sync_secrets(msg, &secrets)
 }
 
-/// Build a `SyncStatusOverview` from `ledger_meta` and the active `SyncConfig` (redacting errors).
+fn load_sync_config_summary() -> Result<Option<SyncConfigSummary>, String> {
+    let path = crate::platform::resolve_sync_config_path();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("Sync I/O error: {err}")),
+    };
+    parse_sync_config_summary(&raw)
+        .map(Some)
+        .map_err(|err| format!("Sync JSON error: {err}"))
+}
+
+/// Build a `SyncStatusOverview` from `ledger_meta` and the active `SyncConfigSummary` (redacting errors).
 pub(crate) fn build_sync_status_overview(
     conn: &Connection,
-    cfg: Option<&SyncConfig>,
+    summary: Option<&SyncConfigSummary>,
     in_progress: bool,
 ) -> SyncStatusOverview {
     let sync_meta = match super::sync::get_sync_meta(conn) {
@@ -1696,12 +1643,12 @@ pub(crate) fn build_sync_status_overview(
     let last_error = sync_meta
         .last_sync_error
         .as_deref()
-        .map(|err| redact_sync_error_message(err, cfg))
+        .map(|err| redact_sync_error_message(err, summary))
         .filter(|s| !s.is_empty());
 
     SyncStatusOverview {
-        enabled: cfg.is_some_and(|c| c.enabled),
-        remote_type: cfg.map(|c| c.remote_type_str().to_string()),
+        enabled: summary.is_some_and(|s| s.enabled),
+        remote_type: summary.and_then(|s| s.remote_type.clone()),
         last_push_ms: sync_meta.last_sync_push_ms,
         last_pull_ms: sync_meta.last_sync_pull_ms,
         last_error,
@@ -2543,13 +2490,13 @@ fn aggregate_overview(input: OverviewBuildInput<'_>) -> Result<LedgerOverview, L
         })
         .collect();
 
-    let sync_cfg_res = load_sync_config();
-    let sync_cfg = sync_cfg_res.as_ref().ok().and_then(|opt| opt.as_ref());
-    let mut sync_status = build_sync_status_overview(conn, sync_cfg, false);
+    let sync_cfg_res = load_sync_config_summary();
+    let sync_summary = sync_cfg_res.as_ref().ok().and_then(|opt| opt.as_ref());
+    let mut sync_status = build_sync_status_overview(conn, sync_summary, false);
     if let Err(err) = &sync_cfg_res
         && sync_status.last_error.is_none()
     {
-        sync_status.last_error = Some(redact_sync_error_message(&err.to_string(), None));
+        sync_status.last_error = Some(redact_sync_error_message(err, None));
     }
 
     let from_ms = if is_unbounded_all && min_recorded_ts != i64::MAX {

@@ -1250,9 +1250,10 @@ fn validate_sync_config_effective(to_save: &SyncConfig) -> Result<(), (String, S
     let mut effective = to_save.clone();
     effective.apply_env_overrides();
 
+    let summary = effective.to_summary();
     if effective.enabled {
         if let Err(err) = sync::build_remote(&effective) {
-            let redacted = redact_sync_error_message(&err.to_string(), Some(&effective));
+            let redacted = redact_sync_error_message(&err.to_string(), Some(&summary));
             let field = infer_sync_remote_error_field(&effective.remote, &redacted);
             return Err((field.to_string(), redacted));
         }
@@ -1277,7 +1278,7 @@ fn validate_sync_config_effective(to_save: &SyncConfig) -> Result<(), (String, S
             {
                 return Err((
                     "remote.url".to_string(),
-                    redact_sync_error_message(&err.to_string(), Some(&effective)),
+                    redact_sync_error_message(&err.to_string(), Some(&summary)),
                 ));
             }
         }
@@ -1292,7 +1293,7 @@ fn validate_sync_config_effective(to_save: &SyncConfig) -> Result<(), (String, S
             {
                 return Err((
                     "remote.endpoint".to_string(),
-                    redact_sync_error_message(&err.to_string(), Some(&effective)),
+                    redact_sync_error_message(&err.to_string(), Some(&summary)),
                 ));
             }
             if !bucket.trim().is_empty()
@@ -1300,7 +1301,7 @@ fn validate_sync_config_effective(to_save: &SyncConfig) -> Result<(), (String, S
             {
                 return Err((
                     "remote.bucket".to_string(),
-                    redact_sync_error_message(&err.to_string(), Some(&effective)),
+                    redact_sync_error_message(&err.to_string(), Some(&summary)),
                 ));
             }
         }
@@ -1493,12 +1494,13 @@ fn handle_put_sync_config(
     }
 
     if let Err(err) = sync::save_sync_config_to(&snap.path, &to_save) {
+        let summary = to_save.to_summary();
         send_config_error(
             stream,
             500,
             &format!(
                 "failed to save sync config: {}",
-                redact_sync_error_message(&err.to_string(), Some(&to_save))
+                redact_sync_error_message(&err.to_string(), Some(&summary))
             ),
             None,
         );
@@ -1621,7 +1623,8 @@ fn handle_post_sync_test(stream: &mut TcpStream, req: &HttpRequest) {
             );
         }
         Err(err) => {
-            let redacted = redact_sync_error_message(&err.to_string(), Some(&effective));
+            let summary = effective.to_summary();
+            let redacted = redact_sync_error_message(&err.to_string(), Some(&summary));
             send_json_value(
                 stream,
                 200,

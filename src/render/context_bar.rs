@@ -1,9 +1,8 @@
-use crate::config::{CacheHitThresholdsConfig, PulseConfig};
 use crate::domain::{
-    PulseSnapshot, TokenUsage, compact_model_name, is_usage_cache_inclusive,
-    model_includes_cache_in_input, resolve_cascade_cost_usd, resolve_model_display_name,
+    CacheHitThresholdsConfig, PulseConfig, PulseSnapshot, TerminalCaps, TokenUsage,
+    compact_model_name, is_usage_cache_inclusive, model_includes_cache_in_input,
+    resolve_cascade_cost_usd, resolve_model_display_name,
 };
-use crate::platform::TerminalCaps;
 
 use super::i18n::{BOLD, DIM, LanguageText, RESET, ThemePalette};
 use super::width::{
