@@ -502,18 +502,27 @@ pub(super) fn extract_step_timestamp_and_bot(buf: &[u8]) -> (Option<i64>, Option
     (ts_ms, bot_uuid)
 }
 
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn percent_decode_lossy(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0usize;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex_slice = &input[i + 1..i + 3];
-            if let Ok(b) = u8::from_str_radix(hex_slice, 16) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -581,5 +590,42 @@ pub(super) fn extract_trajectory_meta(buf: &[u8]) -> TrajectoryMetadata {
         branch,
         created_at_ms,
         cascade_id,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_lossy_handles_multibyte_and_malformed_sequences_without_panic() {
+        assert_eq!(percent_decode_lossy("%a€"), "%a€");
+        assert_eq!(percent_decode_lossy("%中文"), "%中文");
+        assert_eq!(percent_decode_lossy("%"), "%");
+        assert_eq!(percent_decode_lossy("%a"), "%a");
+        assert_eq!(percent_decode_lossy("abc%"), "abc%");
+        assert_eq!(percent_decode_lossy("abc%a"), "abc%a");
+        assert_eq!(percent_decode_lossy("%ZZ"), "%ZZ");
+        assert_eq!(percent_decode_lossy("%20"), " ");
+        assert_eq!(percent_decode_lossy("%E4%B8%AD%E6%96%87"), "中文");
+        assert_eq!(percent_decode_lossy("c++/%a€"), "c++/%a€");
+        assert_eq!(percent_decode_lossy("%FF"), "\u{FFFD}");
+    }
+
+    #[test]
+    fn normalize_workspace_uri_preserves_plus_and_decodes_safely() {
+        assert_eq!(
+            normalize_workspace_uri(Some(Cow::Borrowed("file:///path/c++/%a€"))),
+            Some("/path/c++/%a€".to_string())
+        );
+        assert_eq!(
+            normalize_workspace_uri(Some(Cow::Borrowed("file:///path/%E4%B8%AD%E6%96%87/proj%201/"))),
+            Some("/path/中文/proj 1".to_string())
+        );
+        assert_eq!(
+            normalize_workspace_uri(Some(Cow::Borrowed("file:///C:/Users/c++/%中文/"))),
+            Some("C:/Users/c++/%中文".to_string())
+        );
     }
 }

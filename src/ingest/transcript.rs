@@ -2197,29 +2197,7 @@ fn resolve_child_model_speeds(
 
 #[inline]
 fn find_byte(needle: u8, haystack: &[u8]) -> Option<usize> {
-    #[cfg(unix)]
-    {
-        if haystack.is_empty() {
-            return None;
-        }
-        // SAFETY: `haystack.as_ptr()` is valid for `haystack.len()` bytes.
-        let ptr = unsafe {
-            libc::memchr(
-                haystack.as_ptr().cast::<libc::c_void>(),
-                needle as libc::c_int,
-                haystack.len(),
-            )
-        };
-        if ptr.is_null() {
-            None
-        } else {
-            Some((ptr as usize) - (haystack.as_ptr() as usize))
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        haystack.iter().position(|&b| b == needle)
-    }
+    memchr::memchr(needle, haystack)
 }
 
 #[inline]
@@ -3521,6 +3499,24 @@ mod tests {
                 "mismatch for {:?}",
                 String::from_utf8_lossy(sample)
             );
+        }
+    }
+
+    #[test]
+    fn find_byte_matches_position_across_edge_cases() {
+        assert_eq!(find_byte(b'\n', b""), None);
+        assert_eq!(find_byte(b'\n', b"a"), None);
+        assert_eq!(find_byte(b'\n', b"\n"), Some(0));
+        assert_eq!(find_byte(b'\n', b"\n\n"), Some(0));
+        assert_eq!(find_byte(b'\n', b"abc\ndef\n"), Some(3));
+        for len in 0..=80 {
+            for pos in 0..len {
+                let mut buf = vec![b'x'; len];
+                buf[pos] = b'f';
+                assert_eq!(find_byte(b'f', &buf), Some(pos));
+            }
+            let absent = vec![b'x'; len];
+            assert_eq!(find_byte(b'f', &absent), None);
         }
     }
 }

@@ -1432,3 +1432,83 @@ fn t04_same_session_model_switch_refreshes_compaction_limit_immediately() {
     );
 }
 
+#[test]
+fn t04_malformed_percent_workspace_uri_in_db_does_not_panic() {
+    let env = IsolatedEnv::new();
+    fs::write(
+        env.global_cfg_dir.join("agy-pulse.config.json"),
+        serde_json::json!({
+            "language": "en",
+            "display": {
+                "showContextMonitor": true,
+                "quotaStyle": "none"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let conv_dir = env.data_dir.join("conversations");
+    fs::create_dir_all(&conv_dir).unwrap();
+    let conv_id = "conv-malformed-percent-uri";
+    let db_path = conv_dir.join(format!("{conv_id}.db"));
+
+    // trajectory_metadata_blob: f1 (submessage) -> f1 ("file:///path/c++/%a€"), f6 (cascade_id)
+    let mut traj_blob = pb_bytes(1, &pb_str(1, "file:///path/c++/%a€"));
+    traj_blob.extend(pb_str(6, conv_id));
+
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trajectory_metadata_blob (id, data) VALUES (?1, ?2)",
+            params!["main", traj_blob],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data) VALUES (?1, ?2)",
+            params![1i64, build_compaction_gen_metadata_blob(500_000)],
+        )
+        .unwrap();
+    }
+
+    // 1) HostReader::read_conversation_db must not panic on "%a€" and must preserve '+'
+    let rec = HostReader::read_conversation_db(&db_path).expect("must decode DB record");
+    assert_eq!(rec.cascade_id.as_deref(), Some(conv_id));
+    assert_eq!(
+        rec.trajectory.as_ref().and_then(|t| t.workspace.as_deref()),
+        Some("/path/c++/%a€")
+    );
+
+    // 2) Full CLI subprocess reading the same host DB must exit 0 without panic
+    let payload = serde_json::json!({
+        "conversation_id": conv_id,
+        "model": { "id": "gemini-4-carbon-high", "display_name": "Gemini 4 Carbon (High)" },
+        "context_window": {
+            "context_window_size": 1_000_000,
+            "current_usage": { "input_tokens": 100_000, "output_tokens": 0 }
+        }
+    })
+    .to_string();
+    let (code, out, err) = env.run_stdin(&payload, &[("COLUMNS", "120")]);
+    assert_eq!(code, 0, "CLI must not panic, stderr: {err}");
+    assert!(
+        !err.contains("panicked"),
+        "CLI stderr must not contain panic: {err}"
+    );
+    let plain = strip_ansi(&out);
+    assert!(
+        plain.contains("100K/500K"),
+        "CLI output must still read compaction limit from DB:\n{plain}"
+    );
+}
+
