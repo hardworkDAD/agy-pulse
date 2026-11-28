@@ -744,3 +744,466 @@ fn t06_pulse_config_snapshot_validation_preserving_save_and_preview() {
     assert!(rendered.contains("\x1b[34m"));
     assert!(plain.contains("上下文"));
 }
+
+#[test]
+fn t06_icons_all_five_fields_validated_and_persisted() {
+    use agy_pulse::config::{
+        IconsConfig, PulseConfig, read_global_config_snapshot_at,
+        save_global_pulse_config_preserving_unknown, validate_pulse_config,
+    };
+
+    let env = IsolatedEnv::new();
+    let cfg_path = env.global_cfg_dir.join("agy-pulse.config.json");
+
+    // 1. All 5 icon fields must reject >8 columns and control characters
+    for (field, mk_bad_width, mk_bad_ctrl) in [
+        (
+            "icons.branch",
+            IconsConfig {
+                branch: Some("123456789".to_string()),
+                ..Default::default()
+            },
+            IconsConfig {
+                branch: Some("a\tb".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "icons.plan",
+            IconsConfig {
+                plan: Some("123456789".to_string()),
+                ..Default::default()
+            },
+            IconsConfig {
+                plan: Some("a\nb".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "icons.step",
+            IconsConfig {
+                step: Some("123456789".to_string()),
+                ..Default::default()
+            },
+            IconsConfig {
+                step: Some("a\rb".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "icons.task",
+            IconsConfig {
+                task: Some("123456789".to_string()),
+                ..Default::default()
+            },
+            IconsConfig {
+                task: Some("a\x1bb".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "icons.model",
+            IconsConfig {
+                model: Some("123456789".to_string()),
+                ..Default::default()
+            },
+            IconsConfig {
+                model: Some("a\0b".to_string()),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let cfg_w = PulseConfig {
+            icons: Some(mk_bad_width),
+            ..Default::default()
+        };
+        assert_eq!(validate_pulse_config(&cfg_w).unwrap_err().0, field);
+
+        let cfg_c = PulseConfig {
+            icons: Some(mk_bad_ctrl),
+            ..Default::default()
+        };
+        assert_eq!(validate_pulse_config(&cfg_c).unwrap_err().0, field);
+    }
+
+    // 2. Saving all 5 fields persists trimmed values while keeping unknown icon keys
+    fs::write(
+        &cfg_path,
+        serde_json::json!({ "icons": { "customIcon": "X" } }).to_string(),
+    )
+    .unwrap();
+    let snap0 = read_global_config_snapshot_at(&cfg_path).unwrap();
+    let mut cfg = snap0.config.clone();
+    cfg.icons = Some(IconsConfig {
+        branch: Some(" B ".to_string()),
+        plan: Some(" P ".to_string()),
+        step: Some(" S ".to_string()),
+        task: Some(" T ".to_string()),
+        model: Some(" M ".to_string()),
+    });
+    assert!(validate_pulse_config(&cfg).is_ok());
+    save_global_pulse_config_preserving_unknown(&cfg_path, snap0.raw_object.as_ref(), &cfg)
+        .unwrap();
+
+    let saved: Value = serde_json::from_str(&fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    assert_eq!(saved["icons"]["branch"], "B");
+    assert_eq!(saved["icons"]["plan"], "P");
+    assert_eq!(saved["icons"]["step"], "S");
+    assert_eq!(saved["icons"]["task"], "T");
+    assert_eq!(saved["icons"]["model"], "M");
+    assert_eq!(saved["icons"]["customIcon"], "X");
+
+    let snap1 = read_global_config_snapshot_at(&cfg_path).unwrap();
+    assert_eq!(
+        snap1.config.icons,
+        Some(IconsConfig {
+            branch: Some("B".to_string()),
+            plan: Some("P".to_string()),
+            step: Some("S".to_string()),
+            task: Some("T".to_string()),
+            model: Some("M".to_string()),
+        })
+    );
+}
+
+#[test]
+fn t06_partial_type_error_preserves_valid_fields_and_reports_field_warnings() {
+    use agy_pulse::config::{
+        CacheHitThresholdsConfig, IconsConfig, LanguageSetting, ThemeColors, ThemeConfig,
+        load_config, read_global_config_snapshot_at,
+    };
+
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let mut env_guard = MultiEnvGuard::new();
+    env_guard.set(
+        "AGY_PULSE_GLOBAL_CONFIG_DIR",
+        &env.global_cfg_dir.to_string_lossy(),
+    );
+    env_guard.remove("AGY_PULSE_LANGUAGE");
+
+    let global_cfg = env.global_cfg_dir.join("agy-pulse.config.json");
+    let mixed_json = serde_json::json!({
+        "enabled": "yes",
+        "language": "zh",
+        "theme": "Ocean Blue",
+        "thresholds": {
+            "warning": 0.65,
+            "critical": "bad"
+        },
+        "display": {
+            "showGitBranch": true,
+            "dashboardPort": "3789",
+            "breadcrumbCount": 5,
+            "cacheHitThresholds": {
+                "excellent": "nope",
+                "partial": 45.0
+            }
+        },
+        "icons": {
+            "branch": 123,
+            "plan": "P"
+        }
+    });
+    fs::write(&global_cfg, mixed_json.to_string()).unwrap();
+
+    let loaded = load_config(&env.workspace_dir);
+    assert!(loaded.enabled);
+    assert_eq!(loaded.language, LanguageSetting::Zh);
+    assert_eq!(loaded.theme, ThemeConfig::Preset("Ocean Blue".to_string()));
+    assert!((loaded.thresholds.warning - 0.65).abs() < 1e-6);
+    assert!((loaded.thresholds.critical - 0.9).abs() < 1e-6);
+    assert_eq!(loaded.display.show_git_branch, Some(true));
+    assert_eq!(loaded.display.dashboard_port, None);
+    assert_eq!(loaded.display.breadcrumb_count, Some(5));
+    assert_eq!(
+        loaded.display.cache_hit_thresholds,
+        Some(CacheHitThresholdsConfig {
+            excellent: None,
+            partial: Some(45.0),
+        })
+    );
+    assert_eq!(
+        loaded.icons,
+        Some(IconsConfig {
+            branch: None,
+            plan: Some("P".to_string()),
+            ..Default::default()
+        })
+    );
+
+    let snap = read_global_config_snapshot_at(&global_cfg).unwrap();
+    assert!(snap.parse_error.is_none());
+    assert!(snap.raw_object.is_some());
+    assert_eq!(snap.config, loaded);
+    for expected_path in [
+        "enabled",
+        "thresholds.critical",
+        "display.dashboardPort",
+        "display.cacheHitThresholds.excellent",
+        "icons.branch",
+    ] {
+        assert!(
+            snap.field_warnings
+                .iter()
+                .any(|w| w.contains(expected_path)),
+            "expected warning for {expected_path}, got: {:?}",
+            snap.field_warnings
+        );
+    }
+
+    // Object theme with partial invalid color preserves sibling colors and warns on bad field
+    let theme_json = serde_json::json!({
+        "language": "en",
+        "theme": {
+            "primary": 123,
+            "secondary": "cyan"
+        }
+    });
+    fs::write(&global_cfg, theme_json.to_string()).unwrap();
+    let theme_snap = read_global_config_snapshot_at(&global_cfg).unwrap();
+    assert_eq!(theme_snap.config.language, LanguageSetting::En);
+    assert_eq!(
+        theme_snap.config.theme,
+        ThemeConfig::Colors(ThemeColors {
+            secondary: "cyan".to_string(),
+            ..ThemeColors::default()
+        })
+    );
+    assert!(
+        theme_snap
+            .field_warnings
+            .iter()
+            .any(|w| w.contains("theme.primary")),
+        "expected theme.primary warning: {:?}",
+        theme_snap.field_warnings
+    );
+
+    // Non-object display/thresholds groups fall back cleanly without discarding language
+    let group_json = serde_json::json!({
+        "language": "zh",
+        "thresholds": 42,
+        "display": "not-an-object"
+    });
+    fs::write(&global_cfg, group_json.to_string()).unwrap();
+    let group_snap = read_global_config_snapshot_at(&global_cfg).unwrap();
+    assert_eq!(group_snap.config.language, LanguageSetting::Zh);
+    assert!(
+        group_snap.field_warnings.iter().any(|w| w.contains("thresholds"))
+            && group_snap.field_warnings.iter().any(|w| w.contains("display")),
+        "expected group warnings: {:?}",
+        group_snap.field_warnings
+    );
+}
+
+#[test]
+fn t06_wizard_escape_timeout_cancels_without_eof_while_preserving_arrows() {
+    use std::io::{self, Read};
+
+    struct TimeoutAfterEscReader {
+        chunks: Vec<io::Result<u8>>,
+        pos: usize,
+    }
+
+    impl Read for TimeoutAfterEscReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            if self.pos >= self.chunks.len() {
+                return Ok(0);
+            }
+            let item = std::mem::replace(&mut self.chunks[self.pos], Ok(0));
+            self.pos += 1;
+            match item {
+                Ok(b) => {
+                    buf[0] = b;
+                    Ok(1)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let _guard = EnvVarGuard::set("AGY_PULSE_GLOBAL_CONFIG_DIR", &env.global_cfg_dir);
+
+    let mut chunks: Vec<io::Result<u8>> = b"\x1b[B \x1b".iter().copied().map(Ok).collect();
+    chunks.push(Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "escape followup timeout",
+    )));
+
+    let mut input = TimeoutAfterEscReader { chunks, pos: 0 };
+    let mut output = Vec::new();
+    let opts = WizardRunOptions {
+        cwd: env.workspace_dir.clone(),
+        terminal_cols: Some(120),
+        terminal_rows: Some(40),
+        unicode: true,
+        locale: Some("en_US.UTF-8".to_string()),
+        observed_at_ms: Some(1_700_000_000_000),
+        clear_screen: false,
+    };
+
+    let outcome = run_wizard_loop(&mut input, &mut output, &opts).unwrap();
+    assert_eq!(outcome, WizardRunOutcome::Cancelled);
+}
+
+#[test]
+fn t06_wizard_rejects_invalid_thresholds_on_save_and_keeps_editing() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let _guard = EnvVarGuard::set("AGY_PULSE_GLOBAL_CONFIG_DIR", &env.global_cfg_dir);
+
+    let global_cfg = env.global_cfg_dir.join("agy-pulse.config.json");
+    let seed_json = "{\n  \"language\": \"en\",\n  \"thresholds\": {\n    \"warning\": 0.85,\n    \"critical\": 0.85\n  }\n}\n";
+    fs::write(&global_cfg, seed_json).unwrap();
+
+    let opts = WizardRunOptions {
+        cwd: env.workspace_dir.clone(),
+        terminal_cols: Some(120),
+        terminal_rows: Some(40),
+        unicode: true,
+        locale: Some("en_US.UTF-8".to_string()),
+        observed_at_ms: Some(1_700_000_000_000),
+        clear_screen: true,
+    };
+
+    // Case 1: Enter on Save item when warning (0.85) > critical (0.80) refuses to save, keeps editing, then 'q' exits untouched.
+    // '6' selects index 5 (Critical Threshold); 3 spaces cycle 0.85 -> 0.90 -> 0.95 -> 0.80.
+    // Then navigate to Save (last - 1) via 'k'/'k' from wrapped top or pressing 's', plus MenuItem::Save via digits/j.
+    let mut keys_abort = Vec::new();
+    keys_abort.extend_from_slice(b"6   "); // critical -> 0.80 (80% < 85%)
+    keys_abort.extend_from_slice(b"s"); // rejected!
+    // Also move down to MenuItem::Save (17 items below index 5 -> index 21 is Save, total 23 items)
+    keys_abort.extend_from_slice(&[b'j'; 16]);
+    keys_abort.extend_from_slice(b"\r"); // Enter on Save -> also rejected!
+    keys_abort.extend_from_slice(b"q"); // Cancel without saving
+
+    let mut in1 = Cursor::new(keys_abort);
+    let mut out1 = Vec::new();
+    let outcome1 = run_wizard_loop(&mut in1, &mut out1, &opts).unwrap();
+    assert_eq!(outcome1, WizardRunOutcome::Cancelled);
+    assert_eq!(fs::read_to_string(&global_cfg).unwrap(), seed_json);
+
+    let plain1 = strip_ansi(&String::from_utf8_lossy(&out1));
+    assert!(
+        plain1.contains("thresholds.warning"),
+        "expected validation error naming thresholds.warning in wizard frame: {plain1}"
+    );
+
+    // Case 2: Invalid save rejected, user stays in wizard, edits Language -> zh, fixes Critical -> 0.85, then 's' saves!
+    let mut keys_fix = Vec::new();
+    keys_fix.extend_from_slice(b"6   "); // critical -> 0.80 (invalid)
+    keys_fix.extend_from_slice(b"s"); // rejected, stays in wizard
+    keys_fix.extend_from_slice(b"2 "); // Language: en -> zh (still in wizard)
+    keys_fix.extend_from_slice(b"6 "); // critical: 0.80 -> 0.85 (now valid)
+    keys_fix.extend_from_slice(b"s"); // succeeds!
+
+    let mut in2 = Cursor::new(keys_fix);
+    let mut out2 = Vec::new();
+    let outcome2 = run_wizard_loop(&mut in2, &mut out2, &opts).unwrap();
+    assert_eq!(outcome2, WizardRunOutcome::Saved);
+
+    let saved: Value = serde_json::from_str(&fs::read_to_string(&global_cfg).unwrap()).unwrap();
+    assert_eq!(saved["language"], "zh");
+    assert!((saved["thresholds"]["warning"].as_f64().unwrap() - 0.85).abs() < 1e-6);
+    assert!((saved["thresholds"]["critical"].as_f64().unwrap() - 0.85).abs() < 1e-6);
+}
+
+#[test]
+fn t06_wizard_scope_when_cwd_is_global_dir_and_scope_toggle_preview() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let env = IsolatedEnv::new();
+    let _guard = EnvVarGuard::set("AGY_PULSE_GLOBAL_CONFIG_DIR", &env.global_cfg_dir);
+
+    let global_cfg = env.global_cfg_dir.join("agy-pulse.config.json");
+    fs::write(
+        &global_cfg,
+        serde_json::json!({
+            "language": "en",
+            "theme": "Emerald Green"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // Part A: cwd == global config directory (with non-normalized `.`) must default to Global, not Local.
+    let opts_same = WizardRunOptions {
+        cwd: env.global_cfg_dir.join("."),
+        terminal_cols: Some(120),
+        terminal_rows: Some(40),
+        unicode: true,
+        locale: Some("en_US.UTF-8".to_string()),
+        observed_at_ms: Some(1_700_000_000_000),
+        clear_screen: true,
+    };
+    let mut in_same = Cursor::new(b"q".to_vec());
+    let mut out_same = Vec::new();
+    let outcome_same = run_wizard_loop(&mut in_same, &mut out_same, &opts_same).unwrap();
+    assert_eq!(outcome_same, WizardRunOutcome::Cancelled);
+    let plain_same = strip_ansi(&String::from_utf8_lossy(&out_same));
+    assert!(
+        plain_same.contains("Configuration Scope: Global (All Projects)"),
+        "expected Global scope when cwd == global config dir, got: {plain_same}"
+    );
+    assert!(!plain_same.contains("Configuration Scope: Local"));
+
+    // Part B: Workspace has Local overrides (zh + Ocean Blue). Toggling Scope Local -> Global
+    // must refresh both menu items and live preview to Global (en + Emerald Green) without workspace leakage.
+    let local_cfg = env.workspace_dir.join("agy-pulse.config.json");
+    fs::write(
+        &local_cfg,
+        serde_json::json!({
+            "language": "zh",
+            "theme": "Ocean Blue",
+            "display": { "showGitBranch": true }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let opts_local = WizardRunOptions {
+        cwd: env.workspace_dir.clone(),
+        terminal_cols: Some(120),
+        terminal_rows: Some(40),
+        unicode: true,
+        locale: Some("en_US.UTF-8".to_string()),
+        observed_at_ms: Some(1_700_000_000_000),
+        clear_screen: true,
+    };
+    let mut in_toggle = Cursor::new(b" q".to_vec());
+    let mut out_toggle = Vec::new();
+    let outcome_toggle = run_wizard_loop(&mut in_toggle, &mut out_toggle, &opts_local).unwrap();
+    assert_eq!(outcome_toggle, WizardRunOutcome::Cancelled);
+
+    let raw = String::from_utf8_lossy(&out_toggle).into_owned();
+    let frames: Vec<&str> = raw.split("\x1b[H\x1b[J").filter(|s| !s.is_empty()).collect();
+    assert!(frames.len() >= 2, "expected initial frame and toggled frame, got {}", frames.len());
+
+    let frame0_plain = strip_ansi(frames[0]);
+    assert!(frame0_plain.contains("Configuration Scope: Local (Current Project Workspace)"));
+    assert!(frame0_plain.contains("Language: zh"));
+    assert!(frame0_plain.contains("Theme Preset: Ocean Blue"));
+    assert!(frame0_plain.contains("上下文"));
+
+    let frame1_plain = strip_ansi(frames[1]);
+    assert!(
+        frame1_plain.contains("Configuration Scope: Global (All Projects)"),
+        "expected Global scope in frame 1: {frame1_plain}"
+    );
+    assert!(
+        frame1_plain.contains("Language: en"),
+        "expected Global language=en after toggling to Global: {frame1_plain}"
+    );
+    assert!(
+        frame1_plain.contains("Theme Preset: Emerald Green"),
+        "expected Global theme=Emerald Green after toggling to Global: {frame1_plain}"
+    );
+    assert!(
+        !frame1_plain.contains("上下文") && frame1_plain.contains("Context"),
+        "expected Global English preview without local zh leakage: {frame1_plain}"
+    );
+}

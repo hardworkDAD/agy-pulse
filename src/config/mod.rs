@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -91,6 +92,7 @@ pub struct GlobalPulseConfigSnapshot {
     pub version: String,
     pub raw_object: Option<Map<String, Value>>,
     pub parse_error: Option<String>,
+    pub field_warnings: Vec<String>,
     pub config: PulseConfig,
 }
 
@@ -331,10 +333,402 @@ fn apply_env_overrides(merged: &mut Value) {
     }
 }
 
-/// Load configuration according to precedence:
-/// Built-in defaults -> Global config -> Workspace config -> Environment overrides.
-/// Unknown or retired v1 fields are silently ignored.
-pub fn load_config(workspace_dir: &Path) -> PulseConfig {
+fn json_type_name(val: &Value) -> &'static str {
+    match val {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn parse_field_or_default<T: DeserializeOwned>(
+    map: &Map<String, Value>,
+    key: &str,
+    default_val: T,
+    field_path: &str,
+    warnings: &mut Vec<String>,
+) -> T {
+    let Some(val) = map.get(key) else {
+        return default_val;
+    };
+    match serde_json::from_value::<T>(val.clone()) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            warnings.push(format!("{field_path}: {err}"));
+            default_val
+        }
+    }
+}
+
+fn deserialize_theme_tolerant(
+    val: Option<&Value>,
+    default_theme: ThemeConfig,
+    warnings: &mut Vec<String>,
+) -> ThemeConfig {
+    let Some(val) = val else {
+        return default_theme;
+    };
+    match val {
+        Value::String(s) => ThemeConfig::Preset(s.clone()),
+        Value::Object(map) => {
+            let def = ThemeColors::default();
+            ThemeConfig::Colors(ThemeColors {
+                primary: parse_field_or_default(map, "primary", def.primary, "theme.primary", warnings),
+                secondary: parse_field_or_default(
+                    map,
+                    "secondary",
+                    def.secondary,
+                    "theme.secondary",
+                    warnings,
+                ),
+                warning: parse_field_or_default(map, "warning", def.warning, "theme.warning", warnings),
+                critical: parse_field_or_default(
+                    map,
+                    "critical",
+                    def.critical,
+                    "theme.critical",
+                    warnings,
+                ),
+            })
+        }
+        other => {
+            warnings.push(format!(
+                "theme: invalid type {}, expected string or object",
+                json_type_name(other)
+            ));
+            default_theme
+        }
+    }
+}
+
+fn deserialize_thresholds_tolerant(
+    val: Option<&Value>,
+    default_thresholds: ThresholdsConfig,
+    warnings: &mut Vec<String>,
+) -> ThresholdsConfig {
+    let Some(val) = val else {
+        return default_thresholds;
+    };
+    match val {
+        Value::Object(map) => ThresholdsConfig {
+            warning: parse_field_or_default(
+                map,
+                "warning",
+                default_thresholds.warning,
+                "thresholds.warning",
+                warnings,
+            ),
+            critical: parse_field_or_default(
+                map,
+                "critical",
+                default_thresholds.critical,
+                "thresholds.critical",
+                warnings,
+            ),
+        },
+        other => {
+            warnings.push(format!(
+                "thresholds: invalid type {}, expected object",
+                json_type_name(other)
+            ));
+            default_thresholds
+        }
+    }
+}
+
+fn deserialize_cache_hit_thresholds_tolerant(
+    val: Option<&Value>,
+    warnings: &mut Vec<String>,
+) -> Option<CacheHitThresholdsConfig> {
+    match val {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(map)) => Some(CacheHitThresholdsConfig {
+            excellent: parse_field_or_default(
+                map,
+                "excellent",
+                None,
+                "display.cacheHitThresholds.excellent",
+                warnings,
+            ),
+            partial: parse_field_or_default(
+                map,
+                "partial",
+                None,
+                "display.cacheHitThresholds.partial",
+                warnings,
+            ),
+        }),
+        Some(other) => {
+            warnings.push(format!(
+                "display.cacheHitThresholds: invalid type {}, expected object",
+                json_type_name(other)
+            ));
+            None
+        }
+    }
+}
+
+fn deserialize_display_tolerant(
+    val: Option<&Value>,
+    default_display: DisplayConfig,
+    warnings: &mut Vec<String>,
+) -> DisplayConfig {
+    let Some(val) = val else {
+        return default_display;
+    };
+    let Value::Object(map) = val else {
+        warnings.push(format!(
+            "display: invalid type {}, expected object",
+            json_type_name(val)
+        ));
+        return default_display;
+    };
+
+    DisplayConfig {
+        show_context_monitor: parse_field_or_default(
+            map,
+            "showContextMonitor",
+            default_display.show_context_monitor,
+            "display.showContextMonitor",
+            warnings,
+        ),
+        show_model_cache: parse_field_or_default(
+            map,
+            "showModelCache",
+            default_display.show_model_cache,
+            "display.showModelCache",
+            warnings,
+        ),
+        show_current_dir: parse_field_or_default(
+            map,
+            "showCurrentDir",
+            default_display.show_current_dir,
+            "display.showCurrentDir",
+            warnings,
+        ),
+        show_cycle_mode: parse_field_or_default(
+            map,
+            "showCycleMode",
+            default_display.show_cycle_mode,
+            "display.showCycleMode",
+            warnings,
+        ),
+        show_speed: parse_field_or_default(
+            map,
+            "showSpeed",
+            default_display.show_speed,
+            "display.showSpeed",
+            warnings,
+        ),
+        show_breadcrumbs: parse_field_or_default(
+            map,
+            "showBreadcrumbs",
+            default_display.show_breadcrumbs,
+            "display.showBreadcrumbs",
+            warnings,
+        ),
+        show_git_branch: parse_field_or_default(
+            map,
+            "showGitBranch",
+            default_display.show_git_branch,
+            "display.showGitBranch",
+            warnings,
+        ),
+        show_username: parse_field_or_default(
+            map,
+            "showUsername",
+            default_display.show_username,
+            "display.showUsername",
+            warnings,
+        ),
+        show_daily_cost: parse_field_or_default(
+            map,
+            "showDailyCost",
+            default_display.show_daily_cost,
+            "display.showDailyCost",
+            warnings,
+        ),
+        show_weekly_cost: parse_field_or_default(
+            map,
+            "showWeeklyCost",
+            default_display.show_weekly_cost,
+            "display.showWeeklyCost",
+            warnings,
+        ),
+        show_routed_cost: parse_field_or_default(
+            map,
+            "showRoutedCost",
+            default_display.show_routed_cost,
+            "display.showRoutedCost",
+            warnings,
+        ),
+        show_dashboard_url: parse_field_or_default(
+            map,
+            "showDashboardUrl",
+            default_display.show_dashboard_url,
+            "display.showDashboardUrl",
+            warnings,
+        ),
+        dashboard_port: parse_field_or_default(
+            map,
+            "dashboardPort",
+            default_display.dashboard_port,
+            "display.dashboardPort",
+            warnings,
+        ),
+        dashboard_idle_timeout_sec: parse_field_or_default(
+            map,
+            "dashboardIdleTimeoutSec",
+            default_display.dashboard_idle_timeout_sec,
+            "display.dashboardIdleTimeoutSec",
+            warnings,
+        ),
+        breadcrumb_count: parse_field_or_default(
+            map,
+            "breadcrumbCount",
+            default_display.breadcrumb_count,
+            "display.breadcrumbCount",
+            warnings,
+        ),
+        use_nerd_fonts: parse_field_or_default(
+            map,
+            "useNerdFonts",
+            default_display.use_nerd_fonts,
+            "display.useNerdFonts",
+            warnings,
+        ),
+        unicode: parse_field_or_default(
+            map,
+            "unicode",
+            default_display.unicode,
+            "display.unicode",
+            warnings,
+        ),
+        quota_style: parse_field_or_default(
+            map,
+            "quotaStyle",
+            default_display.quota_style,
+            "display.quotaStyle",
+            warnings,
+        ),
+        column_width: parse_field_or_default(
+            map,
+            "columnWidth",
+            default_display.column_width,
+            "display.columnWidth",
+            warnings,
+        ),
+        terminal_width: parse_field_or_default(
+            map,
+            "terminalWidth",
+            default_display.terminal_width,
+            "display.terminalWidth",
+            warnings,
+        ),
+        username: parse_field_or_default(
+            map,
+            "username",
+            default_display.username,
+            "display.username",
+            warnings,
+        ),
+        cache_hit_thresholds: deserialize_cache_hit_thresholds_tolerant(
+            map.get("cacheHitThresholds"),
+            warnings,
+        ),
+        model_speed_expire_turns: parse_field_or_default(
+            map,
+            "modelSpeedExpireTurns",
+            default_display.model_speed_expire_turns,
+            "display.modelSpeedExpireTurns",
+            warnings,
+        ),
+        model_speed_expire_minutes: parse_field_or_default(
+            map,
+            "modelSpeedExpireMinutes",
+            default_display.model_speed_expire_minutes,
+            "display.modelSpeedExpireMinutes",
+            warnings,
+        ),
+    }
+}
+
+fn deserialize_icons_tolerant(
+    val: Option<&Value>,
+    warnings: &mut Vec<String>,
+) -> Option<IconsConfig> {
+    match val {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(map)) => Some(IconsConfig {
+            branch: parse_field_or_default(map, "branch", None, "icons.branch", warnings),
+            plan: parse_field_or_default(map, "plan", None, "icons.plan", warnings),
+            step: parse_field_or_default(map, "step", None, "icons.step", warnings),
+            task: parse_field_or_default(map, "task", None, "icons.task", warnings),
+            model: parse_field_or_default(map, "model", None, "icons.model", warnings),
+        }),
+        Some(other) => {
+            warnings.push(format!(
+                "icons: invalid type {}, expected object",
+                json_type_name(other)
+            ));
+            None
+        }
+    }
+}
+
+pub(crate) fn deserialize_pulse_config_tolerant(merged: &Value) -> (PulseConfig, Vec<String>) {
+    let mut warnings = Vec::new();
+    let defaults = PulseConfig::default();
+    let Value::Object(map) = merged else {
+        return (defaults, warnings);
+    };
+
+    let cfg = PulseConfig {
+        enabled: parse_field_or_default(map, "enabled", defaults.enabled, "enabled", &mut warnings),
+        theme: deserialize_theme_tolerant(map.get("theme"), defaults.theme, &mut warnings),
+        display: deserialize_display_tolerant(map.get("display"), defaults.display, &mut warnings),
+        thresholds: deserialize_thresholds_tolerant(
+            map.get("thresholds"),
+            defaults.thresholds,
+            &mut warnings,
+        ),
+        language: parse_field_or_default(
+            map,
+            "language",
+            defaults.language,
+            "language",
+            &mut warnings,
+        ),
+        icons: deserialize_icons_tolerant(map.get("icons"), &mut warnings),
+    };
+    (cfg, warnings)
+}
+
+pub(crate) fn paths_point_to_same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    if let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b)) {
+        return ca == cb;
+    }
+    match (a.parent(), b.parent(), a.file_name(), b.file_name()) {
+        (Some(pa), Some(pb), Some(fa), Some(fb)) if fa == fb => {
+            if pa == pb {
+                return true;
+            }
+            fs::canonicalize(pa)
+                .ok()
+                .zip(fs::canonicalize(pb).ok())
+                .is_some_and(|(cpa, cpb)| cpa == cpb)
+        }
+        _ => false,
+    }
+}
+
+fn load_config_inner(workspace_dir: Option<&Path>) -> PulseConfig {
     let mut merged = serde_json::to_value(PulseConfig::default())
         .unwrap_or_else(|_| Value::Object(Map::new()));
 
@@ -343,18 +737,31 @@ pub fn load_config(workspace_dir: &Path) -> PulseConfig {
         merged = deep_merge_value(merged, global_val);
     }
 
-    let local_path = workspace_dir.join("agy-pulse.config.json");
-    let same_file = fs::canonicalize(&local_path)
-        .ok()
-        .zip(fs::canonicalize(&global_path).ok())
-        .is_some_and(|(a, b)| a == b);
-    if !same_file && let Some(local_val) = read_json_object(&local_path) {
-        merged = deep_merge_value(merged, local_val);
+    if let Some(ws_dir) = workspace_dir {
+        let local_path = ws_dir.join("agy-pulse.config.json");
+        if !paths_point_to_same_file(&local_path, &global_path)
+            && let Some(local_val) = read_json_object(&local_path)
+        {
+            merged = deep_merge_value(merged, local_val);
+        }
     }
 
     apply_env_overrides(&mut merged);
 
-    serde_json::from_value(merged).unwrap_or_default()
+    deserialize_pulse_config_tolerant(&merged).0
+}
+
+/// Load configuration according to precedence:
+/// Built-in defaults -> Global config -> Workspace config -> Environment overrides.
+/// Unknown or retired v1 fields are silently ignored; fields with invalid JSON types fall back
+/// individually to defaults without discarding sibling valid fields.
+pub fn load_config(workspace_dir: &Path) -> PulseConfig {
+    load_config_inner(Some(workspace_dir))
+}
+
+/// Load global-only configuration (defaults -> global config -> env overrides) without workspace overrides.
+pub(crate) fn load_global_config_only() -> PulseConfig {
+    load_config_inner(None)
 }
 
 /// Resolve the global `agy-pulse.config.json` path.
@@ -436,6 +843,7 @@ pub fn read_global_config_snapshot_at(path: &Path) -> io::Result<GlobalPulseConf
                 version: ABSENT_CONFIG_VERSION.to_string(),
                 raw_object: None,
                 parse_error: None,
+                field_warnings: Vec::new(),
                 config: PulseConfig::default(),
             });
         }
@@ -443,25 +851,28 @@ pub fn read_global_config_snapshot_at(path: &Path) -> io::Result<GlobalPulseConf
     };
 
     let version = hex::encode(Sha256::digest(&bytes));
-    let (raw_object, parse_error, config) = match serde_json::from_slice::<Value>(&bytes) {
-        Ok(Value::Object(map)) => {
-            let defaults = serde_json::to_value(PulseConfig::default())
-                .unwrap_or_else(|_| Value::Object(Map::new()));
-            let merged = deep_merge_value(defaults, Value::Object(map.clone()));
-            let parsed = serde_json::from_value(merged).unwrap_or_default();
-            (Some(map), None, parsed)
-        }
-        Ok(_) => (
-            None,
-            Some("global config root must be a JSON object".to_string()),
-            PulseConfig::default(),
-        ),
-        Err(err) => (
-            None,
-            Some(format!("invalid JSON: {err}")),
-            PulseConfig::default(),
-        ),
-    };
+    let (raw_object, parse_error, field_warnings, config) =
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(map)) => {
+                let defaults = serde_json::to_value(PulseConfig::default())
+                    .unwrap_or_else(|_| Value::Object(Map::new()));
+                let merged = deep_merge_value(defaults, Value::Object(map.clone()));
+                let (parsed, warnings) = deserialize_pulse_config_tolerant(&merged);
+                (Some(map), None, warnings, parsed)
+            }
+            Ok(_) => (
+                None,
+                Some("global config root must be a JSON object".to_string()),
+                Vec::new(),
+                PulseConfig::default(),
+            ),
+            Err(err) => (
+                None,
+                Some(format!("invalid JSON: {err}")),
+                Vec::new(),
+                PulseConfig::default(),
+            ),
+        };
 
     Ok(GlobalPulseConfigSnapshot {
         path: path.to_path_buf(),
@@ -469,6 +880,7 @@ pub fn read_global_config_snapshot_at(path: &Path) -> io::Result<GlobalPulseConf
         version,
         raw_object,
         parse_error,
+        field_warnings,
         config,
     })
 }
@@ -624,21 +1036,29 @@ pub fn validate_pulse_config(cfg: &PulseConfig) -> Result<(), (String, String)> 
         ));
     }
 
-    if let Some(ref icons) = cfg.icons
-        && let Some(raw) = icons.branch.as_deref()
-    {
-        if raw.chars().any(|ch| ch.is_control()) {
-            return Err((
-                "icons.branch".to_string(),
-                "icons.branch must not contain control characters".to_string(),
-            ));
-        }
-        let trimmed = raw.trim();
-        if UnicodeWidthStr::width(trimmed) > 8 {
-            return Err((
-                "icons.branch".to_string(),
-                "icons.branch display width must be <= 8 columns".to_string(),
-            ));
+    if let Some(ref icons) = cfg.icons {
+        for (field, raw_opt) in [
+            ("icons.branch", icons.branch.as_deref()),
+            ("icons.plan", icons.plan.as_deref()),
+            ("icons.step", icons.step.as_deref()),
+            ("icons.task", icons.task.as_deref()),
+            ("icons.model", icons.model.as_deref()),
+        ] {
+            if let Some(raw) = raw_opt {
+                if raw.chars().any(|ch| ch.is_control()) {
+                    return Err((
+                        field.to_string(),
+                        format!("{field} must not contain control characters"),
+                    ));
+                }
+                let trimmed = raw.trim();
+                if UnicodeWidthStr::width(trimmed) > 8 {
+                    return Err((
+                        field.to_string(),
+                        format!("{field} display width must be <= 8 columns"),
+                    ));
+                }
+            }
         }
     }
 
@@ -802,6 +1222,20 @@ pub fn save_global_pulse_config_preserving_unknown(
         "branch",
         cfg.icons.as_ref().and_then(|i| i.branch.as_deref()),
     );
+    // `plan`/`step`/`task`/`model` are not yet exposed via Dashboard's `PulseIconsDto`,
+    // so only write non-empty `Some(...)` values and preserve disk entries when `None`.
+    if let Some(ref icons) = cfg.icons {
+        for (key, val) in [
+            ("plan", icons.plan.as_deref()),
+            ("step", icons.step.as_deref()),
+            ("task", icons.task.as_deref()),
+            ("model", icons.model.as_deref()),
+        ] {
+            if let Some(trimmed) = val.map(str::trim).filter(|s| !s.is_empty()) {
+                icons_map.insert(key.to_string(), Value::String(trimmed.to_string()));
+            }
+        }
+    }
     if !icons_map.is_empty() {
         root.insert("icons".to_string(), Value::Object(icons_map));
     }

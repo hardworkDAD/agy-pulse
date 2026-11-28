@@ -1,13 +1,16 @@
 use std::env;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
 use crate::config::{
     LanguageSetting, PulseConfig, QuotaStyle, THEME_PRESETS, ThemeColors, ThemeConfig,
-    ThemePresetDef, deep_merge_value, load_config, read_json_object,
+    ThemePresetDef, deep_merge_value, deserialize_pulse_config_tolerant, load_config,
+    load_global_config_only, paths_point_to_same_file, read_json_object, validate_pulse_config,
 };
 use crate::domain::{
     ChildModelSpeed, ContextWindowSnapshot, CostSnapshot, HostIdentity, ModelIdentity,
@@ -88,6 +91,7 @@ struct WizardState {
     theme_name: String,
     original_theme: ThemeColors,
     changes: WizardChanges,
+    status_error: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -343,20 +347,43 @@ fn cycle_f64_preset(current: f64, presets: &[f64]) -> f64 {
 
 impl WizardState {
     fn new(cwd: PathBuf) -> Self {
-        let mut config = load_config(&cwd);
-        let original_theme = normalize_theme_colors(&config.theme);
-        let theme_name = detect_theme_preset_name(&original_theme);
-        config.theme = ThemeConfig::Colors(original_theme.clone());
-        let local_exists = cwd.join(CONFIG_FILENAME).exists();
+        let local_path = cwd.join(CONFIG_FILENAME);
+        let global_path = platform::resolve_global_config_dir().join(CONFIG_FILENAME);
+        let same_as_global = paths_point_to_same_file(&local_path, &global_path);
+        let local_exists = !same_as_global && local_path.exists();
 
-        Self {
-            config,
+        let mut state = Self {
+            config: PulseConfig::default(),
             cwd,
             target_is_global: !local_exists,
-            theme_name,
-            original_theme,
+            theme_name: String::new(),
+            original_theme: ThemeColors::default(),
             changes: WizardChanges::default(),
+            status_error: None,
+        };
+        state.refresh_effective_config_for_scope();
+        state
+    }
+
+    fn refresh_effective_config_for_scope(&mut self) {
+        let base = if self.target_is_global {
+            load_global_config_only()
+        } else {
+            load_config(&self.cwd)
+        };
+        let original_theme = normalize_theme_colors(&base.theme);
+        let base_val = serde_json::to_value(&base).unwrap_or_else(|_| Value::Object(Map::new()));
+        let override_val = build_override_value(&self.changes);
+        let merged = deep_merge_value(base_val, override_val);
+        let (mut effective, _) = deserialize_pulse_config_tolerant(&merged);
+        if matches!(self.changes.unicode, Some(None)) {
+            effective.display.unicode = None;
         }
+        let effective_theme = normalize_theme_colors(&effective.theme);
+        self.theme_name = detect_theme_preset_name(&effective_theme);
+        effective.theme = ThemeConfig::Colors(effective_theme);
+        self.original_theme = original_theme;
+        self.config = effective;
     }
 
     fn target_path(&self) -> PathBuf {
@@ -441,9 +468,11 @@ impl WizardState {
     }
 
     fn toggle_item(&mut self, item: MenuItem) {
+        self.status_error = None;
         match item {
             MenuItem::Scope => {
                 self.target_is_global = !self.target_is_global;
+                self.refresh_effective_config_for_scope();
             }
             MenuItem::Language => {
                 let next = match self.config.language {
@@ -859,6 +888,9 @@ fn render_wizard_frame<W: Write>(
     writeln!(output, "\x1b[1magy-pulse Status Line Preview\x1b[0m")?;
     writeln!(output, "{preview_body}")?;
     writeln!(output, "{separator}")?;
+    if let Some(ref err) = state.status_error {
+        writeln!(output, "\x1b[31m✖ {err}\x1b[0m")?;
+    }
     output.flush()
 }
 
@@ -912,7 +944,18 @@ fn build_override_value(changes: &WizardChanges) -> Value {
     Value::Object(root)
 }
 
-fn save_wizard_config(state: &WizardState) -> io::Result<PathBuf> {
+enum SaveAttempt {
+    Saved(PathBuf),
+    ValidationFailed(String),
+}
+
+fn save_wizard_config(state: &WizardState) -> io::Result<SaveAttempt> {
+    if let Err((field, message)) = validate_pulse_config(&state.config) {
+        return Ok(SaveAttempt::ValidationFailed(format!(
+            "Cannot save ({field}): {message}"
+        )));
+    }
+
     let target_path = state.target_path();
     let existing = read_json_object(&target_path).unwrap_or_else(|| Value::Object(Map::new()));
     let override_val = build_override_value(&state.changes);
@@ -924,11 +967,104 @@ fn save_wizard_config(state: &WizardState) -> io::Result<PathBuf> {
         display_map.remove("unicode");
     }
 
+    let defaults = serde_json::to_value(PulseConfig::default())
+        .unwrap_or_else(|_| Value::Object(Map::new()));
+    let full_merged = deep_merge_value(defaults, merged.clone());
+    let (candidate, _) = deserialize_pulse_config_tolerant(&full_merged);
+    if let Err((field, message)) = validate_pulse_config(&candidate) {
+        return Ok(SaveAttempt::ValidationFailed(format!(
+            "Cannot save ({field}): {message}"
+        )));
+    }
+
     let mut json_text = serde_json::to_string_pretty(&merged)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     json_text.push('\n');
     platform::write_atomic_0600(&target_path, json_text.as_bytes())?;
-    Ok(target_path)
+    Ok(SaveAttempt::Saved(target_path))
+}
+
+const ESCAPE_FOLLOWUP_TIMEOUT: Duration = Duration::from_millis(35);
+
+trait WizardByteSource {
+    fn next_byte(&mut self) -> io::Result<Option<u8>>;
+    fn next_escape_followup_byte(&mut self) -> io::Result<Option<u8>>;
+}
+
+struct StreamByteSource<'a, R: Read>(&'a mut R);
+
+impl<R: Read> WizardByteSource for StreamByteSource<'_, R> {
+    fn next_byte(&mut self) -> io::Result<Option<u8>> {
+        read_single_byte(self.0)
+    }
+
+    fn next_escape_followup_byte(&mut self) -> io::Result<Option<u8>> {
+        match read_single_byte(self.0) {
+            Ok(byte) => Ok(byte),
+            Err(err)
+                if err.kind() == io::ErrorKind::TimedOut
+                    || err.kind() == io::ErrorKind::WouldBlock =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+struct ChannelByteSource {
+    rx: mpsc::Receiver<io::Result<Option<u8>>>,
+    timeout: Duration,
+}
+
+impl ChannelByteSource {
+    fn from_stdin() -> Self {
+        Self::from_reader(io::stdin(), ESCAPE_FOLLOWUP_TIMEOUT)
+    }
+
+    fn from_reader<R: Read + Send + 'static>(mut reader: R, timeout: Duration) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let _ = thread::Builder::new()
+            .name("wizard-tty-input".to_string())
+            .spawn(move || {
+                let mut buf = [0u8; 1];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => {
+                            let _ = tx.send(Ok(None));
+                            break;
+                        }
+                        Ok(_) => {
+                            if tx.send(Ok(Some(buf[0]))).is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(err) => {
+                            let _ = tx.send(Err(err));
+                            break;
+                        }
+                    }
+                }
+            });
+        Self { rx, timeout }
+    }
+}
+
+impl WizardByteSource for ChannelByteSource {
+    fn next_byte(&mut self) -> io::Result<Option<u8>> {
+        match self.rx.recv() {
+            Ok(res) => res,
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn next_escape_followup_byte(&mut self) -> io::Result<Option<u8>> {
+        match self.rx.recv_timeout(self.timeout) {
+            Ok(res) => res,
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+        }
+    }
 }
 
 fn read_single_byte<R: Read>(input: &mut R) -> io::Result<Option<u8>> {
@@ -940,8 +1076,8 @@ fn read_single_byte<R: Read>(input: &mut R) -> io::Result<Option<u8>> {
     }
 }
 
-fn consume_csi_sequence<R: Read>(input: &mut R) -> io::Result<WizardKey> {
-    let Some(third) = read_single_byte(input)? else {
+fn consume_csi_sequence<S: WizardByteSource>(input: &mut S) -> io::Result<WizardKey> {
+    let Some(third) = input.next_escape_followup_byte()? else {
         return Ok(WizardKey::Ignore);
     };
     match third {
@@ -949,7 +1085,7 @@ fn consume_csi_sequence<R: Read>(input: &mut R) -> io::Result<WizardKey> {
         b'B' => Ok(WizardKey::Down),
         b'0'..=b'9' => {
             // Drain remaining CSI parameter/final bytes (e.g. `\x1b[5~`) so they don't leak into menu commands.
-            while let Some(b) = read_single_byte(input)? {
+            while let Some(b) = input.next_escape_followup_byte()? {
                 if (0x40..=0x7e).contains(&b) {
                     break;
                 }
@@ -960,8 +1096,8 @@ fn consume_csi_sequence<R: Read>(input: &mut R) -> io::Result<WizardKey> {
     }
 }
 
-fn read_next_key<R: Read>(input: &mut R) -> io::Result<Option<WizardKey>> {
-    let Some(first) = read_single_byte(input)? else {
+fn read_next_key<S: WizardByteSource>(input: &mut S) -> io::Result<Option<WizardKey>> {
+    let Some(first) = input.next_byte()? else {
         return Ok(None);
     };
 
@@ -973,10 +1109,10 @@ fn read_next_key<R: Read>(input: &mut R) -> io::Result<Option<WizardKey>> {
         b'j' => WizardKey::Down,
         b' ' | b'\r' | b'\n' => WizardKey::Toggle,
         b'0'..=b'9' => WizardKey::Digit(first - b'0'),
-        0x1b => match read_single_byte(input)? {
+        0x1b => match input.next_escape_followup_byte()? {
             None => WizardKey::Cancel,
             Some(b'[') => consume_csi_sequence(input)?,
-            Some(b'O') => match read_single_byte(input)? {
+            Some(b'O') => match input.next_escape_followup_byte()? {
                 Some(b'A') => WizardKey::Up,
                 Some(b'B') => WizardKey::Down,
                 _ => WizardKey::Ignore,
@@ -998,6 +1134,15 @@ fn current_epoch_ms() -> i64 {
 /// Execute the interactive configuration wizard over caller-provided `Read` and `Write` streams.
 pub fn run_wizard_loop<R: Read, W: Write>(
     input: &mut R,
+    output: &mut W,
+    options: &WizardRunOptions,
+) -> io::Result<WizardRunOutcome> {
+    let mut source = StreamByteSource(input);
+    run_wizard_loop_with_source(&mut source, output, options)
+}
+
+fn run_wizard_loop_with_source<S: WizardByteSource, W: Write>(
+    input: &mut S,
     output: &mut W,
     options: &WizardRunOptions,
 ) -> io::Result<WizardRunOutcome> {
@@ -1025,16 +1170,21 @@ pub fn run_wizard_loop<R: Read, W: Write>(
                 output.flush()?;
                 return Ok(WizardRunOutcome::Cancelled);
             }
-            WizardKey::Save => {
-                let saved_path = save_wizard_config(&state)?;
-                writeln!(
-                    output,
-                    "\n\x1b[32m✔ Configuration saved successfully to {}\x1b[0m\n",
-                    saved_path.display()
-                )?;
-                output.flush()?;
-                return Ok(WizardRunOutcome::Saved);
-            }
+            WizardKey::Save => match save_wizard_config(&state)? {
+                SaveAttempt::Saved(saved_path) => {
+                    writeln!(
+                        output,
+                        "\n\x1b[32m✔ Configuration saved successfully to {}\x1b[0m\n",
+                        saved_path.display()
+                    )?;
+                    output.flush()?;
+                    return Ok(WizardRunOutcome::Saved);
+                }
+                SaveAttempt::ValidationFailed(msg) => {
+                    state.status_error = Some(msg);
+                    should_render = true;
+                }
+            },
             WizardKey::Up => {
                 selected_idx = (selected_idx + MENU_ITEMS.len() - 1) % MENU_ITEMS.len();
                 should_render = true;
@@ -1053,16 +1203,21 @@ pub fn run_wizard_loop<R: Read, W: Write>(
             WizardKey::Toggle => {
                 let item = MENU_ITEMS[selected_idx];
                 match item {
-                    MenuItem::Save => {
-                        let saved_path = save_wizard_config(&state)?;
-                        writeln!(
-                            output,
-                            "\n\x1b[32m✔ Configuration saved successfully to {}\x1b[0m\n",
-                            saved_path.display()
-                        )?;
-                        output.flush()?;
-                        return Ok(WizardRunOutcome::Saved);
-                    }
+                    MenuItem::Save => match save_wizard_config(&state)? {
+                        SaveAttempt::Saved(saved_path) => {
+                            writeln!(
+                                output,
+                                "\n\x1b[32m✔ Configuration saved successfully to {}\x1b[0m\n",
+                                saved_path.display()
+                            )?;
+                            output.flush()?;
+                            return Ok(WizardRunOutcome::Saved);
+                        }
+                        SaveAttempt::ValidationFailed(msg) => {
+                            state.status_error = Some(msg);
+                            should_render = true;
+                        }
+                    },
                     MenuItem::Cancel => {
                         writeln!(output, "\n\x1b[90mConfiguration canceled.\x1b[0m\n")?;
                         output.flush()?;
@@ -1085,10 +1240,11 @@ pub fn run_wizard_loop<R: Read, W: Write>(
 
 fn default_target_config_path(cwd: &Path) -> PathBuf {
     let local = cwd.join(CONFIG_FILENAME);
-    if local.exists() {
+    let global = platform::resolve_global_config_dir().join(CONFIG_FILENAME);
+    if !paths_point_to_same_file(&local, &global) && local.exists() {
         local
     } else {
-        platform::resolve_global_config_dir().join(CONFIG_FILENAME)
+        global
     }
 }
 
@@ -1124,9 +1280,9 @@ pub fn run_config_cli() -> i32 {
         clear_screen: true,
     };
 
-    let mut stdin = io::stdin().lock();
+    let mut input = ChannelByteSource::from_stdin();
     let mut stdout = io::stdout().lock();
-    match run_wizard_loop(&mut stdin, &mut stdout, &options) {
+    match run_wizard_loop_with_source(&mut input, &mut stdout, &options) {
         Ok(WizardRunOutcome::Saved | WizardRunOutcome::Cancelled | WizardRunOutcome::EndOfInput) => {
             0
         }
@@ -1135,5 +1291,75 @@ pub fn run_config_cli() -> i32 {
             eprintln!("\n\x1b[31mConfiguration wizard error: {err}\x1b[0m\n");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use tempfile::TempDir;
+
+    struct MpscBlockingReader {
+        rx: mpsc::Receiver<u8>,
+        buf: VecDeque<u8>,
+    }
+
+    impl Read for MpscBlockingReader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            if out.is_empty() {
+                return Ok(0);
+            }
+            if self.buf.is_empty() {
+                match self.rx.recv() {
+                    Ok(b) => self.buf.push_back(b),
+                    Err(_) => return Ok(0),
+                }
+                while let Ok(b) = self.rx.try_recv() {
+                    self.buf.push_back(b);
+                }
+            }
+            let mut n = 0;
+            while n < out.len() {
+                let Some(b) = self.buf.pop_front() else {
+                    break;
+                };
+                out[n] = b;
+                n += 1;
+            }
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn channel_byte_source_cancels_on_lone_esc_without_eof_and_keeps_arrows() {
+        let temp = TempDir::new().ok();
+        let cwd = temp
+            .as_ref()
+            .map(|t| t.path().to_path_buf())
+            .unwrap_or_default();
+        let (tx, rx) = mpsc::channel();
+        for &b in b"\x1b[B \x1b" {
+            let _ = tx.send(b);
+        }
+        // Keep `tx` alive until after `run_wizard_loop_with_source` finishes so EOF is never sent.
+        let mut source = ChannelByteSource::from_reader(
+            MpscBlockingReader {
+                rx,
+                buf: VecDeque::new(),
+            },
+            Duration::from_millis(35),
+        );
+        let mut output = Vec::new();
+        let options = WizardRunOptions {
+            cwd,
+            clear_screen: false,
+            ..WizardRunOptions::default()
+        };
+        let outcome = run_wizard_loop_with_source(&mut source, &mut output, &options);
+        drop(tx);
+        assert!(matches!(outcome, Ok(WizardRunOutcome::Cancelled)));
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("Configuration canceled."));
     }
 }
